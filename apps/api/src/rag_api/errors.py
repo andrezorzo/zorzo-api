@@ -27,6 +27,8 @@ def install(app: FastAPI) -> None:
         trace_id = str(uuid.uuid4())
         request.state.trace_id = trace_id
         started = time.perf_counter()
+        # Bind trace_id to this request's context: every log line emitted while it runs, in any layer,
+        # carries the same id without passing it around. Contextvars keep concurrent async requests apart.
         with structlog.contextvars.bound_contextvars(trace_id=trace_id):
             try:
                 response = await call_next(request)
