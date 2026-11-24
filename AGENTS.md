@@ -88,10 +88,10 @@ adds it there.
   pull request.
 - **Commits:** conventional commits (`docs:`, `feat:`, `fix:` …), short and focused on why.
 - **Review before push:** on the unreviewed diff, run `simplify`, then `code-review` at level `high`; no code
-  reaches GitHub until the review comes back with nothing accepted, plus a `security-review` when the diff touches logs, secrets,
-  configuration, errors or authentication. Fixes from a review are new code and go through the same loop.
-  When a library default affects security (logging, tracebacks, error rendering), check it in the installed
-  source, not from memory.
+  reaches GitHub until the review comes back with nothing accepted, plus a `security-review` when the diff
+  touches logs, secrets, configuration, errors or authentication. Fixes from a review are new code and go
+  through the same loop. When a library default affects security (logging, tracebacks, error rendering), check
+  it in the installed source, not from memory.
 - **Pull request description:** follows `.github/pull_request_template.md`. A task PR has the task title, a
   summary, the plan path, a "Criteria" section with one item per `AC<n>` (the test that proves it, or what
   a human reviewer checks and where) and optional "Notes". Any other PR has "What", "Why" (where it came
