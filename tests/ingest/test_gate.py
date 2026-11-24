@@ -241,3 +241,31 @@ def test_an_allowlisted_number_from_another_country_covers_its_national_form() -
 )
 def test_finds_a_phone_after_other_numbers_or_inside_markup(text: str) -> None:
     assert personal_data(text) == ["pii:phone"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Contato: <tel:+5511987654321>",
+        "Fale com <+55 11 98765-4321>",
+        "&lt;11 98765-4321&gt;",
+        "1 2 3 4 5 6 7 8 9 10 11 12 13 (11)      98765-4321",
+        "1 2 3 4 5 6 7 8 9 10 11 12 13 +55      11      98765-4321",
+        "Ref 2024 11 98765-4321\n\n1 2 3 4 5 6 7 8 9 10 11 12 13",
+        "Ref 2024 11 9 87 65 43 21",
+    ],
+)
+def test_finds_phones_in_brackets_wide_spacing_and_long_groupings(text: str) -> None:
+    assert personal_data(text) == ["pii:phone"]
+
+
+@pytest.mark.parametrize("text", ["Item 11\n\n* 98765-4321 units", "Total 11\n\n98765-4321 units"])
+def test_numbers_in_separate_paragraphs_dont_join(text: str) -> None:
+    assert personal_data(text) == []
+
+
+@pytest.mark.parametrize("text", ["a" + " " * 40_000 + "b", "\n" * 40_000, "+-" * 20_000 + "x"])
+def test_long_padding_is_scanned_quickly(text: str) -> None:
+    started = time.perf_counter()
+    personal_data(text)
+    assert time.perf_counter() - started < 2.0

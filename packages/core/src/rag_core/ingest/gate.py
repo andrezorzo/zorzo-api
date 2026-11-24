@@ -35,14 +35,19 @@ SEMVER = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?")
 # Phones come from Google's libphonenumber, which knows the real numbering plans of Brazil and the US, so a
 # year range or a port number isn't a phone. A line wrapped once inside a number is joined first.
 PHONE_REGIONS = ("BR", "US")
-ONE_LINE_BREAK = re.compile(r"[^\S\n]*\n(?![^\S\n]*\n)[^\S\n]*")
-ODD_SPACE = re.compile(r"[^\S\n]")  # no-break, thin and other spaces the matcher doesn't treat as separators
-# Markup that disappears when the page renders: emphasis, inline code, backslash escapes, inline HTML tags and
-# zero-width characters. A run of it, with the spaces around it, becomes one space.
-INVISIBLE_MARKUP = re.compile(r"(?:\s*(?:[*_`\\\u200b-\u200d\u2060\ufeff]|<[^>\n]{1,40}>)+)+\s*")
-# Digits with separators: a phone may be the tail of a longer run (`Ref 2024 11 98765-4321`).
-NUMBER_RUN = re.compile(r"[\d(+][\d\s().+-]*\d")
+
+# Text preparation for the phone scan, in this order, each step one linear pass (see _prepare_for_phones):
+HTML_TAG = re.compile(r"</?[A-Za-z][\w-]*(?:\s[^<>]*)?>")  # real tags only: `<tel:…>` and `<+55 …>` stay
+MARKUP_CHAR = re.compile(r"[*_`\\\u200b-\u200d\u2060\ufeff]")  # emphasis, code, escapes, zero-width
+# A wrapped line, not a paragraph break. It starts only where a run of spaces starts and never backs off, so a
+# long run of spaces is read once instead of once per space.
+ONE_LINE_BREAK = re.compile(r"(?<![^\S\n])[^\S\n]*+\n(?![^\S\n]*+\n)[^\S\n]*+")
+ODD_SPACE = re.compile(r"[^\S\n]")  # tabs, no-break and thin spaces
+SPACE_RUN = re.compile(r" {2,}")
+# Digits with separators on one line; a phone may hide inside a longer run (`Ref 2024 11 98765-4321`).
+NUMBER_RUN = re.compile(r"[\d(+][\d ().+-]*+")
 MAX_RUN_GROUPS = 12
+MAX_PHONE_DIGITS = 15  # E.164
 CPF = re.compile(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b|\b\d{11}\b")
 CARD = re.compile(r"\b(?:\d[ -]?){12,18}\d\b")
 
@@ -96,26 +101,43 @@ def _is_email_domain(domain: str) -> bool:
     return bool(LETTER_TLD.search(domain))
 
 
+def _prepare_for_phones(text: str) -> str:
+    """The text as it reads on the page, one paragraph per line: what the phone matcher should see."""
+    text = MARKUP_CHAR.sub(" ", HTML_TAG.sub(" ", text))  # markup becomes a space, never glue
+    # Tags are removed before unescaping, so escaped `&lt;…&gt;` stays visible text; markup characters
+    # written as entities (`&#42;`) are removed after it.
+    text = MARKUP_CHAR.sub(" ", html.unescape(text))
+    text = ODD_SPACE.sub(" ", ONE_LINE_BREAK.sub(" ", text))
+    return SPACE_RUN.sub(" ", text)
+
+
+def _windows(run: str) -> list[str]:
+    """Consecutive groups of a sentence-sized run of numbers, up to a phone's digit count."""
+    groups = run.split()
+    if not 1 < len(groups) <= MAX_RUN_GROUPS:
+        return []
+    out = []
+    for i in range(len(groups)):
+        digits = 0
+        for j in range(i, len(groups)):
+            digits += sum(c.isdigit() for c in groups[j])
+            if digits > MAX_PHONE_DIGITS:
+                break
+            out.append(" ".join(groups[i : j + 1]))
+    return out
+
+
 def _phone_spans(text: str) -> set[tuple[int, str]]:
     """(country code, text) of every phone-shaped span, read with each region's numbering plan.
 
     The matcher reads the longest run of digits and separators as one candidate and gives up when the run as
-    a whole isn't a number, so every window of up to five space-separated groups of a run is tried too
-    (`Ref 2024 11 98765-4321`, `123 11 98765-4321 456`).
+    a whole isn't a number, so windows of sentence-sized runs are read too. A long numeric table is read
+    only as a whole: there a phone needs its marker ((DD), +CC) to stand out.
     """
-    prepared = INVISIBLE_MARKUP.sub(" ", html.unescape(text))
-    prepared = ODD_SPACE.sub(" ", ONE_LINE_BREAK.sub(" ", prepared))
+    prepared = _prepare_for_phones(text)
     candidates = [prepared]
     for run in NUMBER_RUN.finditer(prepared):
-        groups = run.group().split()
-        # Sentence-sized runs only: a long numeric table would multiply the work, and the scan of the whole
-        # text still reads a phone in it when its marker ((DD), +CC) sets it apart.
-        if 1 < len(groups) <= MAX_RUN_GROUPS:
-            candidates.extend(
-                " ".join(groups[i:j])
-                for i in range(len(groups))
-                for j in range(i + 1, min(i + 6, len(groups) + 1))
-            )
+        candidates.extend(_windows(run.group().rstrip(" ().+-")))
     return {
         (m.number.country_code or 0, m.raw_string)
         for candidate in candidates
