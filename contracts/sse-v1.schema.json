@@ -109,7 +109,6 @@
       "properties": {
         "mode": {
           "const": "search_only",
-          "default": "search_only",
           "title": "Mode",
           "type": "string"
         },
@@ -125,6 +124,7 @@
         }
       },
       "required": [
+        "mode",
         "reason"
       ],
       "title": "Degraded",

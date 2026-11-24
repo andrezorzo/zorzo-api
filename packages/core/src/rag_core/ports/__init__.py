@@ -124,7 +124,7 @@ class CorpusStore(Protocol):
     async def activate(self, version: int) -> None:
         """The candidate becomes active and the previous active retired, in one transaction.
 
-        Raises LookupError when the version isn't a candidate.
+        Raises LookupError when the version isn't a candidate with documents.
         """
 
     async def published_chunks(self, version: int) -> list[PublishedChunk]: ...

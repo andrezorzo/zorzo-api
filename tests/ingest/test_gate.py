@@ -32,7 +32,20 @@ def test_leaves_years_and_numbers_alone(text: str) -> None:
 
 def test_finds_emails_but_not_asset_names() -> None:
     assert personal_data("Write to joao.silva@gmail.com") == ["pii:email"]
-    assert personal_data("![logo](img/logo@2x.png)") == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "![logo](img/logo@2x.png)",
+        "icon@2x.dark.png",
+        "hero@2x.min.svg",
+        "favicon@2x.ico",
+        "pkg@1.0.0-beta.rc",
+    ],
+)
+def test_leaves_asset_names_and_versions_alone(text: str) -> None:
+    assert personal_data(text) == []
 
 
 def test_allowlist_matches_regardless_of_case() -> None:
@@ -58,17 +71,32 @@ async def test_a_failed_scan_is_an_error_not_a_clean_result(tmp_path: Path) -> N
 
 
 def test_finds_emails_whose_domain_starts_with_a_digit() -> None:
-    assert personal_data("Mail li@163.com or x@1und1.de") == ["pii:email"]
+    assert personal_data("Mail li@163.com or x@1und1.de or a@1password.com") == ["pii:email"]
 
 
-@pytest.mark.parametrize("text", ["Ligue 11 98765 4321.", "Ligue 11 987654321."])
-def test_finds_brazilian_mobiles_without_a_hyphen(text: str) -> None:
-    assert "pii:phone" in personal_data(text)
+def test_finds_brazilian_mobiles_with_a_space() -> None:
+    assert "pii:phone" in personal_data("Ligue 11 98765 4321.")
+
+
+@pytest.mark.parametrize("text", ["Ranked 12 912345678 times", "issue 42\n91234-5678"])
+def test_leaves_plain_numbers_alone(text: str) -> None:
+    assert personal_data(text) == []
 
 
 def test_an_impossible_date_is_a_front_matter_problem() -> None:
     with pytest.raises(FrontMatterError):
         parse("---\n" + VALID + "updated: 2024-13-45\n---\nbody\n")
+
+
+def test_an_unknown_key_is_reported_without_its_name() -> None:
+    with pytest.raises(FrontMatterError) as caught:
+        parse("---\n" + VALID + "joao.silva@gmail.com: true\n---\nbody\n")
+    assert "joao" not in str(caught.value)
+
+
+def test_deeply_nested_front_matter_is_a_problem_not_a_crash() -> None:
+    with pytest.raises(FrontMatterError):
+        parse("---\nx: " + "[" * 5000 + "\n---\nbody\n")
 
 
 class NoSecrets:

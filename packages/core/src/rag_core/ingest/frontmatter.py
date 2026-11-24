@@ -36,7 +36,7 @@ def parse(text: str) -> tuple[DocumentMeta, str]:
         head, body = text[4:].rstrip("\n")[: -len("\n---")], ""
     try:
         raw = yaml.safe_load(head)
-    except (yaml.YAMLError, ValueError, TypeError):  # PyYAML builds dates while loading
+    except Exception:  # bad YAML, an impossible date (PyYAML builds dates), nesting too deep
         raise FrontMatterError("invalid front matter (unreadable YAML)") from None
     if not isinstance(raw, dict):
         raise FrontMatterError("invalid front matter (not a mapping)")
@@ -44,6 +44,18 @@ def parse(text: str) -> tuple[DocumentMeta, str]:
         meta = DocumentMeta.model_validate(raw)
     except ValidationError as exc:
         # Only the field names: a value could be what the gate is protecting.
-        fields = ", ".join(sorted({str(e["loc"][0]) for e in exc.errors() if e["loc"]})) or "values"
+        # An unknown key's name could itself be personal data, so it is reported as "unknown field".
+        fields = (
+            ", ".join(
+                sorted(
+                    {
+                        "unknown field" if e["type"] == "extra_forbidden" else str(e["loc"][0])
+                        for e in exc.errors()
+                        if e["loc"]
+                    }
+                )
+            )
+            or "values"
+        )
         raise FrontMatterError(f"invalid front matter ({fields})") from None
     return meta, body

@@ -130,6 +130,15 @@ def test_refuses_to_activate_a_version_that_is_not_a_candidate(db: str, source: 
     assert "activation_refused" in again.output
 
 
+def test_refuses_to_activate_an_empty_candidate(db: str, tmp_path: Path) -> None:
+    version = rows(
+        db, "INSERT INTO corpus_versions (embed_model_tag) VALUES ('fake-hash-v1') RETURNING version"
+    )
+    run = ingest(db, tmp_path / "data", "--activate-version", str(version[0][0]))
+    assert run.code == 1
+    assert status(db, version[0][0]) == "candidate"
+
+
 def test_lets_the_owners_listed_contact_through(db: str, source: Path, tmp_path: Path) -> None:
     write_doc(source, "contact.md", "Write to andre_zorzo@yahoo.com.")
     run = ingest(db, tmp_path / "data", "--source", str(source))

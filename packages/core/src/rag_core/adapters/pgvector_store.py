@@ -200,11 +200,13 @@ class PgCorpusStore:
                 text("""
                     UPDATE corpus_versions SET status = 'active', activated_at = now()
                     WHERE version = :v AND status = 'candidate'
+                      AND EXISTS (SELECT 1 FROM documents WHERE corpus_version = :v)
                 """),
                 {"v": version},
             )
             if result.rowcount != 1:
-                raise LookupError(f"corpus version {version} is not a candidate")
+                # Rolls back the retirement above: an empty or unknown version never replaces the active one.
+                raise LookupError(f"corpus version {version} is not a candidate with documents")
 
     async def published_chunks(self, version: int) -> list[PublishedChunk]:
         async with self.db.engine.connect() as conn:

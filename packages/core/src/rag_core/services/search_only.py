@@ -48,9 +48,11 @@ async def run_search_only(
             )
         with _stage(sink, "rerank"):
             hits = await retrieval.rerank(question, hits, rerankers=rerankers, limits=limits)
-        sink.record(Degraded(reason=reason))
         shown = [Hit(id=h.id, title=h.title, score=h.score) for h in hits[: limits.degraded_max_passages]]
-        sink.record(Retrieval(hits=shown, corpus_version=corpus.version))
+        retrieval_event = Retrieval(hits=shown, corpus_version=corpus.version)
+        # Everything that can fail runs before `degraded`, which may be followed only by its hits and `done`.
+        sink.record(Degraded(mode="search_only", reason=reason))
+        sink.record(retrieval_event)
     except Exception:
         log.exception("search_only_failed")
         code = ErrorCode.INTERNAL

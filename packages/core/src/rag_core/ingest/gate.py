@@ -13,16 +13,19 @@ from pathlib import Path
 from rag_core.ingest.frontmatter import DocumentMeta, FrontMatterError, parse
 from rag_core.ports import Finding, SecretScanner
 
-# An image extension in the TLD position means an asset name such as `logo@2x.png`, not an email.
+# After the @, three shapes aren't an address: a retina asset (`logo@2x.png`), a version (`pkg@1.0.0`) and
+# any name ending in a file extension (`icon@x.dark.svg`). Digit domains such as 163.com still count.
+ASSET_EXT = r"png|jpe?g|gif|webp|svg|avif|ico|bmp|tiff?|heic|pdf|mp4|webm|zip|tar|gz"
 EMAIL = re.compile(
-    r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.(?!(?:png|jpe?g|gif|webp|svg|avif)\b)[A-Za-z]{2,}\b", re.IGNORECASE
+    rf"[\w.+-]+@(?!\d+x\.)(?!\d+\.\d)(?![\w.-]*\.(?:{ASSET_EXT})\b)[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{{2,}}\b",
+    re.IGNORECASE,
 )
 # Phone formats with a marker that a year range or an id doesn't have: a +country code, parentheses around
-# the area code, or the Brazilian mobile shape "DD 9XXXX-XXXX".
+# the area code, or the Brazilian mobile shape "DD 9XXXX-XXXX" (space or hyphen inside, on one line).
 PHONE = re.compile(
     r"\+\d{1,3}[\s.-]?\(?\d{2,3}\)?[\s.-]?\d{3,5}[\s.-]?\d{4}\b"
     r"|\(\d{2,3}\)\s?\d{3,5}[\s.-]?\d{4}\b"
-    r"|\b\d{2}\s9\d{4}[\s-]?\d{4}\b"
+    r"|\b\d{2}[ \t]9\d{4}[ \t-]\d{4}\b"
 )
 CPF = re.compile(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b|\b\d{11}\b")
 CARD = re.compile(r"\b(?:\d[ -]?){12,18}\d\b")

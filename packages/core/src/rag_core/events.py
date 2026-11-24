@@ -105,7 +105,7 @@ class Blocked(StreamEvent):
 
 class Degraded(StreamEvent):
     kind = "degraded"
-    mode: Literal["search_only"] = "search_only"
+    mode: Literal["search_only"]
     reason: DegradedReason
 
 

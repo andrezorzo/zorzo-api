@@ -41,11 +41,10 @@ async def _activate_and_publish(
     version: int, store: PgCorpusStore, publisher: DataPublisher, settings: IngestSettings, tag: str
 ) -> None:
     # Local development may activate without an eval run; production never does (LLD "6.1 Corpus version").
+    examples = load_examples(settings.domain)  # before activating: a bad file must not leave data unpublished
     await activate(version, store=store, require_eval=settings.app_env != "local")
     log.info("corpus_activated", version=version)
-    folder, files, manifest = publish.build(
-        version, tag, await store.published_chunks(version), load_examples(settings.domain)
-    )
+    folder, files, manifest = publish.build(version, tag, await store.published_chunks(version), examples)
     await publisher.publish(folder, files, manifest)
     log.info("corpus_published", version=version, path=folder)
 
