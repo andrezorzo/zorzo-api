@@ -18,18 +18,20 @@ from rag_core.ports import Finding, SecretScanner
 # not addresses: a retina asset name (`logo@2x.png`, `logo@2x-dark.png`) and a semantic version
 # (`pkg@1.0.0-beta`). It fails closed: `icon@2x.dark.png` is flagged too, because it can't be told from an
 # address inside a file name, and a false hit only means rewording one line.
-EMAIL_CHAIN = re.compile(r"[\w.+-]*(?:@[\w.+-]+)+")
+# Starts only at the beginning of a run and never backs off (possessive), so a long token without `@` is
+# read once instead of once per character.
+EMAIL_CHAIN = re.compile(r"(?<![\w.+-])[\w.+-]*+(?:@[\w.-]++)+")
 LETTER_TLD = re.compile(r"\.[A-Za-z]{2,}(?![A-Za-z0-9])")
 RETINA_ASSET = re.compile(
     r"\d+(?:\.\d+)?x(?:-[\w-]+)?\.(?:png|jpe?g|gif|webp|svg|avif|ico|bmp|tiff?|heic)", re.IGNORECASE
 )
-SEMVER = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?")
+SEMVER = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?")
 
 # Phone formats with a marker that a year range or an id doesn't have: a +country code or parentheses around
 # the area code (a wrapped line may split them), or the Brazilian mobile shape (area code, 9 and eight
 # digits) on one line. `[^\S\n]` is any space but a line break, non-breaking spaces included.
 _SP = r"[^\S\n]"
-_WRAP = r"(?:[^\S\n]|\n(?!\n))"
+_WRAP = r"(?:[^\S\n]*\n(?![^\S\n]*\n)[^\S\n]*|[^\S\n])"  # spaces, or one line break with indentation
 PHONE = re.compile(
     rf"\+\d{{1,3}}(?:{_WRAP}|[.-])?\(?\d{{2,3}}\)?(?:{_WRAP}|[.-])?\d{{3,5}}(?:{_SP}|[.-])?\d{{4}}\b"
     rf"|\(\d{{2,3}}\){_WRAP}?\d{{3,5}}(?:{_SP}|[.-])?\d{{4}}\b"
@@ -81,18 +83,26 @@ def _emails(text: str) -> list[str]:
 
 
 def _is_email_domain(domain: str) -> bool:
-    if RETINA_ASSET.fullmatch(domain) or SEMVER.fullmatch(domain):
+    version = SEMVER.fullmatch(domain)
+    # A version suffix ending in a letter label (`1.2.3-mail.com`) may be a host, so it isn't exempt.
+    if RETINA_ASSET.fullmatch(domain) or (version and not LETTER_TLD.search(domain.partition("-")[2])):
         return False
     return bool(LETTER_TLD.search(domain))
 
 
+def _same_spaces(value: str) -> str:
+    return re.sub(r"\s+", " ", value).lower()
+
+
 def personal_data(text: str, allowlist: Iterable[str] = ()) -> list[str]:
     """The PII rules a text breaks; matches equal to an allowlisted string don't count."""
-    allowed = {a.lower() for a in allowlist}
+    # CRLF and non-breaking spaces would otherwise dodge the patterns and the allowlist.
+    text = text.replace("\r\n", "\n")
+    allowed = {_same_spaces(a) for a in allowlist}
     rules = []
-    if any(e.lower() not in allowed for e in _emails(text)):
+    if any(_same_spaces(e) not in allowed for e in _emails(text)):
         rules.append("pii:email")
-    if any(m.group().lower() not in allowed for m in PHONE.finditer(text)):
+    if any(_same_spaces(m.group()) not in allowed for m in PHONE.finditer(text)):
         rules.append("pii:phone")
     if any(_cpf_valid(m.group()) for m in CPF.finditer(text)):
         rules.append("pii:cpf")

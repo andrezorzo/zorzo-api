@@ -55,9 +55,7 @@ async def _activate_and_publish(
 
 async def _main(args: argparse.Namespace, settings: IngestSettings) -> int:
     domain = load_domain(settings.domain)
-    # Read before any write, and only when publishing: a bad file stops the run before it changes anything.
-    publishing = args.activate or args.activate_version is not None
-    examples = load_examples(settings.domain) if publishing else []
+    examples = load_examples(settings.domain)  # read before any write: a bad file stops the run at once
     db = Database(settings.database_url)
     store = PgCorpusStore(db)
     publisher = LocalDataPublisher(settings.data_dir)

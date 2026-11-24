@@ -1,5 +1,6 @@
 """AC1: the gate's PII pass, front matter parsing and secret scan, each in isolation."""
 
+import time
 from pathlib import Path
 
 import pytest
@@ -41,8 +42,8 @@ def test_finds_emails_but_not_asset_names() -> None:
         "logo@2x-dark.png",
         "logo@1.5x.png",
         "favicon@2x.ico",
-        "pkg@1.0.0-beta.rc",
-        "pkg@1.0.0+build.5",
+        "pkg@1.0.0-beta.1",
+        "react@18.2.0",
     ],
 )
 def test_leaves_asset_names_and_versions_alone(text: str) -> None:
@@ -87,6 +88,9 @@ async def test_a_failed_scan_is_an_error_not_a_clean_result(tmp_path: Path) -> N
         "icon@2x.dark.png",
         "user@host@example.com",
         "_joao@gmail.com_",
+        "x@1.2.3-mail.com",
+        # Fails closed: a version suffix ending in a letter label is read as a host.
+        "pkg@1.0.0-beta.rc",
     ],
 )
 def test_finds_emails_that_look_like_asset_names(text: str) -> None:
@@ -111,6 +115,9 @@ def test_finds_brazilian_mobiles(text: str) -> None:
         "(11)\u00a098765-4321",
         "contato: +55 (11)\n98765-4321",
         "(11)\n98765 4321",
+        "(11)\r\n98765-4321",
+        "- contato: (11)\n  98765-4321",
+        "(11) \n98765-4321",
     ],
 )
 def test_finds_phones_across_odd_spaces_and_a_wrapped_line(text: str) -> None:
@@ -147,3 +154,15 @@ async def test_reads_a_file_saved_with_a_byte_order_mark(tmp_path: Path) -> None
     (tmp_path / "bom.md").write_bytes(("﻿---\r\n" + VALID + "---\r\n# T\r\n\r\ntext\r\n").encode())
     documents, problems = await check(tmp_path, NoSecrets(), ())
     assert problems == [] and documents[0].meta.doc_key == "d"
+
+
+def test_allowlisted_contacts_match_across_spaces_and_a_trailing_plus() -> None:
+    allow = ["+55 11 98765-4321", "andre_zorzo@yahoo.com"]
+    assert personal_data("+55\u00a011\u00a098765-4321 and +55 11\n98765-4321", allow) == []
+    assert personal_data("andre_zorzo@yahoo.com+", allow) == []
+
+
+def test_a_long_token_without_an_at_sign_is_scanned_quickly() -> None:
+    started = time.perf_counter()
+    personal_data("a" * 50_000)
+    assert time.perf_counter() - started < 1.0
