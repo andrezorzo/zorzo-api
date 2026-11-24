@@ -17,7 +17,16 @@ if not _database_url:
 DATABASES = {"default": dj_database_url.parse(_database_url)}
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 INSTALLED_APPS = ["django.contrib.postgres", "data"]
-ALLOWED_HOSTS = ["*"] if DEBUG else [h for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "").split(",") if h]
+ALLOWED_HOSTS = (
+    ["*"]
+    if DEBUG
+    else [h.strip() for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "").split(",") if h.strip()]
+)
 USE_TZ = True
 TIME_ZONE = "UTC"
 ROOT_URLCONF = "rag_dashboard.urls"
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "root": {"level": os.environ.get("LOG_LEVEL", "INFO").upper()},
+}

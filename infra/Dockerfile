@@ -10,7 +10,8 @@ COPY domains domains
 RUN uv sync --frozen --no-dev
 ENV PATH="/app/.venv/bin:$PATH"
 # Run as an unprivileged user, so a bug in the app cannot act as root inside the container.
-RUN useradd --system --no-create-home app
+RUN useradd --system --uid 10001 --no-create-home app
+ENV HOME=/tmp
 USER app
 
 FROM base AS dashboard

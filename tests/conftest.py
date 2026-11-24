@@ -50,4 +50,4 @@ def database_url() -> Iterator[str]:
 
 def api_settings(url: str, domain: str = "zorzo") -> ApiSettings:
     """Settings for an API under test, pointing at the given database."""
-    return ApiSettings(app_env="local", domain=domain, database_url=url)
+    return ApiSettings(app_env="local", domain=domain, database_url=url, log_level="INFO")

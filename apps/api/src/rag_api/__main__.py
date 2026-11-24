@@ -17,7 +17,7 @@ def main() -> None:
     except (ValidationError, DomainError) as exc:
         print(f"zorzo-api: refusing to start: {exc}", file=sys.stderr)
         sys.exit(1)
-    uvicorn.run(app, host=settings.host, port=settings.port)
+    uvicorn.run(app, host=settings.host, port=settings.port, log_level=settings.log_level.lower())
 
 
 if __name__ == "__main__":

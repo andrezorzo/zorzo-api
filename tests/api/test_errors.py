@@ -82,14 +82,17 @@ def test_error_trace_id_matches_the_log_line(client: TestClient) -> None:
 
 
 def test_production_logs_keep_the_traceback_of_an_unhandled_error(capsys: pytest.CaptureFixture[str]) -> None:
+    saved = structlog.get_config()
     configure_logging("production")
     try:
         try:
-            raise RuntimeError("boom")
+            secret = "s3cret-local"  # a frame local that must never reach the log
+            raise RuntimeError(f"boom {len(secret)}")
         except RuntimeError:
             structlog.get_logger().exception("unhandled_error")
         out = capsys.readouterr().out
     finally:
-        configure_logging("local")
+        structlog.configure(**saved)
     assert "RuntimeError" in out
     assert "boom" in out
+    assert "s3cret-local" not in out

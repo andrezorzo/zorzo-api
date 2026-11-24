@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 from rag_api.main import create_app
 from rag_core.domain import DomainError
 
@@ -13,7 +14,9 @@ from tests.conftest import api_settings
 
 
 def _start(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    base = {k: v for k, v in os.environ.items() if k not in ("DATABASE_URL", "DOMAIN", "APP_ENV")}
+    base = {
+        k: v for k, v in os.environ.items() if k not in ("DATABASE_URL", "DOMAIN", "APP_ENV", "LOG_LEVEL")
+    }
     return subprocess.run(
         [sys.executable, "-m", "rag_api"],
         env={**base, "PORT": "0", **env},
@@ -58,3 +61,21 @@ def test_stops_on_an_invalid_domain_config(database_url: str, tmp_path: Path) ->
     result = _start({"DATABASE_URL": database_url, "DOMAIN": "broken", "PYTHONPATH": str(tmp_path)})
     assert result.returncode != 0
     assert "invalid domain config" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("url", "accepted"),
+    [
+        ("postgresql+psycopg://u:p@db:5432/x", True),
+        ("postgresql:///x?host=/var/run/postgresql", True),
+        ("postgresql://u:pa#ss@db:5432/x", False),
+        ("db:5432/x", False),
+    ],
+)
+def test_validates_the_database_url(url: str, accepted: bool) -> None:
+    try:
+        api_settings(url)
+    except ValidationError:
+        assert not accepted
+    else:
+        assert accepted

@@ -20,8 +20,11 @@ class AppSettings(BaseSettings):
     @classmethod
     def _postgres_url(cls, value: str) -> str:
         parts = urlsplit(value)
-        if parts.scheme not in ("postgresql", "postgres") or not parts.hostname:
-            raise ValueError("must be a postgresql://user:password@host:port/name URL")
+        scheme = parts.scheme.split("+", 1)[0]  # postgresql+psycopg is fine
+        has_host = bool(parts.hostname) or "host=" in parts.query  # host= in the query: Unix socket
+        # A fragment means an unencoded '#' (usually in the password) cut the URL short.
+        if scheme not in ("postgresql", "postgres") or not has_host or parts.fragment:
+            raise ValueError("must be a postgresql://user:password@host:port/name URL, percent-encoded")
         return value
 
     @field_validator("log_level", mode="before")
