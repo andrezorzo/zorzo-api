@@ -17,7 +17,7 @@ keep running) → the agent tools (F04; direct answers with sources stay).
 
 | ID | Feature | At the end the visitor can | Depends on | Status |
 | --- | --- | --- | --- | --- |
-| [F01](features/01-grounded-answers/) | Grounded answers | Ask about André's career, projects or how the site was built, in English or Portuguese, watch the steps live and get a cited answer, an honest "not in my sources" or a polite decline; follow up in the same conversation; keep using search when the AI is down; reach André. | — | PRD ready |
+| [F01](features/01-grounded-answers/) | Grounded answers | Ask about André's career, projects or how the site was built, in English or Portuguese, watch the steps live and get a cited answer, an honest "not in my sources" or a polite decline; follow up in the same conversation; keep using search when the AI is down; reach André. | — | spec ready |
 | [F02](features/02-transparency/) | Transparency | Open and share the trace of any answer, see the system's activity, status and budget, and the list of sources. | F01 | PRD ready |
 | [F03](features/03-evals/) | Evals | See the eval results of the live system per layer and language, the trend across versions and what failed. | F01, F02 | PRD ready |
 | [F04](features/04-agent-and-defenses/) | Agent and defenses | Ask what André is working on now and about specific projects and documents, see why a request was blocked, and see the attacks each defense stopped. | F01 | PRD ready |
