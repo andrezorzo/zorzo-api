@@ -1,6 +1,5 @@
 """Structured logs (LLD "Logs"): JSON in production, readable locally; every line carries `trace_id`."""
 
-import importlib.util
 import logging
 
 import structlog
@@ -14,12 +13,8 @@ _TRACEBACKS = structlog.processors.ExceptionRenderer(
 def configure_logging(app_env: str, level: str = "INFO") -> None:
     renderer: structlog.typing.Processor = (
         structlog.dev.ConsoleRenderer(
-            # Frame locals can hold document text or a visitor's question, even in local runs.
-            exception_formatter=(
-                structlog.dev.RichTracebackFormatter(show_locals=False)
-                if importlib.util.find_spec("rich")
-                else structlog.dev.plain_traceback
-            )
+            # Plain tracebacks never print frame locals, which can hold document text or a visitor's question.
+            exception_formatter=structlog.dev.plain_traceback
         )
         if app_env == "local"
         else structlog.processors.JSONRenderer()

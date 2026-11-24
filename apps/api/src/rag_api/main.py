@@ -51,7 +51,7 @@ def create_app(settings: ApiSettings) -> FastAPI:
     app.state.db = db
     app.state.limits = limits
     app.state.embedder = build_embedder(settings)
-    app.state.rerankers = build_rerankers(settings, settings.reranker, settings.rerank_cache_dir)
+    app.state.rerankers = build_rerankers(settings)
     app.state.vector_store = PgVectorStore(db, limits.rrf_k, limits.search_min_similarity)
     app.state.trace_sinks = []  # extra sinks next to the stream (stored trace, F01-T10)
     errors.install(app)

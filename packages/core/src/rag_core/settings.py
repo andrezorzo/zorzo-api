@@ -21,6 +21,9 @@ class AppSettings(BaseSettings):
     embedder: Literal["ollama", "fake"] = "ollama"
     embed_model_tag: str = "bge-m3:567m"
     ollama_url: str = "http://localhost:11434"
+    reranker: Literal["local", "fake"] = "local"
+    # Resolved when settings are built, not at import, so an unusual HOME is a config error, not a crash.
+    rerank_cache_dir: Path = Field(default_factory=lambda: Path.home() / ".cache" / "zorzo-rerank")
 
     @field_validator("database_url")
     @classmethod

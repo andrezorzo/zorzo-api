@@ -7,11 +7,10 @@ from uuid import UUID
 import structlog
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
-from rag_core.errors import DEFAULT_MESSAGE, ErrorCode
-from rag_core.events import Done, Error, StreamEvent
+from rag_core.events import Done, StreamEvent
 from rag_core.services import corpus as corpus_service
 from rag_core.services.question import normalize
-from rag_core.services.search_only import run_search_only
+from rag_core.services.search_only import end_with_error, run_search_only
 from rag_core.services.trace import FanOutSink
 from sse_starlette import EventSourceResponse, ServerSentEvent
 
@@ -59,11 +58,9 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                     limits=state.limits,
                 )
             except Exception:
-                # A failing sink must not leave the visitor's stream open without `done`.
+                # Whatever escaped the service, the visitor's stream still ends with `done`.
                 log.exception("stream_failed")
-                code = ErrorCode.INTERNAL
-                stream.record(Error(code=code.value, message=DEFAULT_MESSAGE[code]))
-                stream.record(Done(trace_id=UUID(trace_id), cached=False, abstained=False, suggestion=None))
+                end_with_error(stream, UUID(trace_id))
 
     async def events() -> AsyncIterator[ServerSentEvent]:
         task = asyncio.create_task(run())

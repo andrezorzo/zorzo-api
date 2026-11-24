@@ -34,8 +34,16 @@ class Example(BaseModel):
     text: str
 
 
+def _package(name: str) -> str:
+    return f"domain_{name}"
+
+
+def _read_yaml(name: str, filename: str) -> object:
+    return yaml.safe_load(files(_package(name)).joinpath(filename).read_text())
+
+
 def load_domain(name: str) -> DomainConfig:
-    package = f"domain_{name}"
+    package = _package(name)
     try:
         importlib.import_module(package)
     except ModuleNotFoundError as exc:
@@ -45,21 +53,21 @@ def load_domain(name: str) -> DomainConfig:
     except Exception as exc:
         raise DomainError(f"domain package {package!r} failed to import: {exc}") from exc
     try:
-        raw = yaml.safe_load(files(package).joinpath("domain.yaml").read_text())
-        return DomainConfig.model_validate(raw)
+        return DomainConfig.model_validate(_read_yaml(name, "domain.yaml"))
     except Exception as exc:
         raise DomainError(f"invalid domain config in {package}/domain.yaml: {exc}") from exc
 
 
 def load_examples(name: str) -> list[Example]:
-    package = f"domain_{name}"
     try:
-        raw = yaml.safe_load(files(package).joinpath("examples.yaml").read_text())
+        raw = _read_yaml(name, "examples.yaml")
+        if not isinstance(raw, list):
+            raise ValueError("expected a list of questions")
         return [Example.model_validate(item) for item in raw]
     except Exception as exc:
-        raise DomainError(f"invalid example questions in {package}/examples.yaml: {exc}") from exc
+        raise DomainError(f"invalid example questions in {_package(name)}/examples.yaml: {exc}") from exc
 
 
 def corpus_dir(name: str) -> Path:
     """The domain package's `corpus/` folder, the ingest command's default source."""
-    return Path(str(files(f"domain_{name}").joinpath("corpus")))
+    return Path(str(files(_package(name)).joinpath("corpus")))

@@ -3,10 +3,10 @@
 Vectors travel as pgvector's text form (`[1,2,3]`) with explicit casts, so no driver adapter is needed.
 """
 
-import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from pgvector import Vector
 from sqlalchemy import text
 
 from rag_core.adapters.postgres import Database
@@ -48,7 +48,11 @@ ORDER BY f.score DESC, c.id
 
 
 def to_vector(values: list[float]) -> str:
-    return "[" + ",".join(repr(float(v)) for v in values) + "]"
+    return str(Vector(values).to_text())
+
+
+def from_vector(text_value: str) -> list[float]:
+    return [float(v) for v in Vector.from_text(text_value).to_list()]
 
 
 class PgVectorStore:
@@ -133,7 +137,7 @@ class PgCorpusStore:
                 """),
                 {"tag": embed_model_tag, "hashes": hashes},
             )
-            return {r.hash: json.loads(r.embedding) for r in rows}
+            return {r.hash: from_vector(r.embedding) for r in rows}
 
     async def write(self, version: int, documents: list[DocumentRow], chunks: list[ChunkRow]) -> None:
         async with self.db.engine.begin() as conn:
@@ -229,7 +233,7 @@ class PgCorpusStore:
                     r.heading_path,
                     r.content,
                     r.source_url,
-                    json.loads(r.embedding),
+                    from_vector(r.embedding),
                 )
                 for r in rows
             ]

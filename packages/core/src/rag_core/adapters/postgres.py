@@ -5,12 +5,17 @@ Django owns the schema (LLD "Data"); this module reflects it at startup and neve
 
 import asyncio
 
-import pgvector.sqlalchemy  # noqa: F401  (registers the `vector` type, so reflection knows it)
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import MetaData, func, make_url, select, text
+from sqlalchemy.dialects.postgresql.base import ischema_names
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 CONNECT_TIMEOUT_S = 5
 PROBE_TIMEOUT_S = 2.0
+
+
+# Reflection must know pgvector's `vector` type to build the chunk and cache tables.
+ischema_names["vector"] = Vector
 
 
 class Database:

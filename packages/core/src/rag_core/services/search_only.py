@@ -28,6 +28,13 @@ def _stage(sink: TraceSink, name: StageName) -> Iterator[None]:
     sink.record(Stage(name=name, status="end", ms=round((time.perf_counter() - started) * 1000)))
 
 
+def end_with_error(sink: TraceSink, trace_id: UUID) -> None:
+    """The end of a stream that hit a bug: `error` then `done`, never an open stream."""
+    code = ErrorCode.INTERNAL
+    sink.record(Error(code=code.value, message=DEFAULT_MESSAGE[code]))
+    sink.record(Done(trace_id=trace_id, cached=False, abstained=False, suggestion=None))
+
+
 async def run_search_only(
     question: str,
     corpus: ActiveCorpus,
@@ -55,6 +62,6 @@ async def run_search_only(
         sink.record(retrieval_event)
     except Exception:
         log.exception("search_only_failed")
-        code = ErrorCode.INTERNAL
-        sink.record(Error(code=code.value, message=DEFAULT_MESSAGE[code]))
+        end_with_error(sink, trace_id)
+        return
     sink.record(Done(trace_id=trace_id, cached=False, abstained=False, suggestion=None))

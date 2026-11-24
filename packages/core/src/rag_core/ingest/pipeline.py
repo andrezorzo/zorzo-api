@@ -5,10 +5,11 @@ from pathlib import Path
 
 import structlog
 
-from rag_core.ingest import gate
+from rag_core.domain import Example
+from rag_core.ingest import gate, publish
 from rag_core.ingest.chunking import ChunkDraft, split
 from rag_core.limits import Limits
-from rag_core.ports import ChunkRow, CorpusStore, DocumentRow, Embedder, Finding, SecretScanner
+from rag_core.ports import ChunkRow, CorpusStore, DataPublisher, DocumentRow, Embedder, Finding, SecretScanner
 
 log = structlog.get_logger()
 
@@ -85,7 +86,7 @@ async def _fill_candidate(
                 authority=meta.authority,
                 source_url=str(meta.source_url) if meta.source_url else None,
                 updated=meta.updated.isoformat() if meta.updated else None,
-                hash=gate.file_hash(doc.raw),
+                hash=doc.hash,
             )
         )
         drafts.extend(
@@ -107,6 +108,24 @@ async def _fill_candidate(
     return Summary(
         version, "candidate", len(doc_rows), len(chunk_rows), len(missing), len(drafts) - len(missing)
     )
+
+
+async def activate_and_publish(
+    version: int,
+    *,
+    store: CorpusStore,
+    publisher: DataPublisher,
+    examples: list[Example],
+    require_eval: bool,
+) -> str:
+    """Activate the version, then publish its brain and corpus data; returns the published folder."""
+    await activate(version, store=store, require_eval=require_eval)
+    tag = await store.embed_model_tag(version)
+    if tag is None:  # unreachable once activated; keeps the type honest
+        raise ActivationRefused(f"corpus version {version} does not exist")
+    folder, files, manifest = publish.build(version, tag, await store.published_chunks(version), examples)
+    await publisher.publish(folder, files, manifest)
+    return folder
 
 
 async def activate(version: int, *, store: CorpusStore, require_eval: bool) -> None:

@@ -46,6 +46,8 @@ MARKUP_CHAR = re.compile(r"[*_`\\\u200b-\u200d\u2060\ufeff]")  # emphasis, code,
 ONE_LINE_BREAK = re.compile(r"(?<![^\S\n])[^\S\n]*+\n(?![^\S\n]*+\n)[^\S\n]*+")
 ODD_SPACE = re.compile(r"[^\S\n]")  # tabs, no-break and thin spaces
 SPACE_RUN = re.compile(r" {2,}")
+WHITESPACE = re.compile(r"\s+")
+DIGITS = re.compile(r"\d+")
 # Digits with separators on one line; a phone may hide inside a longer run (`Ref 2024 11 98765-4321`).
 NUMBER_RUN = re.compile(r"[\d(+][\d ().+-]*+")
 MAX_RUN_GROUPS = 12
@@ -57,14 +59,9 @@ CARD = re.compile(r"\b(?:\d[ -]?){12,18}\d\b")
 
 @dataclass(frozen=True)
 class Document:
-    path: Path
     meta: DocumentMeta
     body: str
-    raw: bytes
-
-
-def file_hash(raw: bytes) -> str:
-    return hashlib.sha256(raw).hexdigest()
+    hash: str  # SHA-256 of the file, stored with the document
 
 
 def _cpf_valid(value: str) -> bool:
@@ -131,8 +128,8 @@ def _windows(run: str) -> list[str]:
     return out
 
 
-def _phone_spans(text: str) -> set[tuple[int, str]]:
-    """(country code, text) of every phone-shaped span, read with each region's numbering plan.
+def _phone_spans(text: str) -> dict[str, set[int]]:
+    """The text of every phone-shaped span, with the country codes of its readings in each region's plan.
 
     The matcher reads the longest run of digits and separators as one candidate and gives up when the run as
     a whole isn't a number, so windows of sentence-sized runs are read too. A long numeric table is read
@@ -142,19 +139,19 @@ def _phone_spans(text: str) -> set[tuple[int, str]]:
     candidates = [prepared]
     for run in NUMBER_RUN.finditer(prepared):
         candidates.extend(_windows(run.group().rstrip(" ().+-")))
-    return {
-        (m.number.country_code or 0, m.raw_string)
-        for candidate in candidates
-        for region in PHONE_REGIONS
-        # The default stops after 65,535 candidates, which would leave the end of a long document unread.
-        for m in phonenumbers.PhoneNumberMatcher(
-            candidate, region, leniency=phonenumbers.Leniency.VALID, max_tries=sys.maxsize
-        )
-    }
+    spans: dict[str, set[int]] = {}
+    for candidate in candidates:
+        for region in PHONE_REGIONS:
+            # The default stops after 65,535 candidates, which would leave the end of a long document unread.
+            for m in phonenumbers.PhoneNumberMatcher(
+                candidate, region, leniency=phonenumbers.Leniency.VALID, max_tries=sys.maxsize
+            ):
+                spans.setdefault(m.raw_string, set()).add(m.number.country_code or 0)
+    return spans
 
 
 def _digit_groups(text: str) -> tuple[str, ...]:
-    return tuple(re.findall(r"\d+", text))
+    return tuple(DIGITS.findall(text))
 
 
 @dataclass(frozen=True)
@@ -190,24 +187,18 @@ def _allowed_phone_shapes(allowlist: tuple[str, ...]) -> _PhoneShapes:
 
 
 def _unlisted_phone(text: str, allowlist: tuple[str, ...], allowed_strings: set[str]) -> bool:
+    """A phone the allowlist doesn't cover: neither its exact text nor its shape in one of its countries."""
     shapes = _allowed_phone_shapes(allowlist)
-    readings: dict[str, list[int]] = {}
-    for country, raw in _phone_spans(text):
-        readings.setdefault(raw, []).append(country)
-
-    def covered(raw: str, countries: list[int]) -> bool:
-        groups = _digit_groups(raw)
-        return (
-            _same_spaces(raw) in allowed_strings
-            or groups in shapes.international
-            or any((country, groups) in shapes.national for country in countries)
-        )
-
-    return any(not covered(raw, countries) for raw, countries in readings.items())
+    return any(
+        _same_spaces(raw) not in allowed_strings
+        and _digit_groups(raw) not in shapes.international
+        and not any((country, _digit_groups(raw)) in shapes.national for country in countries)
+        for raw, countries in _phone_spans(text).items()
+    )
 
 
 def _same_spaces(value: str) -> str:
-    return re.sub(r"\s+", " ", value).lower()
+    return WHITESPACE.sub(" ", value).lower()
 
 
 def personal_data(text: str, allowlist: Iterable[str] = ()) -> list[str]:
@@ -229,9 +220,8 @@ def personal_data(text: str, allowlist: Iterable[str] = ()) -> list[str]:
 
 
 async def check(
-    source: Path, scanner: SecretScanner, allowlist: Iterable[str]
+    source: Path, scanner: SecretScanner, allowlist: tuple[str, ...]
 ) -> tuple[list[Document], list[Finding]]:
-    allowlist = tuple(allowlist)  # used once per document
     documents: list[Document] = []
     problems: list[Finding] = []
     seen: set[str] = set()
@@ -254,6 +244,6 @@ async def check(
         seen.add(meta.doc_key)
         # The whole text: front matter values (the title) are published and indexed too.
         problems.extend(Finding(path.name, rule) for rule in personal_data(text, allowlist))
-        documents.append(Document(path, meta, body, raw))
+        documents.append(Document(meta, body, hashlib.sha256(raw).hexdigest()))
     problems.extend(await scanner.scan(source))
     return documents, problems
