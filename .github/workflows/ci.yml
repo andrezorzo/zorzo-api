@@ -25,6 +25,7 @@ jobs:
     env:
       TEST_DATABASE_ADMIN_URL: postgresql://zorzo:zorzo@localhost:5432/postgres
       DATABASE_URL: postgresql://zorzo:zorzo@localhost:5432/zorzo
+      APP_ENV: local
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6

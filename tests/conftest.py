@@ -36,7 +36,7 @@ def create_migrated_database() -> str:
 
 
 def drop_database(url: str) -> None:
-    name = url.rpartition("/")[2]
+    name = make_url(url).database
     with psycopg.connect(ADMIN_URL, autocommit=True) as conn:
         conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
 

@@ -19,9 +19,11 @@ def create_app(settings: ApiSettings) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        await db.reflect()
-        yield
-        await db.close()
+        try:
+            await db.reflect()
+            yield
+        finally:
+            await db.close()
 
     app = FastAPI(title="zorzo-api", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.domain = domain

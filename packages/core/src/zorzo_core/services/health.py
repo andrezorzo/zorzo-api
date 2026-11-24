@@ -3,7 +3,11 @@
 from dataclasses import dataclass
 from typing import Literal
 
+import structlog
+
 from zorzo_core.ports import HealthProbe
+
+log = structlog.get_logger()
 
 
 @dataclass(frozen=True)
@@ -22,6 +26,7 @@ async def check(probe: HealthProbe) -> HealthReport:
         await probe.ping()
         degraded = await probe.degraded_today()
     except Exception:
+        log.warning("health_check_failed", exc_info=True)
         # The mode lives in the database: without it, it can't be known.
         return HealthReport(status="down", mode="unknown", db="down")
     return HealthReport(status="ok", mode="degraded" if degraded else "normal", db="ok")

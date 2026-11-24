@@ -26,7 +26,11 @@ def load_domain(name: str) -> DomainConfig:
     try:
         importlib.import_module(package)
     except ModuleNotFoundError as exc:
-        raise DomainError(f"domain package {package!r} not found (DOMAIN={name!r})") from exc
+        if exc.name == package:
+            raise DomainError(f"domain package {package!r} not found (DOMAIN={name!r})") from exc
+        raise DomainError(f"domain package {package!r} failed to import: {exc}") from exc
+    except Exception as exc:
+        raise DomainError(f"domain package {package!r} failed to import: {exc}") from exc
     try:
         raw = yaml.safe_load(files(package).joinpath("domain.yaml").read_text())
         return DomainConfig.model_validate(raw)

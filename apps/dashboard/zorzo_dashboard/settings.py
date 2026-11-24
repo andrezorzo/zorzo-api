@@ -4,7 +4,7 @@ import os
 
 import dj_database_url
 
-APP_ENV = os.environ.get("APP_ENV", "local")
+APP_ENV = os.environ.get("APP_ENV", "production")
 DEBUG = APP_ENV == "local"
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "local-only-not-secret" if DEBUG else "")
 if not SECRET_KEY:

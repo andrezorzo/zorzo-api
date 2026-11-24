@@ -82,17 +82,13 @@ forbidden_modules = ["zorzo_api", "zorzo_ingest", "domain_zorzo"]
 [[tool.importlinter.contracts]]
 name = "only core adapters use network clients"
 type = "forbidden"
-source_modules = [
-    "zorzo_core.errors",
-    "zorzo_core.ports",
-    "zorzo_core.services",
-    "zorzo_core.domain",
-    "zorzo_core.settings",
-    "zorzo_core.telemetry",
-    "zorzo_api",
-    "zorzo_ingest",
-    "domain_zorzo",
-]
+source_modules = ["zorzo_core", "zorzo_api", "zorzo_ingest", "domain_zorzo"]
 forbidden_modules = ["sqlalchemy", "psycopg", "httpx"]
+ignore_imports = [
+    "zorzo_core.adapters.** -> sqlalchemy",
+    "zorzo_core.adapters.** -> psycopg",
+    "zorzo_core.adapters.** -> httpx",
+]
 # Apps wire adapters at startup, so an app reaching a client through an adapter is allowed.
 allow_indirect_imports = true
+unmatched_ignore_imports_alerting = "none"
