@@ -1156,7 +1156,7 @@ requires-dist = [
     { name = "langchain-text-splitters", specifier = ">=1.2.0" },
     { name = "numpy", specifier = ">=2.5.5" },
     { name = "pgvector", specifier = ">=0.5.1" },
-    { name = "phonenumbers", specifier = "==9.0.42" },
+    { name = "phonenumbers", specifier = ">=9.0.42,<10" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.8" },
     { name = "pydantic-settings", specifier = ">=2.4" },

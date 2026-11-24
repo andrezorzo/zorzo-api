@@ -4,9 +4,11 @@ The whole source is checked before anything is embedded or written; a problem na
 never the match (LLD "6.1 Corpus version").
 """
 
+import functools
 import hashlib
 import itertools
 import re
+import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +35,8 @@ SEMVER = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?")
 # year range or a port number isn't a phone. A line wrapped once inside a number is joined first.
 PHONE_REGIONS = ("BR", "US")
 ONE_LINE_BREAK = re.compile(r"[^\S\n]*\n(?![^\S\n]*\n)[^\S\n]*")
+ODD_SPACE = re.compile(r"[^\S\n]")  # no-break, thin and other spaces the matcher doesn't treat as separators
+LETTER_DIGIT = re.compile(r"(?<=[^\W\d_])(?=[\d+(])|(?<=[\d)])(?=[^\W\d_])")  # `Tel11…`, `…4321abc`
 CPF = re.compile(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b|\b\d{11}\b")
 CARD = re.compile(r"\b(?:\d[ -]?){12,18}\d\b")
 
@@ -87,13 +91,30 @@ def _is_email_domain(domain: str) -> bool:
 
 
 def _phones(text: str) -> set[str]:
-    """Every phone number in the text, in E.164 form."""
-    joined = ONE_LINE_BREAK.sub(" ", text)
+    """Every phone number in the text, in E.164 form, read with each region's numbering plan."""
+    prepared = LETTER_DIGIT.sub(" ", ODD_SPACE.sub(" ", ONE_LINE_BREAK.sub(" ", text)))
     return {
         phonenumbers.format_number(m.number, phonenumbers.PhoneNumberFormat.E164)
         for region in PHONE_REGIONS
-        for m in phonenumbers.PhoneNumberMatcher(joined, region, leniency=phonenumbers.Leniency.VALID)
+        # The default stops after 65,535 candidates, which would leave the end of a long document unread.
+        for m in phonenumbers.PhoneNumberMatcher(
+            prepared, region, leniency=phonenumbers.Leniency.VALID, max_tries=sys.maxsize
+        )
     }
+
+
+@functools.cache
+def _allowed_phones(allowlist: tuple[str, ...]) -> frozenset[str]:
+    """Allowlisted phones must carry their +country code, so one entry stands for exactly one number."""
+    allowed = set()
+    for entry in allowlist:
+        try:
+            number = phonenumbers.parse(entry, None)
+        except phonenumbers.NumberParseException:
+            continue  # not a phone (an email, for instance)
+        if phonenumbers.is_valid_number(number):
+            allowed.add(phonenumbers.format_number(number, phonenumbers.PhoneNumberFormat.E164))
+    return frozenset(allowed)
 
 
 def _same_spaces(value: str) -> str:
@@ -104,11 +125,12 @@ def personal_data(text: str, allowlist: Iterable[str] = ()) -> list[str]:
     """The PII rules a text breaks; matches equal to an allowlisted string don't count."""
     # CRLF and non-breaking spaces would otherwise dodge the patterns and the allowlist.
     text = text.replace("\r\n", "\n")
+    allowlist = tuple(allowlist)
     allowed = {_same_spaces(a) for a in allowlist}
     rules = []
     if any(_same_spaces(e) not in allowed for e in _emails(text)):
         rules.append("pii:email")
-    if _phones(text) - _phones("\n\n".join(allowlist)):
+    if _phones(text) - _allowed_phones(allowlist):
         rules.append("pii:phone")
     if any(_cpf_valid(m.group()) for m in CPF.finditer(text)):
         rules.append("pii:cpf")

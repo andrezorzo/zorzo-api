@@ -118,6 +118,13 @@ def test_finds_brazilian_mobiles(text: str) -> None:
         "(11)\r\n98765-4321",
         "- contato: (11)\n  98765-4321",
         "(11) \n98765-4321",
+        "11\u202f98765\u20094321",
+        "+55\u202f11\u202f98765\u20094321",
+        "(11)\u200998765-4321",
+        "Tel11987654321",
+        "(11)98765-4321abc",
+        # Fails closed: a wrapped issue number can't be told from a wrapped phone.
+        "issue 42\n91234-5678",
     ],
 )
 def test_finds_phones_across_odd_spaces_and_a_wrapped_line(text: str) -> None:
@@ -166,3 +173,17 @@ def test_a_long_token_without_an_at_sign_is_scanned_quickly() -> None:
     started = time.perf_counter()
     personal_data("a" * 50_000)
     assert time.perf_counter() - started < 1.0
+
+
+def test_finds_a_phone_after_a_long_run_of_numbers() -> None:
+    assert personal_data("1 " * 70_000 + "(11) 98765-4321") == ["pii:phone"]
+
+
+def test_an_allowlisted_number_doesnt_cover_the_same_digits_in_another_country() -> None:
+    # +1 415-555-0132 is allowlisted; the Curitiba number with the same digits is someone else's.
+    assert personal_data("(41) 5555-0132", ["+1 415-555-0132"]) == ["pii:phone"]
+    assert personal_data("+1 (415) 555-0132", ["+1 415-555-0132"]) == []
+
+
+def test_the_allowlist_can_be_any_iterable() -> None:
+    assert personal_data("(11) 98765-4321", (a for a in ["+55 11 98765-4321"])) == []
