@@ -37,7 +37,9 @@ SEMVER = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?")
 PHONE_REGIONS = ("BR", "US")
 
 # Text preparation for the phone scan, in this order, each step one linear pass (see _prepare_for_phones):
-HTML_TAG = re.compile(r"</?[A-Za-z][\w-]*(?:\s[^<>]*)?>")  # real tags only: `<tel:…>` and `<+55 …>` stay
+# Real tags only (`<tel:…>` and `<+55 …>` stay), on one line and bounded, so a stray `<word` never swallows
+# the paragraphs after it.
+HTML_TAG = re.compile(r"</?[A-Za-z][\w-]*(?:\s[^<>\n]{0,200})?>")
 MARKUP_CHAR = re.compile(r"[*_`\\\u200b-\u200d\u2060\ufeff]")  # emphasis, code, escapes, zero-width
 # A wrapped line, not a paragraph break. It starts only where a run of spaces starts and never backs off, so a
 # long run of spaces is read once instead of once per space.
@@ -48,6 +50,7 @@ SPACE_RUN = re.compile(r" {2,}")
 NUMBER_RUN = re.compile(r"[\d(+][\d ().+-]*+")
 MAX_RUN_GROUPS = 12
 MAX_PHONE_DIGITS = 15  # E.164
+MAX_WINDOW_GROUPS = 6  # a phone is rarely written in more groups
 CPF = re.compile(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b|\b\d{11}\b")
 CARD = re.compile(r"\b(?:\d[ -]?){12,18}\d\b")
 
@@ -121,7 +124,7 @@ def _windows(run: str) -> list[str]:
         digits = 0
         for j in range(i, len(groups)):
             digits += sum(c.isdigit() for c in groups[j])
-            if digits > MAX_PHONE_DIGITS:
+            if digits > MAX_PHONE_DIGITS or j - i >= MAX_WINDOW_GROUPS:
                 break
             out.append(" ".join(groups[i : j + 1]))
     return out

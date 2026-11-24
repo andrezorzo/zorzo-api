@@ -269,3 +269,13 @@ def test_long_padding_is_scanned_quickly(text: str) -> None:
     started = time.perf_counter()
     personal_data(text)
     assert time.perf_counter() - started < 2.0
+
+
+def test_an_unclosed_angle_bracket_doesnt_swallow_the_paragraphs_after_it() -> None:
+    assert personal_data("Escreva <nome aqui\n\nLigue 11 98765-4321\n\nfim>") == ["pii:phone"]
+
+
+def test_tables_of_small_numbers_are_scanned_quickly() -> None:
+    started = time.perf_counter()
+    personal_data("1 2 3 4 5 6 7 8 9 10 11 12 x " * 300)
+    assert time.perf_counter() - started < 3.0
