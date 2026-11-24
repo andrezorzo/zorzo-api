@@ -1,5 +1,5 @@
 [project]
-name = "zorzo-dashboard"
+name = "rag-dashboard"
 version = "0.1.0"
 description = "Django: public dashboard pages and the schema owner"
 requires-python = ">=3.13,<3.14"
@@ -10,4 +10,4 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["zorzo_dashboard", "data"]
+packages = ["rag_dashboard", "data"]

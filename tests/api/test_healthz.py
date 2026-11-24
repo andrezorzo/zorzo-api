@@ -5,7 +5,7 @@ from collections.abc import Iterator
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
-from zorzo_api.main import create_app
+from rag_api.main import create_app
 
 from tests.conftest import api_settings, create_migrated_database, drop_database
 

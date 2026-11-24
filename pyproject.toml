@@ -4,10 +4,10 @@ version = "0.1.0"
 description = "Backend of zorzo.dev.br"
 requires-python = ">=3.13,<3.14"
 dependencies = [
-    "zorzo-core",
-    "zorzo-api-app",
-    "zorzo-dashboard",
-    "zorzo-ingest",
+    "rag-core",
+    "rag-api",
+    "rag-dashboard",
+    "rag-ingest",
     "domain-zorzo",
 ]
 
@@ -18,10 +18,10 @@ package = false
 members = ["packages/core", "apps/api", "apps/dashboard", "apps/ingest", "domains/zorzo"]
 
 [tool.uv.sources]
-zorzo-core = { workspace = true }
-zorzo-api-app = { workspace = true }
-zorzo-dashboard = { workspace = true }
-zorzo-ingest = { workspace = true }
+rag-core = { workspace = true }
+rag-api = { workspace = true }
+rag-dashboard = { workspace = true }
+rag-ingest = { workspace = true }
 domain-zorzo = { workspace = true }
 
 [dependency-groups]
@@ -61,7 +61,7 @@ module = ["dj_database_url.*"]
 ignore_missing_imports = true
 
 [tool.django-stubs]
-django_settings_module = "zorzo_dashboard.settings"
+django_settings_module = "rag_dashboard.settings"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -70,24 +70,30 @@ asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
 
 [tool.importlinter]
-root_packages = ["zorzo_core", "zorzo_api", "zorzo_ingest", "domain_zorzo"]
+root_packages = ["rag_core", "rag_api", "rag_ingest", "rag_dashboard", "data", "domain_zorzo"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "core never imports apps or domains"
 type = "forbidden"
-source_modules = ["zorzo_core"]
-forbidden_modules = ["zorzo_api", "zorzo_ingest", "domain_zorzo"]
+source_modules = ["rag_core"]
+forbidden_modules = ["rag_api", "rag_ingest", "domain_zorzo"]
+
+[[tool.importlinter.contracts]]
+name = "dashboard never imports core (ADR 0015)"
+type = "forbidden"
+source_modules = ["rag_dashboard", "data"]
+forbidden_modules = ["rag_core"]
 
 [[tool.importlinter.contracts]]
 name = "only core adapters use network clients"
 type = "forbidden"
-source_modules = ["zorzo_core", "zorzo_api", "zorzo_ingest", "domain_zorzo"]
+source_modules = ["rag_core", "rag_api", "rag_ingest", "domain_zorzo"]
 forbidden_modules = ["sqlalchemy", "psycopg", "httpx"]
 ignore_imports = [
-    "zorzo_core.adapters.** -> sqlalchemy",
-    "zorzo_core.adapters.** -> psycopg",
-    "zorzo_core.adapters.** -> httpx",
+    "rag_core.adapters.** -> sqlalchemy",
+    "rag_core.adapters.** -> psycopg",
+    "rag_core.adapters.** -> httpx",
 ]
 # Apps wire adapters at startup, so an app reaching a client through an adapter is allowed.
 allow_indirect_imports = true

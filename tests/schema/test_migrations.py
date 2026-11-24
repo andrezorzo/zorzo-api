@@ -133,7 +133,7 @@ def test_allows_one_active_corpus_version(database_url: str) -> None:
 
 
 async def test_api_reflection_matches_the_migrations(database_url: str) -> None:
-    from zorzo_core.adapters.postgres import Database
+    from rag_core.adapters.postgres import Database
 
     db = Database(database_url)
     await db.reflect()

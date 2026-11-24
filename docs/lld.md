@@ -121,7 +121,7 @@ flowchart LR
 
 Boxes are piece types; an arrow is an allowed call; anything without an arrow is not allowed.
 
-Rules: no cycles; `core` never imports `apps/` or `domains/`; nothing outside `core/adapters` opens a network
+Rules: no cycles; `core` never imports `apps/` or `domains/`; the dashboard never imports `core` (ADR 0015); nothing outside `core/adapters` opens a network
 connection; the domain is chosen by `DOMAIN` and loaded by the apps, never by `core`.
 
 **Ports**

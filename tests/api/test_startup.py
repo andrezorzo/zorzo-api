@@ -6,8 +6,8 @@ import sys
 from pathlib import Path
 
 import pytest
-from zorzo_api.main import create_app
-from zorzo_core.domain import DomainError
+from rag_api.main import create_app
+from rag_core.domain import DomainError
 
 from tests.conftest import api_settings
 
@@ -15,7 +15,7 @@ from tests.conftest import api_settings
 def _start(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     base = {k: v for k, v in os.environ.items() if k not in ("DATABASE_URL", "DOMAIN", "APP_ENV")}
     return subprocess.run(
-        [sys.executable, "-m", "zorzo_api"],
+        [sys.executable, "-m", "rag_api"],
         env={**base, "PORT": "0", **env},
         capture_output=True,
         text=True,

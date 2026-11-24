@@ -1,7 +1,7 @@
 """API settings, validated at startup (LLD "Configuration")."""
 
 from pydantic import Field
-from zorzo_core.settings import AppSettings
+from rag_core.settings import AppSettings
 
 
 class ApiSettings(AppSettings):

@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from zorzo_core.services import health
+from rag_core.services import health
 
 router = APIRouter()
 

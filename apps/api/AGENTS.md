@@ -10,12 +10,12 @@ Run from the repository root, with Postgres up (`docker compose -f infra/compose
 
 | What | Command |
 | --- | --- |
-| Run the API locally | `DOMAIN=zorzo DATABASE_URL=postgresql://zorzo:zorzo@localhost:5432/zorzo APP_ENV=local uv run python -m zorzo_api` |
+| Run the API locally | `DOMAIN=zorzo DATABASE_URL=postgresql://zorzo:zorzo@localhost:5432/zorzo APP_ENV=local uv run python -m rag_api` |
 | Tests of this app | `uv run pytest tests/api -q` |
 
 ## Practices
 
-- Routes raise `ApiError` from `zorzo_core.errors`; never build an error body by hand.
+- Routes raise `ApiError` from `rag_core.errors`; never build an error body by hand.
 - Routes never touch the database or a provider directly: they call core services.
 - Every request has a `trace_id`, bound to the log context and returned in error bodies.
 

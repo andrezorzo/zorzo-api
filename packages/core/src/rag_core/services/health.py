@@ -5,7 +5,7 @@ from typing import Literal
 
 import structlog
 
-from zorzo_core.ports import HealthProbe
+from rag_core.ports import HealthProbe
 
 log = structlog.get_logger()
 

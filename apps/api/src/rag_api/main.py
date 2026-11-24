@@ -4,12 +4,12 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from zorzo_core.adapters.postgres import Database
-from zorzo_core.domain import load_domain
-from zorzo_core.telemetry import configure_logging
+from rag_core.adapters.postgres import Database
+from rag_core.domain import load_domain
+from rag_core.telemetry import configure_logging
 
-from zorzo_api import errors, health
-from zorzo_api.settings import ApiSettings
+from rag_api import errors, health
+from rag_api.settings import ApiSettings
 
 
 def create_app(settings: ApiSettings) -> FastAPI:

@@ -20,4 +20,4 @@ INSTALLED_APPS = ["django.contrib.postgres", "data"]
 ALLOWED_HOSTS = ["*"] if DEBUG else []
 USE_TZ = True
 TIME_ZONE = "UTC"
-ROOT_URLCONF = "zorzo_dashboard.urls"
+ROOT_URLCONF = "rag_dashboard.urls"

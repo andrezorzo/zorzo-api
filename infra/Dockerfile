@@ -15,4 +15,4 @@ CMD ["python", "apps/dashboard/manage.py", "migrate", "--noinput"]
 
 FROM base AS api
 EXPOSE 8000
-CMD ["python", "-m", "zorzo_api"]
+CMD ["python", "-m", "rag_api"]

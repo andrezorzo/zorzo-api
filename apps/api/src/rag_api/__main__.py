@@ -4,10 +4,10 @@ import sys
 
 import uvicorn
 from pydantic import ValidationError
-from zorzo_core.domain import DomainError
+from rag_core.domain import DomainError
 
-from zorzo_api.main import create_app
-from zorzo_api.settings import ApiSettings
+from rag_api.main import create_app
+from rag_api.settings import ApiSettings
 
 
 def main() -> None:

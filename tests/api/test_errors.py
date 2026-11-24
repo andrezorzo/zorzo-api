@@ -6,9 +6,9 @@ import pytest
 from fastapi import APIRouter
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
+from rag_api.main import create_app
+from rag_core.errors import ApiError, ErrorCode
 from structlog.testing import capture_logs
-from zorzo_api.main import create_app
-from zorzo_core.errors import ApiError, ErrorCode
 
 from tests.conftest import api_settings
 

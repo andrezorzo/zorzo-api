@@ -8,7 +8,7 @@ import structlog
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from zorzo_core.errors import DEFAULT_MESSAGE, STATUS, ApiError, ErrorCode, error_body
+from rag_core.errors import DEFAULT_MESSAGE, STATUS, ApiError, ErrorCode, error_body
 
 log = structlog.get_logger()
 

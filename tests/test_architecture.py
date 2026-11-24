@@ -15,4 +15,4 @@ def test_import_contracts_hold() -> None:
         text=True,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Contracts: 2 kept, 0 broken" in result.stdout
+    assert "Contracts: 3 kept, 0 broken" in result.stdout

@@ -9,8 +9,8 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from rag_api.settings import ApiSettings
 from sqlalchemy import make_url
-from zorzo_api.settings import ApiSettings
 
 ROOT = Path(__file__).resolve().parents[1]
 ADMIN_URL = os.environ.get("TEST_DATABASE_ADMIN_URL", "postgresql://zorzo:zorzo@localhost:5432/postgres")
