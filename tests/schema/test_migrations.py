@@ -188,3 +188,35 @@ def test_delete_rules_live_in_the_database(database_url: str) -> None:
         assert _one(conn.execute("SELECT count(*) FROM trace_spans WHERE trace_id = %s", (trace,))) == 0
         assert _one(conn.execute("SELECT trace_id FROM questions_log WHERE question_scrubbed = 'q'")) is None
         conn.rollback()
+
+
+# Expected rules written out from the F01-T01 contract, not imported from the migration.
+EXPECTED_DELETE_RULES = {
+    ("answer_cache", "corpus_version"): "CASCADE",
+    ("answer_cache", "trace_id"): "SET NULL",
+    ("chunks", "corpus_version"): "CASCADE",
+    ("chunks", "document_id"): "CASCADE",
+    ("corpus_versions", "eval_run_id"): "SET NULL",
+    ("documents", "corpus_version"): "CASCADE",
+    ("eval_results", "eval_run_id"): "CASCADE",
+    ("log_events", "trace_id"): "SET NULL",
+    ("questions_log", "trace_id"): "SET NULL",
+    ("trace_removals", "trace_id"): "CASCADE",
+    ("trace_spans", "trace_id"): "CASCADE",
+}
+
+
+def test_every_delete_rule_lives_in_the_database(database_url: str) -> None:
+    with psycopg.connect(database_url) as conn:
+        rows = conn.execute(
+            """
+            SELECT cls.relname, att.attname,
+                   CASE con.confdeltype WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' ELSE 'OTHER' END
+            FROM pg_constraint con
+            JOIN pg_class cls ON cls.oid = con.conrelid
+            JOIN pg_namespace ns ON ns.oid = cls.relnamespace AND ns.nspname = current_schema()
+            JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = con.conkey[1]
+            WHERE con.contype = 'f' AND con.confdeltype IN ('c', 'n')
+            """
+        ).fetchall()
+    assert {(table, column): rule for table, column, rule in rows} == EXPECTED_DELETE_RULES

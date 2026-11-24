@@ -9,6 +9,9 @@ COPY apps apps
 COPY domains domains
 RUN uv sync --frozen --no-dev
 ENV PATH="/app/.venv/bin:$PATH"
+# Run as an unprivileged user, so a bug in the app cannot act as root inside the container.
+RUN useradd --system --no-create-home app
+USER app
 
 FROM base AS dashboard
 CMD ["python", "apps/dashboard/manage.py", "migrate", "--noinput"]

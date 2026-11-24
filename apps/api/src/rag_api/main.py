@@ -13,7 +13,7 @@ from rag_api.settings import ApiSettings
 
 
 def create_app(settings: ApiSettings) -> FastAPI:
-    configure_logging(settings.app_env)
+    configure_logging(settings.app_env, settings.log_level)
     # The domain package (domain_<name>, ADR 0011) holds what makes the generic core about one
     # person: languages, contact, prompts. DOMAIN selects it.
     domain = load_domain(settings.domain)
@@ -27,7 +27,7 @@ def create_app(settings: ApiSettings) -> FastAPI:
         finally:
             await db.close()
 
-    app = FastAPI(title="zorzo-api", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app = FastAPI(title="zorzo-api", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.domain = domain
     app.state.db = db
     errors.install(app)

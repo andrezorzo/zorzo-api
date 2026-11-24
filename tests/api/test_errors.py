@@ -3,11 +3,13 @@
 from collections.abc import Iterator
 
 import pytest
+import structlog
 from fastapi import APIRouter
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 from rag_api.main import create_app
 from rag_core.errors import ApiError, ErrorCode
+from rag_core.telemetry import configure_logging
 from structlog.testing import capture_logs
 
 from tests.conftest import api_settings
@@ -77,3 +79,17 @@ def test_error_trace_id_matches_the_log_line(client: TestClient) -> None:
     assert len(request_lines) == 1
     assert request_lines[0]["trace_id"] == trace_id
     assert request_lines[0]["status"] == 422
+
+
+def test_production_logs_keep_the_traceback_of_an_unhandled_error(capsys: pytest.CaptureFixture[str]) -> None:
+    configure_logging("production")
+    try:
+        try:
+            raise RuntimeError("boom")
+        except RuntimeError:
+            structlog.get_logger().exception("unhandled_error")
+        out = capsys.readouterr().out
+    finally:
+        configure_logging("local")
+    assert "RuntimeError" in out
+    assert "boom" in out

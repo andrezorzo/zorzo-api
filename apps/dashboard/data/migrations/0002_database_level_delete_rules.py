@@ -30,10 +30,14 @@ def _sql(rule: str) -> str:
 DO $$
 DECLARE name text;
 BEGIN
-  SELECT tc.constraint_name INTO name
+  SELECT tc.constraint_name INTO STRICT name
   FROM information_schema.table_constraints tc
-  JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
-  WHERE tc.table_name = '{table}' AND kcu.column_name = '{column}' AND tc.constraint_type = 'FOREIGN KEY';
+  JOIN information_schema.key_column_usage kcu
+    ON kcu.constraint_name = tc.constraint_name
+   AND kcu.table_schema = tc.table_schema
+   AND kcu.table_name = tc.table_name
+  WHERE tc.table_schema = current_schema() AND tc.table_name = '{table}'
+    AND kcu.column_name = '{column}' AND tc.constraint_type = 'FOREIGN KEY';
   EXECUTE format('ALTER TABLE {table} DROP CONSTRAINT %I', name);
   EXECUTE format(
     'ALTER TABLE {table} ADD CONSTRAINT %I FOREIGN KEY ({column}) REFERENCES {ref_table} ({ref_column})

@@ -43,6 +43,13 @@ def test_stops_without_database_url() -> None:
     assert "database_url" in result.stderr.lower()
 
 
+def test_refuses_a_malformed_database_url_without_printing_it() -> None:
+    result = _start({"DOMAIN": "zorzo", "DATABASE_URL": "mysql://user:s3cret-pw@db/x"})
+    assert result.returncode == 1
+    assert "refusing to start" in result.stderr
+    assert "s3cret-pw" not in result.stderr
+
+
 def test_stops_on_an_invalid_domain_config(database_url: str, tmp_path: Path) -> None:
     package = tmp_path / "domain_broken"
     package.mkdir()

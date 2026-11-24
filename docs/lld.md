@@ -721,3 +721,4 @@ Architecture decisions (0001–0011) are indexed in the HLD.
 - [ ] Eval harness: dataset format, metrics per layer, noise-band rule: to detail.
 - [ ] Format of `data/manifest.json` and of the brain and corpus files: to detail (shared with the front's LLD).
 - [ ] Schema of `config/models.yaml` and `config/limits.yaml`: to detail.
+- [ ] Production restart policy: the API fails fast when Postgres is not ready at boot (Database), so the production compose needs `restart: unless-stopped` and a start order; to settle with the deploy feature.
