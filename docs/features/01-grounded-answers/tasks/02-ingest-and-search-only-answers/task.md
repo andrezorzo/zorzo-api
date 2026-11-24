@@ -1,6 +1,6 @@
 # 02: Ingest and search-only answers
 
-**Status:** to do
+**Status:** in progress
 
 **What to build:** A visitor's question returns the best matching passages of the corpus, streamed: the ingest command loads the reviewed Markdown corpus into a new corpus version, and `POST /api/v1/ask` answers in search-only mode with hybrid search and local rerank. This is the first tracer bullet through ingest, database, retrieval and the stream contract.
 

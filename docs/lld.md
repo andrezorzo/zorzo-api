@@ -39,8 +39,9 @@ zorzo-api/
   apps/api/             FastAPI: HTTP routes, SSE, gate; wires core + domain at startup      (existing: healthz)
   apps/dashboard/       Django: public /dash pages, the `data` app (schema owner), commands    (existing: schema)
   apps/ingest/          one-shot job: runs the core ingest pipeline for a domain              (existing: skeleton)
-  domains/zorzo/        domain parts (ADR 0011): corpus/, prompts/, intents.yaml, tools/,
-                        evals/ (datasets), loaders.yaml, public.yaml                          (existing: domain.yaml)
+  domains/zorzo/        domain parts (ADR 0011), inside the `domain_zorzo` package: corpus/,
+                        examples.yaml, prompts/, intents.yaml, tools/, evals/ (datasets),
+                        loaders.yaml, public.yaml                                             (existing: domain.yaml)
   config/               models.yaml, models.local.yaml, limits.yaml                           (planned)
   contracts/            sse-v1.schema.json, openapi.json snapshot                             (planned)
   infra/                terraform/, compose files, Caddyfiles, systemd units and timers       (existing: compose,
@@ -63,8 +64,8 @@ means adding `domains/<other>/`, not changing `core`.
 | Database access (API, ingest) | psycopg 3 + SQLAlchemy Core with schema reflection, no ORM | Django owns the schema; no second copy of the columns |
 | Dashboard | Django 5.2 LTS | HLD constraint; LTS keeps security fixes to April 2028 with one jump to the next LTS. Move to 6.2 LTS (April 2027) for native CSP and template partials |
 | Dashboard charts | TBD | Candidates: Chart.js, Apache ECharts, uPlot, Observable Plot, server-rendered SVG |
-| Embeddings | langchain-ollama `OllamaEmbeddings` | ADR 0008 |
-| Local rerank | fastembed (ONNX, `mmarco-mMiniLMv2-L12`) | ADR 0009; small and multilingual on CPU |
+| Embeddings | langchain-ollama `OllamaEmbeddings`; pinned tag starts at `bge-m3:567m`, 1024 dimensions | ADR 0008; 1024 fits every candidate model (section 12), so changing model is a re-ingest, not a migration |
+| Local rerank | fastembed (ONNX) with `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` registered as a custom model (`onnx/model_quint8_avx2.onnx`), baked into the API image and loaded offline | ADR 0009; small (130 MB) and multilingual on CPU; fastembed has no built-in copy of it |
 | Validation and settings | Pydantic v2 + pydantic-settings | Tool arguments, answer contract, config files, fail-fast settings |
 | Extraction and chunking | LangChain document loaders (Markdown in the MVP; PDF loaders pluggable per domain) + `MarkdownHeaderTextSplitter` / `RecursiveCharacterTextSplitter` | The loader interface makes the PDF library a configuration choice; Docling is too heavy for the VPS. The résumé enters as owner-reviewed Markdown converted once from the PDF |
 | Tracing | langsmith SDK + a custom LangChain CallbackHandler | The handler feeds SSE events and the public trace from the same step events |
@@ -170,8 +171,8 @@ domain pieces, not ports (section 6.5).
 - **Budget, reserve then settle:** before a paid call, one conditional
   `UPDATE … WHERE cost_usd + estimate <= cap` reserves the estimate; after the call, the row is corrected by
   `actual − estimate`. Two concurrent requests can't both cross the cap. The estimate rule is in section 6.2.
-- **Ingest:** a Postgres advisory lock allows one run at a time; chunks upsert by content hash with
-  `ON CONFLICT DO NOTHING`.
+- **Ingest:** a Postgres advisory lock (`pg_try_advisory_lock`) allows one run at a time, and a second run
+  exits at once instead of waiting; chunks upsert by content hash with `ON CONFLICT DO NOTHING`.
 - **Alerts:** one row per kind in `alert_states`; a conditional insert opens the incident once, so concurrent
   failures send one message (section 6.10).
 - **Tools:** within a request, a call keyed by `hash(tool, normalized args)` returns the memoized result
@@ -266,8 +267,8 @@ Columns, types, constraints and indexes live in the migrations. What is still pl
 | --- | --- | --- |
 | `corpus_versions` | existing | Status per section 6.1; at most one `active` (unique partial index) |
 | `documents` | existing | Metadata from the document front matter |
-| `chunks` | existing; planned: `embedding vector(N)`, `tsv tsvector` | HNSW on embedding, GIN on tsv; N follows the embedding model (open question); added by F01-T02 |
-| `answer_cache` | existing; planned: `embedding vector(N)` | HNSW on embedding (ADR 0014); added by F01-T02 |
+| `chunks` | existing; planned: `embedding vector(1024)`, `tsv tsvector` | HNSW (cosine) on embedding, GIN on tsv; `tsv` built with the document language's text search configuration over heading path and content; added by F01-T02 |
+| `answer_cache` | existing; planned: `embedding vector(1024)` | HNSW (cosine) on embedding (ADR 0014); added by F01-T02 |
 | `public_traces` | existing | outcome: `answered`, `abstained`, `declined`, `blocked`, `degraded`, `cached`; `public_ok` defaults to false |
 | `trace_spans` | existing | One row per step; feeds the latency and fallback charts |
 | `trace_removals` | existing | Private record of the owner's manual removals; never shown in public |
@@ -297,7 +298,7 @@ Conventions:
 
 | Method and path | Status | Input | Output | Behavior |
 | --- | --- | --- | --- | --- |
-| `POST /api/v1/ask` | planned | `q` (≤ `MAX_QUESTION_CHARS`), `session`, `turnstile` | `200 text/event-stream`; errors per section 3 | The gate runs before the stream opens; after it passes, the events below |
+| `POST /api/v1/ask` | planned | `q` (1 to `MAX_QUESTION_CHARS` characters after trimming), `session` (UUID), `turnstile` (non-empty; verified by the gate) | `200 text/event-stream`; errors per section 3, with `503 unavailable` also when there is no active corpus version or its `embed_model_tag` differs from the API's embedder | The gate runs before the stream opens; after it passes, the events below |
 | `GET /api/healthz` | existing | — | `200 {status: ok, mode: normal \| degraded, db: ok}`; `503 {status: down, mode: unknown, db: down}` when the database can't be reached | Never cached (`Cache-Control: no-store`; CloudFront caches no error responses for `/api/*`), no gate. Used by the front, the deploy smoke test and UptimeRobot |
 
 JSON read routes for traces, evals, defenses, status and sources are not part of the API: the dashboard
@@ -331,6 +332,29 @@ Ordering rules (each one a contract test):
 - A cached answer sends `stage`, the cached `claim` events, `usage` (cost 0) and `done {cached: true}`, with no
   `token`.
 
+Values the table doesn't show:
+
+- `stage.name`: `guard`, `route`, `cache`, `retrieve`, `rerank`, `assess`, `reformulate`, `answer`, `verify`,
+  `repair`, `finish`; `ms` is set on `end` and null on `start`.
+- `retrieval.hits[]`: `id` (chunk id), `title` (document title), `score` (after rerank).
+- `degraded.reason`: `models_unavailable`, `budget_exhausted`, `quota_exhausted`, `deadline`.
+- `claim.sources`: chunk ids; `claim.verdict`: `supported`, `partial`, `unsupported`.
+- v1 freezes at launch. Until then, the task that first sends an event may narrow its payload (enums, new
+  optional fields), since no client depends on it yet; after launch a breaking change means `/api/v2/`.
+
+### Published data
+
+What the ingest job publishes on activation (DataPublisher), read by the front without a deploy (ADR 0010):
+
+- `manifest.json`: `{corpus_version, embed_model_tag, path: "data/<hash>/", published_at}`; the only file
+  rewritten in place.
+- `data/<hash>/corpus.json`: `{corpus_version, chunks: [{id, doc_key, title, kind, lang, heading, text,
+  source_url, p}]}`; `id` is the chunk id the stream's `retrieval` and `claim` events use; `p` is `[x, y, z]`
+  from a 3D PCA of the chunk's embedding, scaled to [-1, 1]; the front maps it into the brain.
+- `data/<hash>/examples.json`: `[{id, lang, text}]`, the domain's example questions; `done.suggestion` uses
+  the same ids.
+- `<hash>` is the SHA-256 of both files, so a folder never changes and publishing again is a no-op.
+
 ## 6. States and rules
 
 ### 6.1 Corpus version
@@ -350,15 +374,21 @@ stateDiagram-v2
 States of a corpus version; arrows carry the event that causes the transition.
 
 - Exactly one `active` version at any time; activation is one transaction (section 3 "Transactions").
-- A candidate is activated only with a linked `eval_run` that has `passed = true`.
+- A candidate is activated only with a linked `eval_run` that has `passed = true`, except with
+  `APP_ENV=local`, where it may be activated without one; production never does.
 - A change of `model_config_version` and a change of the judge model never ship in the same version: a
   new judge is used only after its agreement with a sample labeled by the owner reaches
   `JUDGE_AGREEMENT_MIN`, so quality is never measured with a new ruler and a new model at once.
-- Documents without `reviewed_by_owner: true`, or with a scan hit (gitleaks or the PII pass), fail the run;
-  the candidate becomes `rejected`.
+- Documents without `reviewed_by_owner: true`, with missing or invalid front matter, or with a scan hit
+  (gitleaks or the PII pass: emails, phone numbers, CPF, card numbers; exact strings in the domain's
+  `pii_allowlist` pass), fail the run; the candidate becomes `rejected`. The whole source is checked before
+  anything is embedded or written, and the report names the file and the rule, never the match.
 - The API refuses to serve a version whose `embed_model_tag` differs from the loaded embedding model: it
   starts as `unavailable` (503) instead of serving mismatched vectors.
-- Unchanged chunks are copied by hash into the new version, without being embedded again.
+- A chunk's hash covers its `doc_key`, heading path and content. Unchanged chunks are copied by hash into
+  the new version, without being embedded again, only from a version with the same `embed_model_tag`.
+- After activation the job publishes the data of section 5 "Published data"; a failed publish leaves the
+  version active and the job fails, to be run again.
 - Deleting a version deletes its documents and chunks.
 
 ### 6.2 Daily budget
@@ -599,7 +629,8 @@ no cache invalidation from the VPS for `/dash/*`.
 
 ## 9. Values and configuration
 
-Rule values live in `config/limits.yaml`, versioned and validated at startup (configuration as code, HLD);
+Rule values live in `config/limits.yaml` (a flat mapping of the names below in snake_case, each task adding
+its own), versioned and validated at startup (configuration as code, HLD);
 changing one is a reviewed PR recorded in `model_config_version`. Environment variables carry only secrets,
 endpoints and per-environment switches.
 
@@ -666,6 +697,10 @@ endpoints and per-environment switches.
 | `DATABASE_URL` | api, dashboard, ingest, evals | Postgres connection | secret |
 | `POSTGRES_PASSWORD` | postgres (compose) | Database password; compose refuses to start without it, so no default reaches production | secret |
 | `OLLAMA_URL`, `EMBED_MODEL_TAG` | api, ingest | Embedding endpoint and pinned tag | env file |
+| `EMBEDDER`, `RERANKER` | api, ingest | `ollama` / `local`, or `fake` (deterministic, accepted only with `APP_ENV=local`) | env file |
+| `LIMITS_FILE` | api, ingest | Path of `limits.yaml` | env file |
+| `RERANK_CACHE_DIR` | api | Where the rerank model is baked in the image | env file |
+| `DATA_DIR` | ingest | Folder the local DataPublisher writes | env file |
 | `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `NVIDIA_API_KEY`, `GOOGLE_AI_API_KEY` | api, evals | Model providers | secret |
 | `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, `LANGSMITH_TRACING` | api, dashboard | Tracing and stats pull | secret / env file |
 | `TURNSTILE_SECRET` | api | Bot check (the public site key is in the front) | secret |
@@ -712,7 +747,8 @@ Architecture decisions (0001–0011) are indexed in the HLD.
 
 ## 12. Open questions
 
-- [ ] Embedding model (e5 vs bge-m3), which sets `vector(N)`: decided by recall at M1.
+- [ ] Embedding model among 1024-dimension multilingual models (`bge-m3`, `multilingual-e5-large`,
+  `snowflake-arctic-embed2`, `qwen3-embedding:0.6b`), starting with `bge-m3`: decided by recall at M1.
 - [ ] L2 guard classifier: a small local model or a cheap LLM classifier.
 - [ ] Chat model of the local profile (Ollama): quick eval.
 - [ ] Free models per stage (route, answer, judge): eval matrix at M3.
@@ -721,6 +757,5 @@ Architecture decisions (0001–0011) are indexed in the HLD.
 - [ ] Nemotron rerank: request format, limits and Portuguese quality (M5).
 - [ ] Charts library for the dashboard.
 - [ ] Eval harness: dataset format, metrics per layer, noise-band rule: to detail.
-- [ ] Format of `data/manifest.json` and of the brain and corpus files: to detail (shared with the front's LLD).
-- [ ] Schema of `config/models.yaml` and `config/limits.yaml`: to detail.
+- [ ] Schema of `config/models.yaml`: F01-T05.
 - [ ] Production restart policy: the API fails fast when Postgres is not ready at boot (Database), so the production compose needs `restart: unless-stopped` and a start order; to settle with the deploy feature.
