@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    services:
+      # Throwaway database that lives only inside this job; its credentials protect nothing.
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: zorzo
+          POSTGRES_PASSWORD: zorzo
+          POSTGRES_DB: zorzo
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U zorzo -d zorzo"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      TEST_DATABASE_ADMIN_URL: postgresql://zorzo:zorzo@localhost:5432/postgres
+      DATABASE_URL: postgresql://zorzo:zorzo@localhost:5432/zorzo
+      APP_ENV: local
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.7"
+      - run: uv sync --frozen
+      - name: Lint
+        run: uv run ruff check . && uv run ruff format --check .
+      - name: Types
+        run: uv run mypy .
+      - name: Tests
+        run: uv run pytest -q

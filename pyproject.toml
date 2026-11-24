@@ -1,0 +1,100 @@
+[project]
+name = "zorzo-api"
+version = "0.1.0"
+description = "Backend of zorzo.dev.br"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "rag-core",
+    "rag-api",
+    "rag-dashboard",
+    "rag-ingest",
+    "domain-zorzo",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/core", "apps/api", "apps/dashboard", "apps/ingest", "domains/zorzo"]
+
+[tool.uv.sources]
+rag-core = { workspace = true }
+rag-api = { workspace = true }
+rag-dashboard = { workspace = true }
+rag-ingest = { workspace = true }
+domain-zorzo = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "django-stubs>=5",
+    "types-PyYAML",
+    "import-linter>=2",
+    "psycopg[binary]>=3.2",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"apps/dashboard/data/migrations/*" = ["E501", "RUF012"]
+"apps/dashboard/data/models.py" = ["RUF012"]  # Django Meta attributes
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+plugins = ["mypy_django_plugin.main"]
+mypy_path = "packages/core/src:apps/api/src:apps/ingest/src:domains/zorzo/src:apps/dashboard"
+explicit_package_bases = true
+exclude = ["apps/dashboard/data/migrations/"]
+
+[[tool.mypy.overrides]]
+module = ["dj_database_url.*"]
+ignore_missing_imports = true
+
+[tool.django-stubs]
+django_settings_module = "rag_dashboard.settings"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
+
+[tool.importlinter]
+root_packages = ["rag_core", "rag_api", "rag_ingest", "rag_dashboard", "data", "domain_zorzo"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "core never imports apps or domains"
+type = "forbidden"
+source_modules = ["rag_core"]
+forbidden_modules = ["rag_api", "rag_ingest", "domain_zorzo"]
+
+[[tool.importlinter.contracts]]
+name = "dashboard never imports core (ADR 0015)"
+type = "forbidden"
+source_modules = ["rag_dashboard", "data"]
+forbidden_modules = ["rag_core"]
+
+[[tool.importlinter.contracts]]
+name = "only core adapters use network clients"
+type = "forbidden"
+source_modules = ["rag_core", "rag_api", "rag_ingest", "domain_zorzo"]
+forbidden_modules = ["sqlalchemy", "psycopg", "httpx"]
+ignore_imports = [
+    "rag_core.adapters.** -> sqlalchemy",
+    "rag_core.adapters.** -> psycopg",
+    "rag_core.adapters.** -> httpx",
+]
+# Apps wire adapters at startup, so an app reaching a client through an adapter is allowed.
+allow_indirect_imports = true
+unmatched_ignore_imports_alerting = "none"

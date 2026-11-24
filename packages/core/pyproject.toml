@@ -1,0 +1,20 @@
+[project]
+name = "rag-core"
+version = "0.1.0"
+description = "Generic core: services, ports and adapters"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "pydantic>=2.8",
+    "pydantic-settings>=2.4",
+    "pyyaml>=6",
+    "sqlalchemy[asyncio]>=2.0.30",
+    "psycopg[binary]>=3.2",
+    "structlog>=24",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rag_core"]
