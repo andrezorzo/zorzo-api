@@ -311,7 +311,7 @@ serves those pages from the database (section 8, ADR 0015).
 | `blocked` | `{layer, category, message}` | Blocked state |
 | `degraded` | `{mode: "search_only", reason}` | Search-only banner |
 | `error` | `{code, message}` | Bugs only |
-| `done` | `{trace_id, cached, abstained}` | Link to the public trace |
+| `done` | `{trace_id, cached, abstained, suggestion}` | Link to the public trace; on an abstention or decline, `suggestion` is the id of the closest example question (section 6.3) |
 | `ping` | SSE comment `: ping`, every `PING_INTERVAL` while nothing else is sent | None (keeps CloudFront's origin timeout from firing) |
 | `graph` | — | **To detail** (Phase 2) |
 
@@ -386,6 +386,12 @@ States of the day's budget row; the day is UTC, so every visitor sees the same "
   category (offensive, harassment, sexual content, attacks on other people, personal data), not by
   sentiment. It adds no model call and never changes the answer, only what public pages show (section 8). In the
   MVP `career_fact` goes through RAG; `off_topic` → decline; `contact` → `contact_options`.
+- **Edge questions:** a follow-up with no history is an abstention with a fixed message asking what the
+  visitor means; a question in a language other than English or Portuguese is answered in English, with one
+  line saying the site answers in both. The suggestion on an abstention or decline is the domain's example
+  question closest to the question by local embedding similarity (no model call).
+- **Length:** answers aim at `ANSWER_WORDS_DEFAULT` words, and up to `ANSWER_WORDS_MAX` when the visitor asks
+  for more detail; beyond that the answer suggests opening the sources.
 - **Limits per request:** `MAX_LOOP_MODEL_CALLS` model calls beyond `route`, `MAX_TOOL_CALLS` tool calls,
   `MAX_REFORMULATE` rewrites, `MAX_REPAIR` repairs, `REQUEST_DEADLINE` of wall clock, and `RECURSION_LIMIT` as
   the LangGraph backstop. Reaching the backstop is a bug: abstain, flag the run, alert.
@@ -439,7 +445,7 @@ untrusted data, like retrieved chunks.
 | `get_document` | planned | `doc_key` from an enum of indexed documents → metadata and summary |
 | `list_projects` | planned | Public projects with links and status, from corpus metadata |
 | `github_activity` | planned | `repo` from the allowlist → the last `GITHUB_COMMITS_MAX` commits (title and date), open issues count, last release, from the public REST API; never reads repository content; cached `GITHUB_CACHE_TTL`; cited as a source with `fetched_at`; when GitHub is unavailable the answer says so and falls back to the corpus |
-| `contact_options` | planned | Returns links only; never sends anything |
+| `contact_options` | planned | Returns links only, from the domain config, in this order: LinkedIn, GitHub, email (`mailto:`); never sends anything |
 | `check_answerable`, `query_career_graph` | to detail | Phase 2 (career graph) |
 
 A code-search tool over the site's own repository (`search_site_code`) is not built: a curated `docs/code-map.md` (one section per module: what it
@@ -485,6 +491,9 @@ States of one chain entry's breaker; it lives in the API process memory.
   not expired.
 - **Stored:** only answered and verified responses; never abstentions, declines, blocks or degraded answers.
 - **Expiry:** `CACHE_TTL`; a new corpus or model version invalidates entries by not matching.
+- **In degraded mode:** the first question of a conversation (no history) is looked up with the raw question
+  and a local language detector, without `route`; follow-ups go straight to search-only. Serving a hit
+  without the model-based guard is safe: the stored answer was verified and the question can't change it.
 
 ### 6.10 Alerts
 
@@ -540,7 +549,8 @@ Behavior only; rendering and the 3D brain are in `zorzo-site`'s LLD.
   (query box disabled, with a notice). While offline it checks again every `HEALTH_POLL_INTERVAL` and when
   the tab regains focus, and returns to `online` by itself.
 - **Session:** a UUID created on the first question and kept in `sessionStorage`, so it lasts while the tab is
-  open.
+  open and survives a reload. A "new conversation" button creates a new UUID; after `SESSION_TTL` idle, the
+  next question creates a new UUID and shows a "new conversation" notice.
 - **Asking:** the invisible Turnstile widget produces a token; the front sends `POST /api/v1/ask` with `fetch`
   and reads the SSE stream from the body (`EventSource` can't send a POST). A new question cancels the current
   stream (`AbortController`).
@@ -554,7 +564,10 @@ Behavior only; rendering and the 3D brain are in `zorzo-site`'s LLD.
   | `503` or network failure | `offline` state |
   | Stream dropped before `done` | "Connection lost, ask again" (no resume) |
   | `blocked` | The defense layer and the reason in plain words, a link to `/dash/defenses`, and "this was a mistake?" linking to the contact options |
-  | `degraded` | Banner plus the list of sources |
+  | `token` | Draft text, marked "checking against sources" |
+  | `claim` | The checked claim replaces the draft; a claim with verdict `unsupported` is shown struck through as "removed: not supported by the sources" |
+  | `degraded` | Banner plus up to `DEGRADED_MAX_PASSAGES` passages, each with its source's title and link; with none, "no matching sources for this question", the example questions and the contact options |
+  | `done` with `suggestion` | The suggested example question and the contact options |
   | `error` | Generic message with the trace link |
 
 - **Interface language:** `navigator.language` starting with `pt` → Portuguese, anything else → English; a
@@ -605,7 +618,7 @@ endpoints and per-environment switches.
 | `RELEVANCE_FLOOR` | TBD | Abstain threshold (calibrated at M3) | `limits.yaml` |
 | `ASSESS_SKIP_SCORE` | TBD | Skip `assess` (calibrated at M3) | `limits.yaml` |
 | `HISTORY_TURNS` / `HISTORY_SUMMARY_TOKENS` / `HISTORY_MAX_TOKENS` | 2 / 250 / 800 | Conversation state | `limits.yaml` |
-| `SESSION_TTL` | 30 min | Checkpointer threads | `limits.yaml` |
+| `SESSION_TTL` | 30 min | Checkpointer threads; front idle reset (section 8) | `limits.yaml`, front config |
 | `RATE_IP_BURST` per `RATE_IP_WINDOW` | 10 per 10 min | Rate limit | `limits.yaml` |
 | `RATE_IP_DAILY` | 40 | Rate limit | `limits.yaml` |
 | `RATE_SESSION_BURST` / `RATE_SESSION_DAILY` | 10 per 10 min / 40 | Rate limit | `limits.yaml` |
@@ -616,6 +629,8 @@ endpoints and per-environment switches.
 | `BREAKER_FAILURES` / `BREAKER_WINDOW` / `BREAKER_COOLDOWN` | 5 / 60 s / 60 s | Circuit breaker | `limits.yaml` |
 | `CACHE_SIMILARITY` | 0.95 | Answer cache | `limits.yaml` |
 | `CACHE_TTL` | 60 days | Answer cache | `limits.yaml` |
+| `DEGRADED_MAX_PASSAGES` | 6 | Passages shown in search-only mode | `limits.yaml` |
+| `ANSWER_WORDS_DEFAULT` / `ANSWER_WORDS_MAX` | 150 / 400 | Answer length (section 6.3) | `limits.yaml` |
 | `RETENTION_QUESTIONS` | 90 days | Retention | `limits.yaml` |
 | `RETENTION_PUBLIC_TRACES` | 30 days | Retention (spans included) | `limits.yaml` |
 | `RETENTION_LOGS` | 14 days | Retention | `limits.yaml` |
