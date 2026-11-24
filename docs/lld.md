@@ -205,6 +205,8 @@ domain pieces, not ports (section 6.5).
   | `method_not_allowed` | 405 | The route exists but not with that method |
   | `internal` | 500 | A bug before the stream opened |
 
+- A client that leaves while still sending its body is answered `499` with no body (it never arrives; the
+  status keeps disconnects apart from refused input in the logs).
 - **After the stream opens** the response is never an HTTP error. Outcomes are events: `blocked`, `degraded`,
   abstention inside `done`, and `error {code, message}` for bugs only, followed by `done` (section 5).
 - **Who translates:** graph nodes never raise to the HTTP layer; they return a status in the graph state.
