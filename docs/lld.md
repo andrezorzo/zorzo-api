@@ -61,7 +61,7 @@ means adding `domains/<other>/`, not changing `core`.
 | Model clients | langchain-openai `ChatOpenAI` with `base_url` per provider | Every provider is OpenAI-compatible (ADR 0007) |
 | Conversation state | langgraph-checkpoint-postgres | State in Postgres, not process memory (ADR 0001) |
 | Database access (API, ingest) | psycopg 3 + SQLAlchemy Core with schema reflection, no ORM | Django owns the schema; no second copy of the columns |
-| Dashboard | Django | HLD constraint |
+| Dashboard | Django 5.2 LTS | HLD constraint; LTS keeps security fixes to April 2028 with one jump to the next LTS. Move to 6.2 LTS (April 2027) for native CSP and template partials |
 | Dashboard charts | TBD | Candidates: Chart.js, Apache ECharts, uPlot, Observable Plot, server-rendered SVG |
 | Embeddings | langchain-ollama `OllamaEmbeddings` | ADR 0008 |
 | Local rerank | fastembed (ONNX, `mmarco-mMiniLMv2-L12`) | ADR 0009; small and multilingual on CPU |
