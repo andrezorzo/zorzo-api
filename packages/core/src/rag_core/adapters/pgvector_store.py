@@ -194,13 +194,6 @@ class PgCorpusStore:
                     ],
                 )
 
-    async def status(self, version: int) -> str | None:
-        async with self.db.engine.connect() as conn:
-            value = await conn.scalar(
-                text("SELECT status FROM corpus_versions WHERE version = :v"), {"v": version}
-            )
-        return None if value is None else str(value)
-
     async def embed_model_tag(self, version: int) -> str | None:
         async with self.db.engine.connect() as conn:
             tag = await conn.scalar(

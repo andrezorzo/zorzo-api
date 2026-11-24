@@ -3,9 +3,9 @@
     python -m rag_ingest [--source DIR] [--activate]   write a new candidate version, optionally activate it
     python -m rag_ingest --activate-version N          activate an existing candidate
 
-Prints one JSON summary line (`{"summary": {...}}`) whenever it created or acted on a version, with the
-version's real status (`unknown` if the database can't be read), and exits 1 on a rejected or failed run,
-a refused activation or a busy lock.
+Prints one JSON summary line (`{"summary": {...}}`) whenever it created a version or changed one, with the
+status the run left it in (`rejected`, `candidate` or `active`), and exits 1 on a rejected or failed run, a
+refused activation, a failed publish or a busy lock.
 """
 
 import argparse
@@ -28,6 +28,7 @@ from rag_core.ingest.pipeline import (
     ActivationRefused,
     IngestFailed,
     IngestRejected,
+    PublishFailed,
     Summary,
     activate_and_publish,
     run_ingest,
@@ -72,42 +73,25 @@ class _Config:
     limits: Limits
 
 
-async def _report_failure(store: PgCorpusStore, version: int | None) -> None:
-    """The summary of a version a failed run created or touched, with its real status from the database.
-
-    The failure may have come before or after the version went live, or the reject may have failed, so the
-    status is read, never assumed; `unknown` when the database can't be read, nothing when there's no such
-    version.
-    """
-    if version is None:
-        return
-    try:
-        status = await store.status(version)
-    except Exception:
-        log.warning("status_lookup_failed", version=version, exc_info=True)
-        status = "unknown"
-    if status is not None:
-        _summary(Summary(version, status))
-
-
 async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Config) -> int:
     domain, examples, limits = config.domain, config.examples, config.limits
     db = Database(settings.database_url)
     store = PgCorpusStore(db)
     publisher = LocalDataPublisher(settings.data_dir)
-    touched: int | None = None  # the version this run created or acted on, for the failure summary
+    # What this run knows about the version it created, kept current as it goes, so a failure reports it
+    # without reading the database (which may be why the run failed).
+    known: Summary | None = None
     try:
         async with store.lock() as got:
             if not got:
                 log.error("ingest_busy", reason="another ingest run holds the lock")
                 return 1
             if args.activate_version is not None:
-                touched = args.activate_version
-                await _activate_and_publish(touched, store, publisher, settings, examples)
-                _summary(Summary(touched, "active"))
+                await _activate_and_publish(args.activate_version, store, publisher, settings, examples)
+                _summary(Summary(args.activate_version, "active"))
                 return 0
             embedder = build_embedder(settings)
-            summary = await run_ingest(
+            known = await run_ingest(
                 args.source or corpus_dir(settings.domain),
                 store=store,
                 embedder=embedder,
@@ -115,34 +99,38 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
                 allowlist=domain.pii_allowlist,
                 limits=limits,
             )
-            log.info("corpus_ingested", **asdict(summary))
-            touched = summary.version
+            log.info("corpus_ingested", **asdict(known))
             if args.activate:
-                await _activate_and_publish(summary.version, store, publisher, settings, examples)
-                summary = replace(summary, status="active")
-            _summary(summary)
+                await _activate_and_publish(known.version, store, publisher, settings, examples)
+                known = replace(known, status="active")
+            _summary(known)
             return 0
-    except IngestFailed as exc:
-        log.exception("ingest_failed")
-        await _report_failure(store, exc.summary.version)
-        return 1
     except IngestRejected as exc:
         for problem in exc.problems:
             log.error("ingest_rejected", file=problem.file, rule=problem.rule)
-        await _report_failure(store, exc.summary.version)
+        _summary(exc.summary)
+        return 1
+    except IngestFailed as exc:
+        log.exception("ingest_failed")
+        _summary(exc.summary)
         return 1
     except ActivationRefused as exc:
         log.error("activation_refused", reason=str(exc))
-        await _report_failure(store, touched)
+        if known is not None:
+            _summary(known)  # the candidate this run wrote, still a candidate
+        return 1
+    except PublishFailed as exc:
+        # Live but unpublished: re-running the ingest publishes a new version.
+        log.exception("publish_failed", version=exc.version)
+        _summary(replace(known, status="active") if known else Summary(exc.version, "active"))
         return 1
     except ConfigError:
         raise  # reported by main()
-    except Exception:
-        # A failure after activation leaves the version active, possibly without published data:
-        # re-running the ingest publishes a new version.
+    except BaseException:
         log.exception("ingest_failed")
-        await _report_failure(store, touched)
-        return 1
+        if known is not None:
+            _summary(known)
+        raise
     finally:
         await db.close()
 

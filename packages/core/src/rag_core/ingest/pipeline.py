@@ -39,6 +39,14 @@ class IngestFailed(Exception):
         super().__init__(f"ingest of corpus version {summary.version} failed")
 
 
+class PublishFailed(Exception):
+    """The version went live but its brain and corpus data weren't published."""
+
+    def __init__(self, version: int) -> None:
+        self.version = version
+        super().__init__(f"corpus version {version} is active but its data wasn't published")
+
+
 class ActivationRefused(Exception):
     pass
 
@@ -56,23 +64,27 @@ async def run_ingest(
     version = await store.create_candidate(embedder.tag)
     try:
         return await _fill_candidate(version, source, store, embedder, scanner, allowlist, limits)
-    except IngestRejected:
-        await _reject_quietly(store, version)
+    except IngestRejected as exc:
+        exc.summary = Summary(version, await _reject_quietly(store, version))
         raise
     except Exception as exc:
-        await _reject_quietly(store, version)
-        raise IngestFailed(Summary(version, "rejected")) from exc
+        raise IngestFailed(Summary(version, await _reject_quietly(store, version))) from exc
     except BaseException:  # cancelled: still never leave an activatable candidate
         await _reject_quietly(store, version)
         raise
 
 
-async def _reject_quietly(store: CorpusStore, version: int) -> None:
-    """The version must not stay a candidate that could be activated; a failing reject never hides why."""
+async def _reject_quietly(store: CorpusStore, version: int) -> str:
+    """Reject the version so it can't be activated; returns the status it is left in.
+
+    A failing reject never hides why the run stopped: it is logged, and the version stays `candidate`.
+    """
     try:
         await store.reject(version)
     except Exception:
         log.exception("reject_failed", version=version)
+        return "candidate"
+    return "rejected"
 
 
 async def _fill_candidate(
@@ -135,13 +147,19 @@ async def activate_and_publish(
     examples: list[Example],
     require_eval: bool,
 ) -> str:
-    """Activate the version, then publish its brain and corpus data; returns the published folder."""
+    """Activate the version, then publish its brain and corpus data; returns the published folder.
+
+    A failure after the activation raises PublishFailed: the version is live, its data not yet published.
+    """
     await activate(version, store=store, require_eval=require_eval)
-    tag = await store.embed_model_tag(version)
-    if tag is None:  # unreachable once activated; keeps the type honest
-        raise ActivationRefused(f"corpus version {version} does not exist")
-    folder, files, manifest = publish.build(version, tag, await store.published_chunks(version), examples)
-    await publisher.publish(folder, files, manifest)
+    try:
+        tag = await store.embed_model_tag(version)
+        if tag is None:  # unreachable once activated; keeps the type honest
+            raise LookupError(f"corpus version {version} does not exist")
+        folder, files, manifest = publish.build(version, tag, await store.published_chunks(version), examples)
+        await publisher.publish(folder, files, manifest)
+    except Exception as exc:
+        raise PublishFailed(version) from exc
     return folder
 
 
