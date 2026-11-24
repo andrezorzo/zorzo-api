@@ -75,6 +75,12 @@ the other records are written during implementation and go in the task's PR.
   becomes "in progress" in the plan commit and "done" in the PR that delivers it. A feature becomes "in
   progress" with the first plan commit of one of its tasks, and "done" with the PR of its last task.
 
+## Full verification
+
+The command sequence that closes a task, run once before opening the PR. The commands of each app are in
+the "Full verification" section of its `AGENTS.md`. A task that creates a command the verification must run
+adds it there.
+
 ## Git conventions
 
 - **Main branch:** `main`. Never commit directly to it.
