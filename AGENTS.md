@@ -81,6 +81,11 @@ the other records are written during implementation and go in the task's PR.
 - **Work branches:** `feature/*`, `bugfix/*`, `hotfix/*` and `docs/*`, created from `main` and merged by
   pull request.
 - **Commits:** conventional commits (`docs:`, `feat:`, `fix:` …), short and focused on why.
+- **Review before push:** no code reaches GitHub until a `code-review` at level `high` on the unreviewed
+  diff comes back with nothing accepted, plus a `security-review` when the diff touches logs, secrets,
+  configuration, errors or authentication. Fixes from a review are new code and go through the same loop.
+  When a library default affects security (logging, tracebacks, error rendering), check it in the installed
+  source, not from memory.
 - **No AI attribution:** no co-author trailers or "generated with" lines in commits or pull requests.
 - **Merge:** merging is the owner's decision. An agent merges only when the owner explicitly authorizes
   that PR or task, and a refused `gh pr merge` is never worked around.
