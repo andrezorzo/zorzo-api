@@ -1,6 +1,7 @@
 name: zorzo
 languages: [en, pt]
 # The owner's public contact details the PII pass lets through (LLD "6.1 Corpus version"): an exact string,
-# or a phone with its +country code, which then covers its international, national and compact forms.
+# or a phone with its +country code, which then covers its standard international and national forms and
+# its digits written together.
 pii_allowlist:
   - andre_zorzo@yahoo.com

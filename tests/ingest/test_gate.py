@@ -214,3 +214,12 @@ def test_an_allowlisted_phone_covers_its_compact_forms(text: str) -> None:
 @pytest.mark.parametrize("text", ["contato_11987654321", "**Tel**11 98765-4321"])
 def test_markup_next_to_a_phone_doesnt_hide_it(text: str) -> None:
     assert personal_data(text) == ["pii:phone"]
+
+
+@pytest.mark.parametrize("text", ["**11** **98765-4321**", "Tel: **(11)** **98765-4321**"])
+def test_finds_a_phone_with_each_group_emphasized(text: str) -> None:
+    assert personal_data(text) == ["pii:phone"]
+
+
+def test_an_allowlisted_number_from_another_country_covers_its_national_form() -> None:
+    assert personal_data("(416) 555-0132", ["+1 416 555 0132"]) == []

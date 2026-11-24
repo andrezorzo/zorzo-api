@@ -69,9 +69,9 @@ def write_doc(folder: Path, name: str, body: str, reviewed: bool = True) -> None
 
 
 def assert_rejected(db: str, run: Run, filename: str) -> None:
-    assert run.code == 1
-    assert filename in run.output
-    assert run.summary["status"] == "rejected"
+    assert run.code == 1, run.output
+    assert filename in run.output, run.output
+    assert run.summary["status"] == "rejected", run.output
     version = run.summary["version"]
     assert status(db, version) == "rejected"
     assert rows(db, "SELECT count(*) FROM documents WHERE corpus_version = %s", version)[0][0] == 0
