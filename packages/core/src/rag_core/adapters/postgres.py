@@ -5,6 +5,7 @@ Django owns the schema (LLD "Data"); this module reflects it at startup and neve
 
 import asyncio
 
+import pgvector.sqlalchemy  # noqa: F401  (registers the `vector` type, so reflection knows it)
 from sqlalchemy import MetaData, func, make_url, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 

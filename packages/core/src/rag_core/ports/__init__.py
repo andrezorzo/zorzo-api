@@ -1,6 +1,11 @@
 """Ports: interfaces for what lives outside the core (LLD "Components and dependencies")."""
 
+from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
+
+from rag_core.events import StreamEvent
 
 
 class HealthProbe(Protocol):
@@ -11,3 +16,149 @@ class HealthProbe(Protocol):
 
     async def degraded_today(self) -> bool:
         """Whether today's (UTC) budget row is in degraded mode."""
+
+
+class Embedder(Protocol):
+    """Embeds text with one pinned model (ADR 0008)."""
+
+    @property
+    def tag(self) -> str:
+        """The pinned model tag, stored with every corpus version."""
+
+    async def embed(self, texts: list[str]) -> list[list[float]]: ...
+
+
+@dataclass(frozen=True)
+class SearchHit:
+    id: int
+    title: str
+    content: str
+    score: float
+
+
+@dataclass(frozen=True)
+class ActiveCorpus:
+    version: int
+    embed_model_tag: str
+
+
+class VectorStore(Protocol):
+    """Read side of the corpus, used by the API."""
+
+    async def active_corpus(self) -> ActiveCorpus | None: ...
+
+    async def search(self, vector: list[float], text: str, k: int, version: int) -> list[SearchHit]:
+        """Hybrid in one query (vector + full text + RRF), over the given version only."""
+
+
+class Reranker(Protocol):
+    """One rerank level; it may raise, and the retrieval service falls to the next level (ADR 0009)."""
+
+    def rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]: ...
+
+
+@dataclass(frozen=True)
+class DocumentRow:
+    doc_key: str
+    title: str
+    kind: str
+    lang: str
+    authority: int
+    source_url: str | None
+    updated: str | None
+    hash: str
+
+
+@dataclass(frozen=True)
+class ChunkRow:
+    doc_key: str
+    heading_path: str
+    content: str
+    tokens: int
+    hash: str
+    embedding: list[float]
+
+
+@dataclass(frozen=True)
+class PublishedChunk:
+    id: int
+    doc_key: str
+    title: str
+    kind: str
+    lang: str
+    heading: str
+    text: str
+    source_url: str | None
+    embedding: list[float]
+
+
+class CorpusStore(Protocol):
+    """Write side of the corpus, used by ingest (LLD "6.1 Corpus version")."""
+
+    def lock(self) -> AbstractAsyncContextManager[bool]:
+        """Hold the one-ingest-at-a-time lock; yields False when another run holds it."""
+
+    async def create_candidate(self, embed_model_tag: str) -> int: ...
+
+    async def reject(self, version: int) -> None: ...
+
+    async def reusable_embeddings(self, hashes: list[str], embed_model_tag: str) -> dict[str, list[float]]:
+        """Embeddings of chunks with these hashes in any version with the same model tag."""
+
+    async def write(self, version: int, documents: list[DocumentRow], chunks: list[ChunkRow]) -> None:
+        """Documents and chunks of a candidate, in one transaction; chunks are idempotent by hash."""
+
+    async def embed_model_tag(self, version: int) -> str | None:
+        """The version's model tag, or None when it doesn't exist."""
+
+    async def eval_passed(self, version: int) -> bool:
+        """Whether the version has a linked eval run that passed."""
+
+    async def activate(self, version: int) -> None:
+        """The candidate becomes active and the previous active retired, in one transaction."""
+
+    async def published_chunks(self, version: int) -> list[PublishedChunk]: ...
+
+
+class TraceSink(Protocol):
+    """Receives the step events that feed the stream (and, later, the stored trace and LangSmith)."""
+
+    def record(self, event: StreamEvent) -> None:
+        """Never blocks."""
+
+
+class DataPublisher(Protocol):
+    """Writes the brain and corpus data the front reads (LLD "Published data")."""
+
+    async def publish(self, folder: str, files: dict[str, bytes], manifest: bytes) -> None:
+        """Write `files` under `folder`, then replace the manifest; idempotent."""
+
+
+@dataclass(frozen=True)
+class Finding:
+    file: str
+    rule: str
+
+
+class SecretScanner(Protocol):
+    """Finds secrets in a folder; a finding names the file and the rule, never the match."""
+
+    async def scan(self, folder: Path) -> list[Finding]: ...
+
+
+__all__ = [
+    "ActiveCorpus",
+    "ChunkRow",
+    "CorpusStore",
+    "DataPublisher",
+    "DocumentRow",
+    "Embedder",
+    "Finding",
+    "HealthProbe",
+    "PublishedChunk",
+    "Reranker",
+    "SearchHit",
+    "SecretScanner",
+    "TraceSink",
+    "VectorStore",
+]

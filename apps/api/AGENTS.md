@@ -11,13 +11,21 @@ Run from the repository root, with Postgres up (`docker compose -f infra/compose
 | What | Command |
 | --- | --- |
 | Run the API locally | `DOMAIN=zorzo DATABASE_URL=postgresql://zorzo:zorzo@localhost:5432/zorzo APP_ENV=local uv run python -m rag_api` |
-| Tests of this app | `uv run pytest tests/api -q` |
+| Run with the fake embedder and reranker (no Ollama, no model download) | add `EMBEDDER=fake RERANKER=fake` |
+| Regenerate the stream contract after changing `rag_core.events` | `uv run python -m rag_core.events > contracts/sse-v1.schema.json` |
+| Tests of this app | `uv run pytest tests/api tests/contract -q` |
+
+`POST /api/v1/ask` needs an active corpus version embedded by the same model as the API (see
+`apps/ingest/AGENTS.md`); otherwise it answers `503 unavailable`.
 
 ## Practices
 
 - Routes raise `ApiError` from `rag_core.errors`; never build an error body by hand.
 - Routes never touch the database or a provider directly: they call core services.
-- Every request has a `trace_id`, bound to the log context and returned in error bodies.
+- Every request has a `trace_id`, bound to the log context and returned in error bodies; work that outlives
+  the request (the stream) binds it again.
+- Stream tests read the body with `tests/contract/sse.py`, which validates every event against
+  `contracts/sse-v1.schema.json` and checks the ordering rules.
 
 ## Full verification
 

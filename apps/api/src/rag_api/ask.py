@@ -1,0 +1,88 @@
+"""`POST /api/v1/ask` (LLD "HTTP routes"): checks run before the stream opens, then the stream events."""
+
+import asyncio
+from collections.abc import AsyncIterator
+from uuid import UUID
+
+import structlog
+from fastapi import APIRouter, Request
+from pydantic import BaseModel, Field
+from rag_core.errors import ApiError, ErrorCode
+from rag_core.events import Done, StreamEvent
+from rag_core.ports import TraceSink
+from rag_core.services import corpus as corpus_service
+from rag_core.services.search_only import run_search_only
+from sse_starlette import EventSourceResponse, ServerSentEvent
+
+log = structlog.get_logger()
+router = APIRouter()
+
+
+class AskRequest(BaseModel):
+    q: str
+    session: UUID
+    turnstile: str = Field(min_length=1)  # verified by the gate (F01-T04)
+
+
+class QueueSink:
+    """Feeds the stream: `record` never blocks."""
+
+    def __init__(self) -> None:
+        self.queue: asyncio.Queue[StreamEvent] = asyncio.Queue()
+
+    def record(self, event: StreamEvent) -> None:
+        self.queue.put_nowait(event)
+
+
+class FanOut:
+    def __init__(self, sinks: list[TraceSink]) -> None:
+        self.sinks = sinks
+
+    def record(self, event: StreamEvent) -> None:
+        for sink in self.sinks:
+            sink.record(event)
+
+
+@router.post("/api/v1/ask")
+async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
+    state = request.app.state
+    question = body.q.strip()
+    if not question or len(question) > state.limits.max_question_chars:
+        raise ApiError(ErrorCode.INVALID_INPUT)
+    corpus = await corpus_service.servable(state.vector_store, state.embedder.tag)
+    trace_id: str = request.state.trace_id
+    stream = QueueSink()
+    sink = FanOut([stream, *state.trace_sinks])
+
+    async def run() -> None:
+        # The stream outlives the middleware's log context, so the trace id is bound again here.
+        with structlog.contextvars.bound_contextvars(trace_id=trace_id):
+            await run_search_only(
+                question,
+                corpus,
+                UUID(trace_id),
+                sink=sink,
+                embedder=state.embedder,
+                store=state.vector_store,
+                rerankers=state.rerankers,
+                limits=state.limits,
+            )
+
+    async def events() -> AsyncIterator[ServerSentEvent]:
+        task = asyncio.create_task(run())
+        try:
+            while True:
+                event = await stream.queue.get()
+                yield ServerSentEvent(event=event.kind, data=event.payload())
+                if isinstance(event, Done):
+                    break
+            await task
+        finally:
+            task.cancel()  # the visitor left: stop the work
+
+    return EventSourceResponse(
+        events(),
+        ping=state.limits.ping_interval,
+        ping_message_factory=lambda: ServerSentEvent(comment="ping"),
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

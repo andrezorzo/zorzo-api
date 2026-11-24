@@ -1,0 +1,59 @@
+"""AC4: the retrieval service orders hits by the reranker and falls back to the fused order."""
+
+from rag_core.limits import Limits
+from rag_core.ports import SearchHit
+from rag_core.services.retrieval import retrieve
+
+LIMITS = Limits(
+    max_question_chars=500,
+    ping_interval=10,
+    retrieval_top_k=20,
+    rrf_k=60,
+    rerank_top_n=3,
+    degraded_max_passages=6,
+    chunk_tokens=400,
+    chunk_overlap=0.15,
+    search_min_similarity=0.5,
+)
+FUSED = [SearchHit(i, f"t{i}", f"c{i}", 1.0 / i) for i in range(1, 6)]
+
+
+class Embedder:
+    tag = "t"
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        return [[1.0] for _ in texts]
+
+
+class Store:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int, int]] = []
+
+    async def active_corpus(self) -> None:
+        return None
+
+    async def search(self, vector: list[float], text: str, k: int, version: int) -> list[SearchHit]:
+        self.calls.append((text, k, version))
+        return FUSED
+
+
+class Reverse:
+    def rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
+        return [SearchHit(h.id, h.title, h.content, float(n)) for n, h in enumerate(reversed(hits))]
+
+
+class Broken:
+    def rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
+        raise RuntimeError("model missing")
+
+
+async def test_orders_hits_by_the_reranker() -> None:
+    store = Store()
+    hits = await retrieve("q", 7, embedder=Embedder(), store=store, rerankers=[Reverse()], limits=LIMITS)
+    assert [h.id for h in hits] == [5, 4, 3]
+    assert store.calls == [("q", 20, 7)]
+
+
+async def test_falls_back_to_fused_order_when_the_reranker_fails() -> None:
+    hits = await retrieve("q", 7, embedder=Embedder(), store=Store(), rerankers=[Broken()], limits=LIMITS)
+    assert [h.id for h in hits] == [1, 2, 3]

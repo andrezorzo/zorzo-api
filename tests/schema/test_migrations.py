@@ -2,6 +2,7 @@
 
 import psycopg
 import pytest
+from pgvector.sqlalchemy import Vector
 
 # Independent source of truth: the contract in the F01-T01 plan.
 EXPECTED_COLUMNS: dict[str, set[str]] = {
@@ -18,7 +19,17 @@ EXPECTED_COLUMNS: dict[str, set[str]] = {
         "updated",
         "hash",
     },
-    "chunks": {"id", "document_id", "corpus_version", "heading_path", "content", "tokens", "hash"},
+    "chunks": {
+        "id",
+        "document_id",
+        "corpus_version",
+        "heading_path",
+        "content",
+        "tokens",
+        "hash",
+        "embedding",
+        "tsv",
+    },
     "answer_cache": {
         "id",
         "question_scrubbed",
@@ -26,6 +37,7 @@ EXPECTED_COLUMNS: dict[str, set[str]] = {
         "corpus_version",
         "model_config_version",
         "answer",
+        "embedding",
         "trace_id",
         "created_at",
         "expires_at",
@@ -141,6 +153,8 @@ async def test_api_reflection_matches_the_migrations(database_url: str) -> None:
         reflected = {name: {c.name for c in table.columns} for name, table in db.metadata.tables.items()}
         for table, columns in EXPECTED_COLUMNS.items():
             assert reflected.get(table) == columns, table
+        embedding = db.metadata.tables["chunks"].c.embedding.type
+        assert isinstance(embedding, Vector) and embedding.dim == 1024
     finally:
         await db.close()
 
@@ -164,8 +178,9 @@ def test_delete_rules_live_in_the_database(database_url: str) -> None:
             )
         )
         conn.execute(
-            "INSERT INTO chunks (document_id, corpus_version, heading_path, content, tokens, hash) "
-            "VALUES (%s, %s, 'FAQ', 'text', 1, 'c')",
+            "INSERT INTO chunks (document_id, corpus_version, heading_path, content, tokens, hash,"
+            " embedding, tsv) VALUES (%s, %s, 'FAQ', 'text', 1, 'c',"
+            " array_fill(0.1, ARRAY[1024])::vector, to_tsvector('text'))",
             (doc, version),
         )
         trace = _one(

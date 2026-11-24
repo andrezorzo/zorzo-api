@@ -5,12 +5,18 @@ matters to them is a database default (`db_default`), not a Python-side one.
 """
 
 from django.contrib.postgres.functions import RandomUUID
+from django.contrib.postgres.indexes import GinIndex
+from django.contrib.postgres.search import SearchVectorField
 from django.db import models
 from django.db.models import Q
 from django.db.models.functions import Now
+from pgvector.django import HnswIndex, VectorField
 
 OUTCOMES = ("answered", "abstained", "declined", "blocked", "degraded", "cached")
 LANGS = ("en", "pt")
+# Every candidate embedding model has 1024 dimensions (LLD "Open questions"), so a model change is a
+# re-ingest, not a migration.
+EMBEDDING_DIM = 1024
 
 
 def _in(field: str, values: tuple[str, ...]) -> Q:
@@ -67,18 +73,23 @@ class Document(models.Model):
 
 
 class Chunk(models.Model):
-    """`embedding` and `tsv` are added by F01-T02, which settles the embedding model."""
-
     document = models.ForeignKey(Document, on_delete=models.CASCADE)
     corpus_version = models.ForeignKey(CorpusVersion, on_delete=models.CASCADE, db_column="corpus_version")
     heading_path = models.TextField()
     content = models.TextField()
     tokens = models.IntegerField()
     hash = models.TextField()
+    embedding = VectorField(dimensions=EMBEDDING_DIM)
+    # Built by ingest with the document language's text search configuration (LLD "Data").
+    tsv = SearchVectorField()
 
     class Meta:
         db_table = "chunks"
         constraints = [models.UniqueConstraint(fields=["corpus_version", "hash"], name="chunks_version_hash")]
+        indexes = [
+            HnswIndex(name="chunks_embedding_hnsw", fields=["embedding"], opclasses=["vector_cosine_ops"]),
+            GinIndex(name="chunks_tsv_gin", fields=["tsv"]),
+        ]
 
 
 class PublicTrace(models.Model):
@@ -104,8 +115,6 @@ class PublicTrace(models.Model):
 
 
 class AnswerCache(models.Model):
-    """`embedding` is added by F01-T02, which settles the embedding model."""
-
     question_scrubbed = models.TextField()
     lang = models.TextField()
     corpus_version = models.ForeignKey(CorpusVersion, on_delete=models.CASCADE, db_column="corpus_version")
@@ -115,10 +124,16 @@ class AnswerCache(models.Model):
     created_at = models.DateTimeField(db_default=Now())
     expires_at = models.DateTimeField()
     hits = models.IntegerField(db_default=0)
+    embedding = VectorField(dimensions=EMBEDDING_DIM)
 
     class Meta:
         db_table = "answer_cache"
         constraints = [models.CheckConstraint(condition=_in("lang", LANGS), name="answer_cache_lang_check")]
+        indexes = [
+            HnswIndex(
+                name="answer_cache_embedding_hnsw", fields=["embedding"], opclasses=["vector_cosine_ops"]
+            )
+        ]
 
 
 class TraceSpan(models.Model):

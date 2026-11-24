@@ -48,6 +48,41 @@ def database_url() -> Iterator[str]:
     drop_database(url)
 
 
-def api_settings(url: str, domain: str = "zorzo") -> ApiSettings:
-    """Settings for an API under test, pointing at the given database."""
-    return ApiSettings(app_env="local", domain=domain, database_url=url, log_level="INFO")
+def ingest_fixture_corpus(url: str, data_dir: Path) -> None:
+    """Ingest and activate the fixture corpus with the real command and the fake embedder."""
+    subprocess.run(
+        [sys.executable, "-m", "rag_ingest", "--source", str(ROOT / "tests/fixtures/corpus"), "--activate"],
+        check=True,
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "DATABASE_URL": url,
+            "APP_ENV": "local",
+            "DOMAIN": "zorzo",
+            "EMBEDDER": "fake",
+            "DATA_DIR": str(data_dir),
+        },
+        capture_output=True,
+    )
+
+
+@pytest.fixture(scope="session")
+def corpus_database(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+    """A database with the fixture corpus ingested and active (spec, seam 1)."""
+    url = create_migrated_database()
+    ingest_fixture_corpus(url, tmp_path_factory.mktemp("data"))
+    yield url
+    drop_database(url)
+
+
+def api_settings(url: str, domain: str = "zorzo", **overrides: object) -> ApiSettings:
+    """Settings for an API under test, pointing at the given database; fakes unless overridden."""
+    values: dict[str, object] = {
+        "app_env": "local",
+        "domain": domain,
+        "database_url": url,
+        "log_level": "INFO",
+        "embedder": "fake",
+        "reranker": "fake",
+    }
+    return ApiSettings(**{**values, **overrides})  # type: ignore[arg-type]

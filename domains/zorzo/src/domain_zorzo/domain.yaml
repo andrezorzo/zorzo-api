@@ -1,2 +1,5 @@
 name: zorzo
 languages: [en, pt]
+# Exact strings the PII pass lets through: the owner's public contact details (LLD "6.1 Corpus version").
+pii_allowlist:
+  - andre_zorzo@yahoo.com

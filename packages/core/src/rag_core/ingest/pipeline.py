@@ -1,0 +1,93 @@
+"""Ingest run and activation (LLD "6.1 Corpus version")."""
+
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+from rag_core.ingest import gate
+from rag_core.ingest.chunking import ChunkDraft, split
+from rag_core.limits import Limits
+from rag_core.ports import ChunkRow, CorpusStore, DocumentRow, Embedder, Finding, SecretScanner
+
+
+@dataclass(frozen=True)
+class Summary:
+    version: int
+    status: str
+    documents: int = 0
+    chunks: int = 0
+    embedded: int = 0
+    copied: int = 0
+
+    def as_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+class IngestRejected(Exception):
+    def __init__(self, summary: Summary, problems: list[Finding]) -> None:
+        self.summary = summary
+        self.problems = problems
+        super().__init__(f"corpus version {summary.version} rejected: {len(problems)} problem(s)")
+
+
+class ActivationRefused(Exception):
+    pass
+
+
+async def run_ingest(
+    source: Path,
+    *,
+    store: CorpusStore,
+    embedder: Embedder,
+    scanner: SecretScanner,
+    allowlist: tuple[str, ...],
+    limits: Limits,
+) -> Summary:
+    """Write a new candidate version from `source`; nothing is embedded or written unless the gate passes."""
+    version = await store.create_candidate(embedder.tag)
+    documents, problems = await gate.check(source, scanner, allowlist)
+    if not documents and not problems:
+        problems = [Finding(str(source), "no documents")]
+    if problems:
+        await store.reject(version)
+        raise IngestRejected(Summary(version, "rejected"), problems)
+
+    doc_rows: list[DocumentRow] = []
+    drafts: list[tuple[str, ChunkDraft]] = []
+    for doc in documents:
+        meta = doc.meta
+        doc_rows.append(
+            DocumentRow(
+                doc_key=meta.doc_key,
+                title=meta.title,
+                kind=meta.kind,
+                lang=meta.lang,
+                authority=meta.authority,
+                source_url=str(meta.source_url) if meta.source_url else None,
+                updated=meta.updated.isoformat() if meta.updated else None,
+                hash=gate.file_hash(doc.raw),
+            )
+        )
+        drafts.extend(
+            (meta.doc_key, d) for d in split(meta, doc.body, limits.chunk_tokens, limits.chunk_overlap)
+        )
+
+    reusable = await store.reusable_embeddings([d.hash for _, d in drafts], embedder.tag)
+    missing = [d for _, d in drafts if d.hash not in reusable]
+    # The heading path goes into the embedded text: it carries the section's context.
+    vectors = await embedder.embed([f"{d.heading_path}\n{d.content}" for d in missing]) if missing else []
+    fresh = {d.hash: v for d, v in zip(missing, vectors, strict=True)}
+    chunk_rows = [
+        ChunkRow(key, d.heading_path, d.content, d.tokens, d.hash, reusable.get(d.hash) or fresh[d.hash])
+        for key, d in drafts
+    ]
+    await store.write(version, doc_rows, chunk_rows)
+    return Summary(
+        version, "candidate", len(doc_rows), len(chunk_rows), len(missing), len(drafts) - len(missing)
+    )
+
+
+async def activate(version: int, *, store: CorpusStore, local: bool) -> None:
+    """Production activates only with a passing eval run; local may activate without one."""
+    if not local and not await store.eval_passed(version):
+        raise ActivationRefused(f"corpus version {version} has no passing eval run")
+    await store.activate(version)
