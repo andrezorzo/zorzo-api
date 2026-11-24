@@ -115,7 +115,8 @@ def _prepare_for_phones(text: str) -> str:
 
 
 def _windows(run: str) -> list[str]:
-    """Consecutive groups of a sentence-sized run of numbers, up to a phone's digit count."""
+    """Consecutive groups of a sentence-sized run of numbers: up to MAX_WINDOW_GROUPS groups and a phone's
+    digit count, so a phone written in more groups after another number isn't read (a known limit)."""
     groups = run.split()
     if not 1 < len(groups) <= MAX_RUN_GROUPS:
         return []
