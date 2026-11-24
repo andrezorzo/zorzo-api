@@ -6,6 +6,7 @@ never the match (LLD "6.1 Corpus version").
 
 import functools
 import hashlib
+import html
 import itertools
 import re
 import sys
@@ -36,7 +37,8 @@ SEMVER = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?")
 PHONE_REGIONS = ("BR", "US")
 ONE_LINE_BREAK = re.compile(r"[^\S\n]*\n(?![^\S\n]*\n)[^\S\n]*")
 ODD_SPACE = re.compile(r"[^\S\n]")  # no-break, thin and other spaces the matcher doesn't treat as separators
-LETTER_DIGIT = re.compile(r"(?<=[^\W\d_])(?=[\d+(])|(?<=[\d)])(?=[^\W\d_])")  # `Tel11…`, `…4321abc`
+# Markup that disappears when the page renders: emphasis, backslash escapes, zero-width characters.
+INVISIBLE_MARKUP = re.compile(r"[*_\\\u200b-\u200d\u2060\ufeff]")
 CPF = re.compile(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b|\b\d{11}\b")
 CARD = re.compile(r"\b(?:\d[ -]?){12,18}\d\b")
 
@@ -90,11 +92,12 @@ def _is_email_domain(domain: str) -> bool:
     return bool(LETTER_TLD.search(domain))
 
 
-def _phones(text: str) -> set[str]:
-    """Every phone number in the text, in E.164 form, read with each region's numbering plan."""
-    prepared = LETTER_DIGIT.sub(" ", ODD_SPACE.sub(" ", ONE_LINE_BREAK.sub(" ", text)))
+def _phone_spans(text: str) -> set[str]:
+    """The text of every phone-shaped span, read with each region's numbering plan."""
+    prepared = html.unescape(INVISIBLE_MARKUP.sub("", text))
+    prepared = ODD_SPACE.sub(" ", ONE_LINE_BREAK.sub(" ", prepared))
     return {
-        phonenumbers.format_number(m.number, phonenumbers.PhoneNumberFormat.E164)
+        m.raw_string
         for region in PHONE_REGIONS
         # The default stops after 65,535 candidates, which would leave the end of a long document unread.
         for m in phonenumbers.PhoneNumberMatcher(
@@ -103,18 +106,38 @@ def _phones(text: str) -> set[str]:
     }
 
 
+def _digit_groups(text: str) -> tuple[str, ...]:
+    return tuple(re.findall(r"\d+", text))
+
+
 @functools.cache
-def _allowed_phones(allowlist: tuple[str, ...]) -> frozenset[str]:
-    """Allowlisted phones must carry their +country code, so one entry stands for exactly one number."""
-    allowed = set()
+def _allowed_phone_shapes(allowlist: tuple[str, ...]) -> frozenset[tuple[str, ...]]:
+    """Digit groups of every standard rendering of the allowlisted phones.
+
+    A phone entry needs its +country code. Comparing digit groups lets `(415) 555-0132` match +1 415-555-0132
+    while `(41) 5555-0132`, the same digits in Brazil, stays someone else's number.
+    """
+    shapes = set()
     for entry in allowlist:
         try:
             number = phonenumbers.parse(entry, None)
         except phonenumbers.NumberParseException:
-            continue  # not a phone (an email, for instance)
+            continue  # national format or not a phone: such entries match as exact strings
         if phonenumbers.is_valid_number(number):
-            allowed.add(phonenumbers.format_number(number, phonenumbers.PhoneNumberFormat.E164))
-    return frozenset(allowed)
+            for rendering in (
+                phonenumbers.PhoneNumberFormat.INTERNATIONAL,
+                phonenumbers.PhoneNumberFormat.NATIONAL,
+            ):
+                shapes.add(_digit_groups(phonenumbers.format_number(number, rendering)))
+    return frozenset(shapes)
+
+
+def _unlisted_phone(text: str, allowlist: tuple[str, ...], allowed_strings: set[str]) -> bool:
+    shapes = _allowed_phone_shapes(allowlist)
+    return any(
+        _same_spaces(raw) not in allowed_strings and _digit_groups(raw) not in shapes
+        for raw in _phone_spans(text)
+    )
 
 
 def _same_spaces(value: str) -> str:
@@ -130,7 +153,7 @@ def personal_data(text: str, allowlist: Iterable[str] = ()) -> list[str]:
     rules = []
     if any(_same_spaces(e) not in allowed for e in _emails(text)):
         rules.append("pii:email")
-    if _phones(text) - _allowed_phones(allowlist):
+    if _unlisted_phone(text, allowlist, allowed):
         rules.append("pii:phone")
     if any(_cpf_valid(m.group()) for m in CPF.finditer(text)):
         rules.append("pii:cpf")
@@ -142,6 +165,7 @@ def personal_data(text: str, allowlist: Iterable[str] = ()) -> list[str]:
 async def check(
     source: Path, scanner: SecretScanner, allowlist: Iterable[str]
 ) -> tuple[list[Document], list[Finding]]:
+    allowlist = tuple(allowlist)  # used once per document
     documents: list[Document] = []
     problems: list[Finding] = []
     seen: set[str] = set()

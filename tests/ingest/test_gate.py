@@ -121,8 +121,11 @@ def test_finds_brazilian_mobiles(text: str) -> None:
         "11\u202f98765\u20094321",
         "+55\u202f11\u202f98765\u20094321",
         "(11)\u200998765-4321",
-        "Tel11987654321",
-        "(11)98765-4321abc",
+        "**(11)** 98765-4321",
+        "_(11)_ 98765-4321",
+        "\\(11\\) 98765-4321",
+        "(11)&nbsp;98765-4321",
+        "11\u200d98765\u200d4321",
         # Fails closed: a wrapped issue number can't be told from a wrapped phone.
         "issue 42\n91234-5678",
     ],
@@ -131,7 +134,10 @@ def test_finds_phones_across_odd_spaces_and_a_wrapped_line(text: str) -> None:
     assert "pii:phone" in personal_data(text)
 
 
-@pytest.mark.parametrize("text", ["port 8080 and 9090", "released on 2024-11-24"])
+@pytest.mark.parametrize(
+    "text",
+    ["port 8080 and 9090", "released on 2024-11-24", "commit a11987654321b", "sha256 3f2a4155550132ff9e"],
+)
 def test_leaves_plain_numbers_alone(text: str) -> None:
     assert personal_data(text) == []
 
@@ -187,3 +193,14 @@ def test_an_allowlisted_number_doesnt_cover_the_same_digits_in_another_country()
 
 def test_the_allowlist_can_be_any_iterable() -> None:
     assert personal_data("(11) 98765-4321", (a for a in ["+55 11 98765-4321"])) == []
+
+
+@pytest.mark.parametrize(
+    ("text", "allow"),
+    [
+        ("(11) 98765-4321", "(11) 98765-4321"),  # the exact string, national format
+        ("(415) 555-0132", "+1 415-555-0132"),  # any region's reading of the match
+    ],
+)
+def test_an_allowlist_entry_covers_its_own_number(text: str, allow: str) -> None:
+    assert personal_data(text, [allow]) == []
