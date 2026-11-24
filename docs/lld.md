@@ -379,7 +379,9 @@ States of a corpus version; arrows carry the event that causes the transition.
   `JUDGE_AGREEMENT_MIN`, so quality is never measured with a new ruler and a new model at once.
 - Documents without `reviewed_by_owner: true`, with missing or invalid front matter, or with a scan hit
   (gitleaks or the PII pass: emails, phone numbers, CPF, card numbers; exact strings in the domain's
-  `pii_allowlist` pass), fail the run; the candidate becomes `rejected`. The whole source is checked before
+  `pii_allowlist` pass, case-insensitively), fail the run. The PII pass fails closed: text shaped like an
+  address or a phone counts unless it is exactly a retina asset name or a semantic version, and a false
+  hit is fixed by rewording the line; the candidate becomes `rejected`. The whole source is checked before
   anything is embedded or written, and the report names the file and the rule, never the match.
 - The API refuses to serve a version whose `embed_model_tag` differs from the loaded embedding model: it
   starts as `unavailable` (503) instead of serving mismatched vectors.
