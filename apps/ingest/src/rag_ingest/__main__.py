@@ -119,9 +119,14 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
         # active, possibly without published data: re-running the ingest publishes a new version.
         log.exception("ingest_failed")
         if ingested is not None:
-            # The real status: the failure may have come after the version went live.
-            status = await store.status(ingested.version)
-            _summary(replace(ingested, status=status or ingested.status))
+            # The real status: the failure may have come after the version went live. The lookup itself can
+            # fail (the database may be why the run stopped), and the summary line must still be printed.
+            try:
+                status = await store.status(ingested.version)
+            except Exception:
+                log.warning("status_lookup_failed", version=ingested.version, exc_info=True)
+                status = None
+            _summary(replace(ingested, status=status or "unknown"))
         return 1
     finally:
         await db.close()
@@ -153,9 +158,7 @@ def main() -> None:
         sys.exit(1)
     try:
         sys.exit(asyncio.run(_main(args, settings, config)))
-    except (
-        ConfigError
-    ) as exc:  # an adapter choice the environment doesn't allow (EMBEDDER=fake in production)
+    except (ConfigError, DomainError) as exc:  # e.g. EMBEDDER=fake outside APP_ENV=local
         print(f"rag-ingest: refusing to start: {exc}", file=sys.stderr)
         sys.exit(1)
 

@@ -6,9 +6,11 @@ is read here, up to the limit, and replayed to the app; nothing over the limit i
 
 from collections.abc import Callable
 
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from rag_core.errors import DEFAULT_MESSAGE, STATUS, ErrorCode, error_body
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+CLIENT_CLOSED = 499
 
 
 class BodyLimit:
@@ -31,8 +33,9 @@ class BodyLimit:
             message = await receive()
             if message["type"] != "http.request":
                 # The client left mid-body. An answer goes nowhere, but every request must end with one, or
-                # the middleware above would log the missing response as a server error.
-                await self._refuse(scope, receive, send)
+                # the middleware above would log the missing response as a server error. 499 ("client closed
+                # request") keeps disconnects apart from refused input in the logs.
+                await Response(status_code=CLIENT_CLOSED)(scope, receive, send)
                 return
             chunks.append(message.get("body", b""))
             size += len(chunks[-1])
