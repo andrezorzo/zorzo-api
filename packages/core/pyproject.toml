@@ -17,6 +17,7 @@ dependencies = [
     "fastembed>=0.9.1",
     "anyio>=4.16.0",
     "phonenumbers>=9.0.42,<10",  # numbering plans change; uv.lock pins the vetted version
+    "huggingface-hub>=0.30",
 ]
 
 [build-system]

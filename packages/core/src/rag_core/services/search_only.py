@@ -62,11 +62,15 @@ async def run_search_only(
     rerankers: Sequence[Reranker],
     limits: Limits,
     reason: DegradedReason = "models_unavailable",
+    deadline_at: float | None = None,
 ) -> None:
     """Emits the whole stream, ending with `done`; a bug becomes `error` then `done`, never an exception."""
     try:
         # A hung embedder or database must not keep the visitor's stream open (LLD "6.3 Agent run").
-        async with asyncio.timeout(limits.request_deadline):
+        loop_now = asyncio.get_running_loop().time()
+        async with asyncio.timeout_at(
+            deadline_at if deadline_at is not None else loop_now + limits.request_deadline
+        ):
             hits = await _retrieve(question, corpus, sink, embedder, store, rerankers, limits)
         shown = [Hit(id=h.id, title=h.title, score=h.score) for h in hits[: limits.degraded_max_passages]]
         retrieval_event = Retrieval(hits=shown, corpus_version=corpus.version)

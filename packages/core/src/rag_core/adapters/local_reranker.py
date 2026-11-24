@@ -33,6 +33,7 @@ MODEL_FILES_SHA256 = {
 
 RETRY_AFTER_S = 60
 LOCK_WAIT_S = 0.5
+RERANK_SLOTS = 2
 
 
 class ModelIntegrityError(RuntimeError):
@@ -43,7 +44,11 @@ def verify_model_files(snapshot: Path) -> None:
     """Raise unless this exact snapshot folder holds the expected files."""
     for name, digest in MODEL_FILES_SHA256.items():
         path = snapshot / name
-        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+        if not path.is_file():
+            raise ModelIntegrityError(f"rerank model file {name} is missing from {snapshot}")
+        with path.open("rb") as f:
+            actual = hashlib.file_digest(f, "sha256").hexdigest()  # in chunks: the ONNX file is 130 MB
+        if actual != digest:
             raise ModelIntegrityError(f"rerank model file {name} in {snapshot} doesn't match its pinned hash")
 
 
@@ -84,6 +89,9 @@ class LocalReranker:
         self._model: Any = None
         self._load = threading.Lock()
         self._failed_at: float | None = None
+        # Rerank threads the request deadline abandoned keep running; this cap still counts them, so they
+        # can't pile up and starve the CPU. A question finding no free slot falls to the next level.
+        self._slots = threading.BoundedSemaphore(RERANK_SLOTS)
 
     def model(self) -> Any:
         # Another thread loading the model means this question falls to the next level now, not later.
@@ -112,6 +120,11 @@ class LocalReranker:
         self.model()
 
     def rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
-        scores = list(self.model().rerank(query, [h.content for h in hits]))
+        if not self._slots.acquire(timeout=LOCK_WAIT_S):
+            raise RuntimeError("every rerank slot is busy")
+        try:
+            scores = list(self.model().rerank(query, [h.content for h in hits]))
+        finally:
+            self._slots.release()
         scored = [SearchHit(h.id, h.title, h.content, float(s)) for h, s in zip(hits, scores, strict=True)]
         return sorted(scored, key=lambda h: h.score, reverse=True)

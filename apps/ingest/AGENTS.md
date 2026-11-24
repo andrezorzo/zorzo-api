@@ -9,10 +9,13 @@ own: the gate, chunking, writes, activation and publishing live in `rag_core.ing
   `infra/Dockerfile` (`GITLEAKS_VERSION`, `GITLEAKS_SHA256`), which the CI uses too. On Ubuntu, not from apt
   (too old); check the tarball against that fixed hash, never against the release's own checksums file:
 
+  From the repository root:
+
   ```bash
   V=$(sed -n 's/^ARG GITLEAKS_VERSION=//p' infra/Dockerfile)
   SHA=$(sed -n 's/^ARG GITLEAKS_SHA256=//p' infra/Dockerfile)
-  cd /tmp && curl -sSLO https://github.com/gitleaks/gitleaks/releases/download/v$V/gitleaks_${V}_linux_x64.tar.gz \
+  test -n "$V" && test -n "$SHA" \
+  && cd /tmp && curl -fsSLO https://github.com/gitleaks/gitleaks/releases/download/v$V/gitleaks_${V}_linux_x64.tar.gz \
   && echo "$SHA  gitleaks_${V}_linux_x64.tar.gz" | sha256sum -c - \
   && tar -xzf gitleaks_${V}_linux_x64.tar.gz gitleaks && mkdir -p ~/.local/bin && mv gitleaks ~/.local/bin/
   ```

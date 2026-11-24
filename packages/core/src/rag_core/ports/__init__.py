@@ -115,6 +115,9 @@ class CorpusStore(Protocol):
     async def write(self, version: int, documents: list[DocumentRow], chunks: list[ChunkRow]) -> None:
         """Documents and chunks of a candidate, in one transaction; chunks are idempotent by hash."""
 
+    async def status(self, version: int) -> str | None:
+        """The version's status, or None when it doesn't exist."""
+
     async def embed_model_tag(self, version: int) -> str | None:
         """The version's model tag, or None when it doesn't exist."""
 

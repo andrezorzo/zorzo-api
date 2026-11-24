@@ -11,7 +11,7 @@ import argparse
 import asyncio
 import json
 import sys
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import structlog
@@ -22,7 +22,7 @@ from rag_core.adapters.gitleaks import GitleaksScanner
 from rag_core.adapters.local_publisher import LocalDataPublisher
 from rag_core.adapters.pgvector_store import PgCorpusStore
 from rag_core.adapters.postgres import Database
-from rag_core.domain import DomainError, Example, corpus_dir, load_domain, load_examples
+from rag_core.domain import DomainConfig, DomainError, Example, corpus_dir, load_domain, load_examples
 from rag_core.ingest.pipeline import (
     ActivationRefused,
     IngestRejected,
@@ -30,7 +30,7 @@ from rag_core.ingest.pipeline import (
     activate_and_publish,
     run_ingest,
 )
-from rag_core.limits import load_limits
+from rag_core.limits import Limits, load_limits
 from rag_core.ports import DataPublisher
 from rag_core.telemetry import configure_logging
 
@@ -61,11 +61,17 @@ async def _activate_and_publish(
     log.info("corpus_activated_and_published", version=version, path=folder)
 
 
-async def _main(args: argparse.Namespace, settings: IngestSettings) -> int:
-    domain = load_domain(settings.domain)
-    # Read before any write: a bad file stops the run at once, as a refusal to start.
-    examples = load_examples(settings.domain)
-    limits = load_limits(settings.limits_file)
+@dataclass(frozen=True)
+class _Config:
+    """Everything read from files, before the run touches the database."""
+
+    domain: DomainConfig
+    examples: list[Example]
+    limits: Limits
+
+
+async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Config) -> int:
+    domain, examples, limits = config.domain, config.examples, config.limits
     db = Database(settings.database_url)
     store = PgCorpusStore(db)
     publisher = LocalDataPublisher(settings.data_dir)
@@ -113,7 +119,9 @@ async def _main(args: argparse.Namespace, settings: IngestSettings) -> int:
         # active, possibly without published data: re-running the ingest publishes a new version.
         log.exception("ingest_failed")
         if ingested is not None:
-            _summary(ingested)
+            # The real status: the failure may have come after the version went live.
+            status = await store.status(ingested.version)
+            _summary(replace(ingested, status=status or ingested.status))
         return 1
     finally:
         await db.close()
@@ -136,8 +144,18 @@ def main() -> None:
     try:
         settings = IngestSettings()  # type: ignore[call-arg]
         configure_logging(settings.app_env, settings.log_level)
-        sys.exit(asyncio.run(_main(args, settings)))
-    except (ValidationError, DomainError, ConfigError, yaml.YAMLError, OSError) as exc:
+        # Read before any write: a bad file stops the command before it changes anything.
+        config = _Config(
+            load_domain(settings.domain), load_examples(settings.domain), load_limits(settings.limits_file)
+        )
+    except (ValidationError, DomainError, yaml.YAMLError, OSError) as exc:
+        print(f"rag-ingest: refusing to start: {exc}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        sys.exit(asyncio.run(_main(args, settings, config)))
+    except (
+        ConfigError
+    ) as exc:  # an adapter choice the environment doesn't allow (EMBEDDER=fake in production)
         print(f"rag-ingest: refusing to start: {exc}", file=sys.stderr)
         sys.exit(1)
 

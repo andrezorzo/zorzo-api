@@ -30,7 +30,10 @@ class BodyLimit:
         while True:
             message = await receive()
             if message["type"] != "http.request":
-                return  # the client left mid-body: there is nobody to answer
+                # The client left mid-body. An answer goes nowhere, but every request must end with one, or
+                # the middleware above would log the missing response as a server error.
+                await self._refuse(scope, receive, send)
+                return
             chunks.append(message.get("body", b""))
             size += len(chunks[-1])
             if size > limit:

@@ -91,7 +91,7 @@ forbidden_modules = ["rag_core"]
 name = "only core adapters use network clients"
 type = "forbidden"
 source_modules = ["rag_core", "rag_api", "rag_ingest", "domain_zorzo"]
-forbidden_modules = ["sqlalchemy", "psycopg", "httpx", "langchain_ollama", "fastembed", "pgvector"]
+forbidden_modules = ["sqlalchemy", "psycopg", "httpx", "langchain_ollama", "fastembed", "pgvector", "huggingface_hub"]
 ignore_imports = [
     "rag_core.adapters.** -> sqlalchemy",
     "rag_core.adapters.** -> psycopg",
@@ -99,6 +99,7 @@ ignore_imports = [
     "rag_core.adapters.** -> langchain_ollama",
     "rag_core.adapters.** -> fastembed",
     "rag_core.adapters.** -> pgvector",
+    "rag_core.adapters.** -> huggingface_hub",
 ]
 # Apps wire adapters at startup, so an app reaching a client through an adapter is allowed.
 allow_indirect_imports = true

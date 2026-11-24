@@ -38,15 +38,15 @@ jobs:
           version: "0.12.7"
       - run: uv sync --frozen
       - name: Install gitleaks (ingest gate)
-        env:
-          GITLEAKS_VERSION: "8.30.1"
-          # Fixed here, not read from the release: a tampered release could ship a matching checksums file.
-          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        # Version and tarball hash come from infra/Dockerfile, their single owner.
         run: |
+          V=$(sed -n 's/^ARG GITLEAKS_VERSION=//p' infra/Dockerfile)
+          SHA=$(sed -n 's/^ARG GITLEAKS_SHA256=//p' infra/Dockerfile)
+          test -n "$V" && test -n "$SHA"
           cd /tmp
-          curl -sSLO "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          echo "${GITLEAKS_SHA256}  gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | sha256sum -c -
-          tar -xzf "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" gitleaks
+          curl -fsSLO "https://github.com/gitleaks/gitleaks/releases/download/v${V}/gitleaks_${V}_linux_x64.tar.gz"
+          echo "${SHA}  gitleaks_${V}_linux_x64.tar.gz" | sha256sum -c -
+          tar -xzf "gitleaks_${V}_linux_x64.tar.gz" gitleaks
           sudo mv gitleaks /usr/local/bin/
       - name: Cache the rerank model
         uses: actions/cache@v4

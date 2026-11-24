@@ -38,6 +38,8 @@ class QueueSink:
 async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
     state = request.app.state
     question = normalize(body.q, state.limits)
+    # One deadline for the whole request: the corpus check and the stream share it.
+    deadline_at = asyncio.get_running_loop().time() + state.limits.request_deadline
     corpus = await corpus_service.servable(
         state.vector_store, state.embedder.tag, state.limits.request_deadline
     )
@@ -58,6 +60,7 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                     store=state.vector_store,
                     rerankers=state.rerankers,
                     limits=state.limits,
+                    deadline_at=deadline_at,
                 )
             except Exception:
                 # Whatever escaped the service, the visitor's stream still ends with `done`.
