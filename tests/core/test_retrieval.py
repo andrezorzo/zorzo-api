@@ -6,7 +6,9 @@ from rag_core.services.retrieval import rerank, search
 
 LIMITS = Limits(
     max_question_chars=500,
+    max_body_bytes=8192,
     ping_interval=10,
+    request_deadline=20,
     retrieval_top_k=20,
     rrf_k=60,
     rerank_top_n=3,

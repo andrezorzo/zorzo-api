@@ -32,11 +32,12 @@ CMD ["python", "-m", "rag_api"]
 FROM base AS ingest
 # gitleaks, pinned and checked against the release checksum (apps/ingest/AGENTS.md).
 ARG GITLEAKS_VERSION=8.30.1
+# The tarball's SHA-256, fixed here: a checksums file from the same release can't vouch for a tampered one.
+ARG GITLEAKS_SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
  && cd /tmp \
  && curl -sSLO https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz \
- && curl -sSLO https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_checksums.txt \
- && grep linux_x64.tar.gz gitleaks_${GITLEAKS_VERSION}_checksums.txt | sha256sum -c - \
+ && echo "${GITLEAKS_SHA256}  gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | sha256sum -c - \
  && tar -xzf gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz -C /usr/local/bin gitleaks \
  && rm -f gitleaks_* && apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* \
  && mkdir /data && chown app /data

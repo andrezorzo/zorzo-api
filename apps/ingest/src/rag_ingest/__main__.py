@@ -66,6 +66,7 @@ async def _main(args: argparse.Namespace, settings: IngestSettings) -> int:
     db = Database(settings.database_url)
     store = PgCorpusStore(db)
     publisher = LocalDataPublisher(settings.data_dir)
+    ingested: Summary | None = None
     try:
         async with store.lock() as got:
             if not got:
@@ -86,6 +87,7 @@ async def _main(args: argparse.Namespace, settings: IngestSettings) -> int:
                 limits=load_limits(settings.limits_file),
             )
             log.info("corpus_ingested", **asdict(summary))
+            ingested = summary
             if args.activate:
                 await _activate_and_publish(summary.version, store, publisher, settings, examples)
                 summary = replace(summary, status="active")
@@ -98,6 +100,8 @@ async def _main(args: argparse.Namespace, settings: IngestSettings) -> int:
         return 1
     except ActivationRefused as exc:
         log.error("activation_refused", reason=str(exc))
+        if ingested is not None:
+            _summary(ingested)  # the candidate was written: callers still learn its version
         return 1
     except (ConfigError, DomainError):
         raise  # reported by main() as a refusal to start
@@ -120,6 +124,10 @@ def main() -> None:
     )
     parser.add_argument("--activate-version", type=int, metavar="N", help="activate an existing candidate")
     args = parser.parse_args()
+    if args.activate_version is not None and (args.activate or args.source):
+        parser.error(
+            "--activate-version activates an existing candidate; it can't be combined with an ingest"
+        )
     try:
         settings = IngestSettings()  # type: ignore[call-arg]
         configure_logging(settings.app_env, settings.log_level)

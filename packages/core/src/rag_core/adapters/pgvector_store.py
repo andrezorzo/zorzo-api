@@ -6,11 +6,14 @@ Vectors travel as pgvector's text form (`[1,2,3]`) with explicit casts, so no dr
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import structlog
 from pgvector import Vector
 from sqlalchemy import text
 
 from rag_core.adapters.postgres import Database
 from rag_core.ports import ActiveCorpus, ChunkRow, DocumentRow, PublishedChunk, SearchHit
+
+log = structlog.get_logger()
 
 INGEST_LOCK_KEY = 0x7A6F727A6F  # one ingest run at a time (LLD "Concurrency and idempotency")
 TEXT_SEARCH_CONFIG = {"en": "english", "pt": "portuguese"}
@@ -98,13 +101,20 @@ class PgCorpusStore:
 
     @asynccontextmanager
     async def lock(self) -> AsyncIterator[bool]:
-        async with self.db.engine.connect() as conn:
+        # Autocommit: the session lock must not hold a transaction open for the whole run, where an idle
+        # timeout could end it and free the lock mid-run.
+        async with self.db.engine.connect() as base:
+            conn = await base.execution_options(isolation_level="AUTOCOMMIT")
             got = bool(await conn.scalar(text("SELECT pg_try_advisory_lock(:k)"), {"k": INGEST_LOCK_KEY}))
             try:
                 yield got
             finally:
                 if got:
-                    await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": INGEST_LOCK_KEY})
+                    try:
+                        await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": INGEST_LOCK_KEY})
+                    except Exception:
+                        # Closing the connection frees the lock anyway; never hide why the run stopped.
+                        log.warning("ingest_unlock_failed", exc_info=True)
 
     async def create_candidate(self, embed_model_tag: str) -> int:
         async with self.db.engine.begin() as conn:

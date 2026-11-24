@@ -139,6 +139,13 @@ def test_refuses_to_activate_an_empty_candidate(db: str, tmp_path: Path) -> None
     assert status(db, version[0][0]) == "candidate"
 
 
+def test_rejects_a_symlinked_document(db: str, source: Path, tmp_path: Path) -> None:
+    outside = tmp_path / "outside.md"
+    outside.write_text((source / "faq-en.md").read_text().replace("faq-en", "linked"))
+    (source / "linked.md").symlink_to(outside)
+    assert_rejected(db, ingest(db, tmp_path / "data", "--source", str(source)), "linked.md")
+
+
 def test_lets_the_owners_listed_contact_through(db: str, source: Path, tmp_path: Path) -> None:
     write_doc(source, "contact.md", "Write to andre_zorzo@yahoo.com.")
     run = ingest(db, tmp_path / "data", "--source", str(source))

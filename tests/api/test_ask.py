@@ -183,3 +183,41 @@ def test_a_failure_outside_the_search_ends_with_error_then_done(
     monkeypatch.setattr("rag_api.ask.run_search_only", broken)
     stream = ask(client)
     assert stream.names() == ["error", "done"]
+
+
+def test_rejects_a_body_over_the_limit(client: TestClient) -> None:
+    big = {**QUESTION, "turnstile": "t" * 20_000}
+    response = client.post("/api/v1/ask", json=big)
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_input"
+
+
+def test_rejects_an_oversized_body_sent_without_a_length(client: TestClient) -> None:
+    def chunks() -> Iterator[bytes]:
+        yield b'{"q": "x", "session": "7b9e5c1e-6f0a-4a43-9a51-2d1f1c3b8a10", "turnstile": "'
+        for _ in range(20):
+            yield b"t" * 1000
+        yield b'"}'
+
+    response = client.post("/api/v1/ask", content=chunks(), headers={"content-type": "application/json"})
+    assert response.status_code == 422
+
+
+def test_a_hung_search_ends_with_error_then_done(client: TestClient) -> None:
+    app: Any = client.app
+    real = app.state.embedder
+
+    class Hung:
+        tag = real.tag
+
+        async def embed(self, texts: list[str]) -> list[list[float]]:
+            await asyncio.sleep(60)
+            return []
+
+    app.state.embedder = Hung()
+    app.state.limits = app.state.limits.model_copy(update={"request_deadline": 0.2, "ping_interval": 0.05})
+    try:
+        stream = ask(client)
+    finally:
+        app.state.embedder = real
+    assert stream.names()[-2:] == ["error", "done"]

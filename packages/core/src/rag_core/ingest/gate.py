@@ -47,6 +47,7 @@ ONE_LINE_BREAK = re.compile(r"(?<![^\S\n])[^\S\n]*+\n(?![^\S\n]*+\n)[^\S\n]*+")
 ODD_SPACE = re.compile(r"[^\S\n]")  # tabs, no-break and thin spaces
 SPACE_RUN = re.compile(r" {2,}")
 WHITESPACE = re.compile(r"\s+")
+ZERO_WIDTH = re.compile(r"[\u200b-\u200d\u2060\ufeff]")
 DIGITS = re.compile(r"\d+")
 # Digits with separators on one line; a phone may hide inside a longer run (`Ref 2024 11 98765-4321`).
 NUMBER_RUN = re.compile(r"[\d(+][\d ().+-]*+")
@@ -207,14 +208,16 @@ def personal_data(text: str, allowlist: Iterable[str] = ()) -> list[str]:
     text = text.replace("\r\n", "\n")
     allowlist = tuple(allowlist)
     allowed = {_same_spaces(a) for a in allowlist}
+    # Emails, CPFs and cards are also read as the page renders them: entities decoded, zero-width gone.
+    texts = (text, ZERO_WIDTH.sub("", html.unescape(text)))
     rules = []
-    if any(_same_spaces(e) not in allowed for e in _emails(text)):
+    if any(_same_spaces(e) not in allowed for t in texts for e in _emails(t)):
         rules.append("pii:email")
     if _unlisted_phone(text, allowlist, allowed):
         rules.append("pii:phone")
-    if any(_cpf_valid(m.group()) for m in CPF.finditer(text)):
+    if any(_cpf_valid(m.group()) for t in texts for m in CPF.finditer(t)):
         rules.append("pii:cpf")
-    if any(_luhn(m.group()) for m in CARD.finditer(text)):
+    if any(_luhn(m.group()) for t in texts for m in CARD.finditer(t)):
         rules.append("pii:card")
     return rules
 
@@ -226,6 +229,10 @@ async def check(
     problems: list[Finding] = []
     seen: set[str] = set()
     for path in sorted(source.glob("*.md")):
+        if path.is_symlink():
+            # gitleaks doesn't follow links, so a linked file would be ingested without its secret scan.
+            problems.append(Finding(path.name, "symlink"))
+            continue
         raw = path.read_bytes()
         try:
             text = raw.decode("utf-8-sig")  # a byte order mark, as Windows editors write, is dropped

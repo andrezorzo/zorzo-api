@@ -19,9 +19,9 @@ router = APIRouter()
 
 
 class AskRequest(BaseModel):
-    q: str
+    q: str = Field(max_length=2000)  # the exact limit (max_question_chars) applies after trimming
     session: UUID
-    turnstile: str = Field(min_length=1)  # verified by the gate (F01-T04)
+    turnstile: str = Field(min_length=1, max_length=2048)  # verified by the gate (F01-T04)
 
 
 class QueueSink:
@@ -60,7 +60,7 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
             except Exception:
                 # Whatever escaped the service, the visitor's stream still ends with `done`.
                 log.exception("stream_failed")
-                end_with_error(stream, UUID(trace_id))
+                end_with_error(sink, UUID(trace_id))  # every sink, so a stored trace ends too
 
     async def events() -> AsyncIterator[ServerSentEvent]:
         task = asyncio.create_task(run())

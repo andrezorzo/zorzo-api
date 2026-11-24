@@ -14,6 +14,7 @@ from rag_core.limits import load_limits
 from rag_core.telemetry import configure_logging
 
 from rag_api import ask, errors, health
+from rag_api.body_limit import BodyLimit
 from rag_api.settings import ApiSettings
 
 log = structlog.get_logger()
@@ -54,6 +55,8 @@ def create_app(settings: ApiSettings) -> FastAPI:
     app.state.rerankers = build_rerankers(settings)
     app.state.vector_store = PgVectorStore(db, limits.rrf_k, limits.search_min_similarity)
     app.state.trace_sinks = []  # extra sinks next to the stream (stored trace, F01-T10)
+    # Added before the error middleware, so it runs inside it and its refusal carries the trace id.
+    app.add_middleware(BodyLimit, limit=lambda: app.state.limits.max_body_bytes)
     errors.install(app)
     app.include_router(health.router)
     app.include_router(ask.router)

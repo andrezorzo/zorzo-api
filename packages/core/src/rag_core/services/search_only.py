@@ -3,6 +3,7 @@
 Until the agent graph exists (F01-T06) every question takes this path; afterwards it stays the degraded one.
 """
 
+import asyncio
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -13,7 +14,7 @@ import structlog
 from rag_core.errors import DEFAULT_MESSAGE, ErrorCode
 from rag_core.events import Degraded, DegradedReason, Done, Error, Hit, Retrieval, Stage, StageName
 from rag_core.limits import Limits
-from rag_core.ports import ActiveCorpus, Embedder, Reranker, TraceSink, VectorStore
+from rag_core.ports import ActiveCorpus, Embedder, Reranker, SearchHit, TraceSink, VectorStore
 from rag_core.services import retrieval
 
 log = structlog.get_logger()
@@ -35,6 +36,21 @@ def end_with_error(sink: TraceSink, trace_id: UUID) -> None:
     sink.record(Done(trace_id=trace_id, cached=False, abstained=False, suggestion=None))
 
 
+async def _retrieve(
+    question: str,
+    corpus: ActiveCorpus,
+    sink: TraceSink,
+    embedder: Embedder,
+    store: VectorStore,
+    rerankers: Sequence[Reranker],
+    limits: Limits,
+) -> list[SearchHit]:
+    with _stage(sink, "retrieve"):
+        hits = await retrieval.search(question, corpus.version, embedder=embedder, store=store, limits=limits)
+    with _stage(sink, "rerank"):
+        return await retrieval.rerank(question, hits, rerankers=rerankers, limits=limits)
+
+
 async def run_search_only(
     question: str,
     corpus: ActiveCorpus,
@@ -49,12 +65,9 @@ async def run_search_only(
 ) -> None:
     """Emits the whole stream, ending with `done`; a bug becomes `error` then `done`, never an exception."""
     try:
-        with _stage(sink, "retrieve"):
-            hits = await retrieval.search(
-                question, corpus.version, embedder=embedder, store=store, limits=limits
-            )
-        with _stage(sink, "rerank"):
-            hits = await retrieval.rerank(question, hits, rerankers=rerankers, limits=limits)
+        # A hung embedder or database must not keep the visitor's stream open (LLD "6.3 Agent run").
+        async with asyncio.timeout(limits.request_deadline):
+            hits = await _retrieve(question, corpus, sink, embedder, store, rerankers, limits)
         shown = [Hit(id=h.id, title=h.title, score=h.score) for h in hits[: limits.degraded_max_passages]]
         retrieval_event = Retrieval(hits=shown, corpus_version=corpus.version)
         # Everything that can fail runs before `degraded`, which may be followed only by its hits and `done`.

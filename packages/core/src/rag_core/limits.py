@@ -10,7 +10,9 @@ class Limits(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     max_question_chars: int = Field(gt=0)
+    max_body_bytes: int = Field(gt=0)
     ping_interval: float = Field(gt=0)
+    request_deadline: float = Field(gt=0)
     retrieval_top_k: int = Field(gt=0)
     rrf_k: int = Field(gt=0)
     rerank_top_n: int = Field(gt=0)
