@@ -67,7 +67,7 @@ means adding `domains/<other>/`, not changing `core`.
 | Dashboard | Django 5.2 LTS | HLD constraint; LTS keeps security fixes to April 2028 with one jump to the next LTS. Move to 6.2 LTS (April 2027) for native CSP and template partials |
 | Dashboard charts | TBD | Candidates: Chart.js, Apache ECharts, uPlot, Observable Plot, server-rendered SVG |
 | Embeddings | langchain-ollama `OllamaEmbeddings`; pinned tag starts at `bge-m3:567m`, 1024 dimensions | ADR 0008; 1024 fits every candidate model (section 12), so changing model is a re-ingest, not a migration |
-| Local rerank | fastembed (ONNX) with `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` registered as a custom model (`onnx/model_quint8_avx2.onnx`), baked into the API image and loaded offline | ADR 0009; small (130 MB) and multilingual on CPU; fastembed has no built-in copy of it |
+| Local rerank | fastembed (ONNX) with `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` registered as a custom model (`onnx/model_quint8_avx2.onnx`), baked into the API image and loaded offline; every model file is checked against a pinned SHA-256, so a changed model is refused | ADR 0009; small (130 MB) and multilingual on CPU; fastembed has no built-in copy of it |
 | Validation and settings | Pydantic v2 + pydantic-settings | Tool arguments, answer contract, config files, fail-fast settings |
 | Extraction and chunking | LangChain document loaders (Markdown in the MVP; PDF loaders pluggable per domain) + `MarkdownHeaderTextSplitter` / `RecursiveCharacterTextSplitter` | The loader interface makes the PDF library a configuration choice; Docling is too heavy for the VPS. The résumé enters as owner-reviewed Markdown converted once from the PDF |
 | Tracing | langsmith SDK + a custom LangChain CallbackHandler | The handler feeds SSE events and the public trace from the same step events |
@@ -158,7 +158,8 @@ domain pieces, not ports (section 6.5).
 - **Bot check:** every question carries a fresh Turnstile token, verified server-side before anything else;
   a provider error refuses the request.
 - **Input:** NFKC, control characters removed, length capped at `MAX_QUESTION_CHARS`; body capped at
-  `MAX_BODY_BYTES` in Caddy.
+  `MAX_BODY_BYTES` in Caddy and again in the API, which counts the bytes as they arrive (a chunked body too)
+  and answers `422 invalid_input`.
 - **CORS:** one origin; the allowlist holds `https://zorzo.dev.br`, plus localhost when `APP_ENV=local`.
 - **Admin:** the Django admin listens on a local port, reachable only through an SSH tunnel; its views are
   read-only, except the "remove from public view" action on traces, which sets `removed_at` and writes a
@@ -379,7 +380,7 @@ States of a corpus version; arrows carry the event that causes the transition.
   `JUDGE_AGREEMENT_MIN`, so quality is never measured with a new ruler and a new model at once.
 - Documents without `reviewed_by_owner: true`, with missing or invalid front matter, or with a scan hit
   (gitleaks or the PII pass: emails, phone numbers, CPF, card numbers; entries of the domain's
-  `pii_allowlist` pass: an exact string, case-insensitively, or a phone written with its +country code,
+  `pii_allowlist` pass; a symlinked file is refused, since gitleaks doesn't follow links: an exact string, case-insensitively, or a phone written with its +country code,
   which covers its international and national renderings), fail the run. The PII pass fails closed: text shaped like an
   address or a phone counts unless it is exactly a retina asset name or a semantic version, and a false
   hit is fixed by rewording the line. It guards against personal data that slips into the owner's own
@@ -644,9 +645,9 @@ endpoints and per-environment switches.
 | Name | Value | Where it applies | Source |
 | --- | --- | --- | --- |
 | `MAX_QUESTION_CHARS` | 500 | Input normalization | `limits.yaml` |
-| `MAX_BODY_BYTES` | 8 KB | Caddy request body | Caddyfile |
+| `MAX_BODY_BYTES` | 8 KB | Request body, in Caddy and in the API | Caddyfile, `limits.yaml` |
 | `PING_INTERVAL` | 10 s | SSE heartbeat | `limits.yaml` |
-| `REQUEST_DEADLINE` | 20 s | Whole request | `limits.yaml` |
+| `REQUEST_DEADLINE` | 20 s | Whole request; the search-only path ends with `error` then `done` when it passes | `limits.yaml` |
 | `ANSWER_RESERVE` | 12 s | Time kept for `answer` (section 6.3) | `limits.yaml` |
 | `TIMEOUT_ROUTE` / `TIMEOUT_RERANK` / `TIMEOUT_ANSWER` / `TIMEOUT_JUDGE` | 3 s / 1 s / 12 s / 5 s | Model gateway per stage | `limits.yaml` |
 | `TIMEOUT_SEARCH_CORPUS` / `TIMEOUT_GITHUB_ACTIVITY` | 1.5 s / 2 s | Tools | `limits.yaml` |
