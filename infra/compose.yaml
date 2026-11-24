@@ -1,3 +1,4 @@
+# Local stack. Credentials come from infra/.env (copy infra/.env.example); none are hardcoded here.
 name: zorzo
 
 services:
@@ -5,7 +6,7 @@ services:
     image: pgvector/pgvector:pg17
     environment:
       POSTGRES_USER: zorzo
-      POSTGRES_PASSWORD: zorzo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in infra/.env}
       POSTGRES_DB: zorzo
     ports:
       - "127.0.0.1:5432:5432"
@@ -24,7 +25,7 @@ services:
       target: dashboard
     environment:
       APP_ENV: local
-      DATABASE_URL: postgresql://zorzo:zorzo@postgres:5432/zorzo
+      DATABASE_URL: postgresql://zorzo:${POSTGRES_PASSWORD}@postgres:5432/zorzo
     depends_on:
       postgres:
         condition: service_healthy
@@ -38,7 +39,7 @@ services:
     environment:
       APP_ENV: local
       DOMAIN: zorzo
-      DATABASE_URL: postgresql://zorzo:zorzo@postgres:5432/zorzo
+      DATABASE_URL: postgresql://zorzo:${POSTGRES_PASSWORD}@postgres:5432/zorzo
       # The API binds to 127.0.0.1 by default. To reach it from the host through the port below,
       # set HOST to 0.0.0.0 here (owner's decision).
     depends_on:

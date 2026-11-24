@@ -9,6 +9,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     services:
+      # Throwaway database that lives only inside this job; its credentials protect nothing.
       postgres:
         image: pgvector/pgvector:pg17
         env:

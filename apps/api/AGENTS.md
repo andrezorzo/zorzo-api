@@ -5,7 +5,8 @@ no business rules (LLD "Components and dependencies").
 
 ## Commands
 
-Run from the repository root, with Postgres up (`docker compose -f infra/compose.yaml up -d postgres --wait`).
+Run from the repository root, with Postgres up (`docker compose -f infra/compose.yaml up -d postgres --wait`; first copy
+`infra/.env.example` to `infra/.env`).
 
 | What | Command |
 | --- | --- |

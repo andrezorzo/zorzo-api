@@ -662,6 +662,7 @@ endpoints and per-environment switches.
 | `LOG_LEVEL` | all | Log level | env file |
 | `DOMAIN` | api, ingest, evals | Which `domains/<name>` to load | env file |
 | `DATABASE_URL` | api, dashboard, ingest, evals | Postgres connection | secret |
+| `POSTGRES_PASSWORD` | postgres (compose) | Database password; compose refuses to start without it, so no default reaches production | secret |
 | `OLLAMA_URL`, `EMBED_MODEL_TAG` | api, ingest | Embedding endpoint and pinned tag | env file |
 | `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `NVIDIA_API_KEY`, `GOOGLE_AI_API_KEY` | api, evals | Model providers | secret |
 | `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, `LANGSMITH_TRACING` | api, dashboard | Tracing and stats pull | secret / env file |
