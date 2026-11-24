@@ -13,19 +13,22 @@ from pathlib import Path
 from rag_core.ingest.frontmatter import DocumentMeta, FrontMatterError, parse
 from rag_core.ports import Finding, SecretScanner
 
-# After the @, three shapes aren't an address: a retina asset (`logo@2x.png`), a version (`pkg@1.0.0`) and
-# any name ending in a file extension (`icon@x.dark.svg`). Digit domains such as 163.com still count.
-ASSET_EXT = r"png|jpe?g|gif|webp|svg|avif|ico|bmp|tiff?|heic|pdf|mp4|webm|zip|tar|gz"
-EMAIL = re.compile(
-    rf"[\w.+-]+@(?!\d+x\.)(?!\d+\.\d)(?![\w.-]*\.(?:{ASSET_EXT})\b)[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{{2,}}\b",
-    re.IGNORECASE,
+# Anything shaped like `local@domain` with a letter TLD counts as an email, except two exact shapes that are
+# not addresses: a retina asset name (`logo@2x.png`, `icon@2x.dark.svg`) and a semantic version
+# (`pkg@1.0.0-beta`). Failing closed is cheaper than a leak: a false hit means rewording one line.
+EMAIL_TOKEN = re.compile(r"[\w.+-]+@[\w.-]+")
+LETTER_TLD = re.compile(r"\.[A-Za-z]{2,}(?:\b|$)")
+RETINA_ASSET = re.compile(
+    r"\d+x(?:\.[\w-]+)*\.(?:png|jpe?g|gif|webp|svg|avif|ico|bmp|tiff?|heic)", re.IGNORECASE
 )
+SEMVER = re.compile(r"\d+\.\d+\.\d+(?:[-+.][\w.-]*)?")
+
 # Phone formats with a marker that a year range or an id doesn't have: a +country code, parentheses around
-# the area code, or the Brazilian mobile shape "DD 9XXXX-XXXX" (space or hyphen inside, on one line).
+# the area code, or the Brazilian mobile shape (area code, then 9 and eight digits), all on one line.
 PHONE = re.compile(
-    r"\+\d{1,3}[\s.-]?\(?\d{2,3}\)?[\s.-]?\d{3,5}[\s.-]?\d{4}\b"
-    r"|\(\d{2,3}\)\s?\d{3,5}[\s.-]?\d{4}\b"
-    r"|\b\d{2}[ \t]9\d{4}[ \t-]\d{4}\b"
+    r"\+\d{1,3}[ \t.-]?\(?\d{2,3}\)?[ \t.-]?\d{3,5}[ \t.-]?\d{4}\b"
+    r"|\(\d{2,3}\)[ \t]?\d{3,5}[ \t.-]?\d{4}\b"
+    r"|\b\d{2}[ \t-]9[ \t]?\d{4}[ \t-]?\d{4}\b"
 )
 CPF = re.compile(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b|\b\d{11}\b")
 CARD = re.compile(r"\b(?:\d[ -]?){12,18}\d\b")
@@ -60,11 +63,19 @@ def _luhn(value: str) -> bool:
     return total % 10 == 0
 
 
+def _is_email(token: str) -> bool:
+    domain = token.split("@", 1)[1]
+    if RETINA_ASSET.fullmatch(domain) or SEMVER.fullmatch(domain):
+        return False
+    return bool(LETTER_TLD.search(domain))
+
+
 def personal_data(text: str, allowlist: Iterable[str] = ()) -> list[str]:
     """The PII rules a text breaks; matches equal to an allowlisted string don't count."""
     allowed = {a.lower() for a in allowlist}
     rules = []
-    if any(m.group().lower() not in allowed for m in EMAIL.finditer(text)):
+    if any(_is_email(m.group().rstrip(".-")) and m.group().rstrip(".-").lower() not in allowed
+           for m in EMAIL_TOKEN.finditer(text)):  # fmt: skip
         rules.append("pii:email")
     if any(m.group().lower() not in allowed for m in PHONE.finditer(text)):
         rules.append("pii:phone")

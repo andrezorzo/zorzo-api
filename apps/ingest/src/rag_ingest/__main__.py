@@ -21,7 +21,7 @@ from rag_core.adapters.gitleaks import GitleaksScanner
 from rag_core.adapters.local_publisher import LocalDataPublisher
 from rag_core.adapters.pgvector_store import PgCorpusStore
 from rag_core.adapters.postgres import Database
-from rag_core.domain import DomainError, corpus_dir, load_domain, load_examples
+from rag_core.domain import DomainError, Example, corpus_dir, load_domain, load_examples
 from rag_core.ingest import publish
 from rag_core.ingest.pipeline import ActivationRefused, IngestRejected, Summary, activate, run_ingest
 from rag_core.limits import load_limits
@@ -38,10 +38,14 @@ def _summary(summary: Summary) -> None:
 
 
 async def _activate_and_publish(
-    version: int, store: PgCorpusStore, publisher: DataPublisher, settings: IngestSettings, tag: str
+    version: int,
+    store: PgCorpusStore,
+    publisher: DataPublisher,
+    settings: IngestSettings,
+    tag: str,
+    examples: list[Example],
 ) -> None:
     # Local development may activate without an eval run; production never does (LLD "6.1 Corpus version").
-    examples = load_examples(settings.domain)  # before activating: a bad file must not leave data unpublished
     await activate(version, store=store, require_eval=settings.app_env != "local")
     log.info("corpus_activated", version=version)
     folder, files, manifest = publish.build(version, tag, await store.published_chunks(version), examples)
@@ -51,6 +55,7 @@ async def _activate_and_publish(
 
 async def _main(args: argparse.Namespace, settings: IngestSettings) -> int:
     domain = load_domain(settings.domain)
+    examples = load_examples(settings.domain)  # read before any write: a bad file stops the run at once
     db = Database(settings.database_url)
     store = PgCorpusStore(db)
     publisher = LocalDataPublisher(settings.data_dir)
@@ -64,7 +69,7 @@ async def _main(args: argparse.Namespace, settings: IngestSettings) -> int:
                 tag = await store.embed_model_tag(version)
                 if tag is None:
                     raise ActivationRefused(f"corpus version {version} does not exist")
-                await _activate_and_publish(version, store, publisher, settings, tag)
+                await _activate_and_publish(version, store, publisher, settings, tag, examples)
                 _summary(Summary(version, "active"))
                 return 0
             embedder = build_embedder(settings)
@@ -78,7 +83,9 @@ async def _main(args: argparse.Namespace, settings: IngestSettings) -> int:
             )
             log.info("corpus_ingested", **asdict(summary))
             if args.activate:
-                await _activate_and_publish(summary.version, store, publisher, settings, embedder.tag)
+                await _activate_and_publish(
+                    summary.version, store, publisher, settings, embedder.tag, examples
+                )
                 summary = replace(summary, status="active")
             _summary(summary)
             return 0

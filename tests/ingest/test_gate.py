@@ -70,15 +70,34 @@ async def test_a_failed_scan_is_an_error_not_a_clean_result(tmp_path: Path) -> N
         await GitleaksScanner().scan(tmp_path / "missing")
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "[cv](files/joao.silva@gmail.com.pdf)",
+        "joao@gmail.com-cv.pdf",
+        "ana@mail.zip.com.br",
+        "ana@studio.gif-art.com",
+        "ana@3x.com.br",
+        "joe@2x.io",
+        "x@1.2.example.com",
+    ],
+)
+def test_finds_emails_that_look_like_asset_names(text: str) -> None:
+    assert personal_data(text) == ["pii:email"]
+
+
 def test_finds_emails_whose_domain_starts_with_a_digit() -> None:
     assert personal_data("Mail li@163.com or x@1und1.de or a@1password.com") == ["pii:email"]
 
 
-def test_finds_brazilian_mobiles_with_a_space() -> None:
-    assert "pii:phone" in personal_data("Ligue 11 98765 4321.")
+@pytest.mark.parametrize(
+    "text", ["Ligue 11 98765 4321.", "Ligue 11 987654321.", "Ligue 11 9 8765-4321.", "Ligue 11-98765-4321."]
+)
+def test_finds_brazilian_mobiles(text: str) -> None:
+    assert "pii:phone" in personal_data(text)
 
 
-@pytest.mark.parametrize("text", ["Ranked 12 912345678 times", "issue 42\n91234-5678"])
+@pytest.mark.parametrize("text", ["issue 42\n91234-5678", "(11)\n98765 4321", "+55 11\n98765-4321"])
 def test_leaves_plain_numbers_alone(text: str) -> None:
     assert personal_data(text) == []
 
