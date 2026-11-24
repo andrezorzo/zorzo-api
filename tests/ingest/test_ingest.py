@@ -121,6 +121,7 @@ def test_rejects_the_candidate_when_embedding_fails(db: str, source: Path, tmp_p
     assert run.code == 1
     versions = rows(db, "SELECT status FROM corpus_versions")
     assert versions == [("rejected",)]
+    assert run.summary["status"] == "rejected"  # callers still learn the version
 
 
 def test_refuses_to_activate_a_version_that_is_not_a_candidate(db: str, source: Path, tmp_path: Path) -> None:

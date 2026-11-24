@@ -25,6 +25,7 @@ from rag_core.adapters.postgres import Database
 from rag_core.domain import DomainConfig, DomainError, Example, corpus_dir, load_domain, load_examples
 from rag_core.ingest.pipeline import (
     ActivationRefused,
+    IngestFailed,
     IngestRejected,
     Summary,
     activate_and_publish,
@@ -83,6 +84,7 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
                 return 1
             if args.activate_version is not None:
                 version = args.activate_version
+                ingested = Summary(version, "candidate")  # so a failure still reports this version
                 await _activate_and_publish(version, store, publisher, settings, examples)
                 _summary(Summary(version, "active"))
                 return 0
@@ -102,6 +104,10 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
                 summary = replace(summary, status="active")
             _summary(summary)
             return 0
+    except IngestFailed as exc:
+        log.exception("ingest_failed")
+        _summary(exc.summary)
+        return 1
     except IngestRejected as exc:
         for problem in exc.problems:
             log.error("ingest_rejected", file=problem.file, rule=problem.rule)
@@ -112,8 +118,8 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
         if ingested is not None:
             _summary(ingested)  # the candidate was written: callers still learn its version
         return 1
-    except (ConfigError, DomainError):
-        raise  # reported by main() as a refusal to start
+    except ConfigError:
+        raise  # reported by main()
     except Exception:
         # A failed ingest run has rejected its candidate. A failure after activation leaves the version
         # active, possibly without published data: re-running the ingest publishes a new version.
@@ -122,11 +128,11 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
             # The real status: the failure may have come after the version went live. The lookup itself can
             # fail (the database may be why the run stopped), and the summary line must still be printed.
             try:
-                status = await store.status(ingested.version)
+                status = await store.status(ingested.version) or ingested.status
             except Exception:
                 log.warning("status_lookup_failed", version=ingested.version, exc_info=True)
-                status = None
-            _summary(replace(ingested, status=status or "unknown"))
+                status = "unknown"  # documented in apps/ingest/AGENTS.md
+            _summary(replace(ingested, status=status))
         return 1
     finally:
         await db.close()
@@ -158,8 +164,8 @@ def main() -> None:
         sys.exit(1)
     try:
         sys.exit(asyncio.run(_main(args, settings, config)))
-    except (ConfigError, DomainError) as exc:  # e.g. EMBEDDER=fake outside APP_ENV=local
-        print(f"rag-ingest: refusing to start: {exc}", file=sys.stderr)
+    except ConfigError as exc:  # e.g. EMBEDDER=fake outside APP_ENV=local
+        print(f"rag-ingest: refusing to run: {exc}", file=sys.stderr)
         sys.exit(1)
 
 

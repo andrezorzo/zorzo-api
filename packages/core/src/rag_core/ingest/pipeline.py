@@ -31,6 +31,14 @@ class IngestRejected(Exception):
         super().__init__(f"corpus version {summary.version} rejected: {len(problems)} problem(s)")
 
 
+class IngestFailed(Exception):
+    """A run that stopped for a reason other than the gate; carries the version it had created."""
+
+    def __init__(self, summary: Summary) -> None:
+        self.summary = summary
+        super().__init__(f"ingest of corpus version {summary.version} failed")
+
+
 class ActivationRefused(Exception):
     pass
 
@@ -48,14 +56,23 @@ async def run_ingest(
     version = await store.create_candidate(embedder.tag)
     try:
         return await _fill_candidate(version, source, store, embedder, scanner, allowlist, limits)
-    except BaseException:
-        # Whatever stopped the run, the version must not stay a candidate that could be activated. A failing
-        # reject is logged, never allowed to hide why the run stopped.
-        try:
-            await store.reject(version)
-        except Exception:
-            log.exception("reject_failed", version=version)
+    except IngestRejected:
+        await _reject_quietly(store, version)
         raise
+    except Exception as exc:
+        await _reject_quietly(store, version)
+        raise IngestFailed(Summary(version, "rejected")) from exc
+    except BaseException:  # cancelled: still never leave an activatable candidate
+        await _reject_quietly(store, version)
+        raise
+
+
+async def _reject_quietly(store: CorpusStore, version: int) -> None:
+    """The version must not stay a candidate that could be activated; a failing reject never hides why."""
+    try:
+        await store.reject(version)
+    except Exception:
+        log.exception("reject_failed", version=version)
 
 
 async def _fill_candidate(

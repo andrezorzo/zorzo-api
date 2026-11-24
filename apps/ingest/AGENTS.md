@@ -37,8 +37,10 @@ Run from the repository root, with Postgres up and migrated.
 | Activate an existing candidate | `… uv run python -m rag_ingest --activate-version <N>` |
 | Tests of this app | `uv run pytest tests/ingest -q` |
 
-The command prints one line `{"summary": {...}}` (version, status, documents, chunks, embedded, copied) and
-exits 1 on a rejected run, a refused activation or when another run holds the lock.
+The command prints one line `{"summary": {...}}` (version, status, documents, chunks, embedded, copied)
+whenever it created or touched a version, and exits 1 on a rejected run, a failed run, a refused activation
+or when another run holds the lock. `status` is a corpus version state, or `unknown` when a failure left the
+database unreadable.
 
 ## Practices
 
