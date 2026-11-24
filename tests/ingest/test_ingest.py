@@ -129,6 +129,9 @@ def test_refuses_to_activate_a_version_that_is_not_a_candidate(db: str, source: 
     again = ingest(db, tmp_path / "data", "--activate-version", str(active.summary["version"]))
     assert again.code == 1
     assert "activation_refused" in again.output
+    assert again.summary["status"] == "active"  # the real status, read back
+    missing = ingest(db, tmp_path / "data", "--activate-version", "9999")
+    assert missing.code == 1 and missing.summary == {}  # no such version: no summary
 
 
 def test_refuses_to_activate_an_empty_candidate(db: str, tmp_path: Path) -> None:

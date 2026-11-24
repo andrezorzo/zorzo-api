@@ -3,8 +3,9 @@
     python -m rag_ingest [--source DIR] [--activate]   write a new candidate version, optionally activate it
     python -m rag_ingest --activate-version N          activate an existing candidate
 
-Prints one JSON summary line (`{"summary": {...}}`) and exits 1 on a rejected run, a refused activation
-or a busy lock.
+Prints one JSON summary line (`{"summary": {...}}`) whenever it created or acted on a version, with the
+version's real status (`unknown` if the database can't be read), and exits 1 on a rejected or failed run,
+a refused activation or a busy lock.
 """
 
 import argparse
@@ -71,22 +72,39 @@ class _Config:
     limits: Limits
 
 
+async def _report_failure(store: PgCorpusStore, version: int | None) -> None:
+    """The summary of a version a failed run created or touched, with its real status from the database.
+
+    The failure may have come before or after the version went live, or the reject may have failed, so the
+    status is read, never assumed; `unknown` when the database can't be read, nothing when there's no such
+    version.
+    """
+    if version is None:
+        return
+    try:
+        status = await store.status(version)
+    except Exception:
+        log.warning("status_lookup_failed", version=version, exc_info=True)
+        status = "unknown"
+    if status is not None:
+        _summary(Summary(version, status))
+
+
 async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Config) -> int:
     domain, examples, limits = config.domain, config.examples, config.limits
     db = Database(settings.database_url)
     store = PgCorpusStore(db)
     publisher = LocalDataPublisher(settings.data_dir)
-    ingested: Summary | None = None
+    touched: int | None = None  # the version this run created or acted on, for the failure summary
     try:
         async with store.lock() as got:
             if not got:
                 log.error("ingest_busy", reason="another ingest run holds the lock")
                 return 1
             if args.activate_version is not None:
-                version = args.activate_version
-                ingested = Summary(version, "candidate")  # so a failure still reports this version
-                await _activate_and_publish(version, store, publisher, settings, examples)
-                _summary(Summary(version, "active"))
+                touched = args.activate_version
+                await _activate_and_publish(touched, store, publisher, settings, examples)
+                _summary(Summary(touched, "active"))
                 return 0
             embedder = build_embedder(settings)
             summary = await run_ingest(
@@ -98,7 +116,7 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
                 limits=limits,
             )
             log.info("corpus_ingested", **asdict(summary))
-            ingested = summary
+            touched = summary.version
             if args.activate:
                 await _activate_and_publish(summary.version, store, publisher, settings, examples)
                 summary = replace(summary, status="active")
@@ -106,33 +124,24 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
             return 0
     except IngestFailed as exc:
         log.exception("ingest_failed")
-        _summary(exc.summary)
+        await _report_failure(store, exc.summary.version)
         return 1
     except IngestRejected as exc:
         for problem in exc.problems:
             log.error("ingest_rejected", file=problem.file, rule=problem.rule)
-        _summary(exc.summary)
+        await _report_failure(store, exc.summary.version)
         return 1
     except ActivationRefused as exc:
         log.error("activation_refused", reason=str(exc))
-        if ingested is not None:
-            _summary(ingested)  # the candidate was written: callers still learn its version
+        await _report_failure(store, touched)
         return 1
     except ConfigError:
         raise  # reported by main()
     except Exception:
-        # A failed ingest run has rejected its candidate. A failure after activation leaves the version
-        # active, possibly without published data: re-running the ingest publishes a new version.
+        # A failure after activation leaves the version active, possibly without published data:
+        # re-running the ingest publishes a new version.
         log.exception("ingest_failed")
-        if ingested is not None:
-            # The real status: the failure may have come after the version went live. The lookup itself can
-            # fail (the database may be why the run stopped), and the summary line must still be printed.
-            try:
-                status = await store.status(ingested.version) or ingested.status
-            except Exception:
-                log.warning("status_lookup_failed", version=ingested.version, exc_info=True)
-                status = "unknown"  # documented in apps/ingest/AGENTS.md
-            _summary(replace(ingested, status=status))
+        await _report_failure(store, touched)
         return 1
     finally:
         await db.close()
