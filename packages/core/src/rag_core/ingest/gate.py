@@ -11,6 +11,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+import phonenumbers
+
 from rag_core.ingest.frontmatter import DocumentMeta, FrontMatterError, parse
 from rag_core.ports import Finding, SecretScanner
 
@@ -27,16 +29,10 @@ RETINA_ASSET = re.compile(
 )
 SEMVER = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?")
 
-# Phone formats with a marker that a year range or an id doesn't have: a +country code or parentheses around
-# the area code (a wrapped line may split them), or the Brazilian mobile shape (area code, 9 and eight
-# digits) on one line. `[^\S\n]` is any space but a line break, non-breaking spaces included.
-_SP = r"[^\S\n]"
-_WRAP = r"(?:[^\S\n]*\n(?![^\S\n]*\n)[^\S\n]*|[^\S\n])"  # spaces, or one line break with indentation
-PHONE = re.compile(
-    rf"\+\d{{1,3}}(?:{_WRAP}|[.-])?\(?\d{{2,3}}\)?(?:{_WRAP}|[.-])?\d{{3,5}}(?:{_SP}|[.-])?\d{{4}}\b"
-    rf"|\(\d{{2,3}}\){_WRAP}?\d{{3,5}}(?:{_SP}|[.-])?\d{{4}}\b"
-    rf"|\b\d{{2}}(?:{_SP}|-)9{_SP}?\d{{4}}(?:{_SP}|-)?\d{{4}}\b"
-)
+# Phones come from Google's libphonenumber, which knows the real numbering plans of Brazil and the US, so a
+# year range or a port number isn't a phone. A line wrapped once inside a number is joined first.
+PHONE_REGIONS = ("BR", "US")
+ONE_LINE_BREAK = re.compile(r"[^\S\n]*\n(?![^\S\n]*\n)[^\S\n]*")
 CPF = re.compile(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b|\b\d{11}\b")
 CARD = re.compile(r"\b(?:\d[ -]?){12,18}\d\b")
 
@@ -90,6 +86,16 @@ def _is_email_domain(domain: str) -> bool:
     return bool(LETTER_TLD.search(domain))
 
 
+def _phones(text: str) -> set[str]:
+    """Every phone number in the text, in E.164 form."""
+    joined = ONE_LINE_BREAK.sub(" ", text)
+    return {
+        phonenumbers.format_number(m.number, phonenumbers.PhoneNumberFormat.E164)
+        for region in PHONE_REGIONS
+        for m in phonenumbers.PhoneNumberMatcher(joined, region, leniency=phonenumbers.Leniency.VALID)
+    }
+
+
 def _same_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", value).lower()
 
@@ -102,7 +108,7 @@ def personal_data(text: str, allowlist: Iterable[str] = ()) -> list[str]:
     rules = []
     if any(_same_spaces(e) not in allowed for e in _emails(text)):
         rules.append("pii:email")
-    if any(_same_spaces(m.group()) not in allowed for m in PHONE.finditer(text)):
+    if _phones(text) - _phones("\n\n".join(allowlist)):
         rules.append("pii:phone")
     if any(_cpf_valid(m.group()) for m in CPF.finditer(text)):
         rules.append("pii:cpf")
