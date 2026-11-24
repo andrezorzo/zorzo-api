@@ -15,6 +15,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 import structlog
+import yaml
 from pydantic import ValidationError
 from rag_core.adapters.factory import ConfigError, build_embedder
 from rag_core.adapters.gitleaks import GitleaksScanner
@@ -62,7 +63,9 @@ async def _activate_and_publish(
 
 async def _main(args: argparse.Namespace, settings: IngestSettings) -> int:
     domain = load_domain(settings.domain)
-    examples = load_examples(settings.domain)  # read before any write: a bad file stops the run at once
+    # Read before any write: a bad file stops the run at once, as a refusal to start.
+    examples = load_examples(settings.domain)
+    limits = load_limits(settings.limits_file)
     db = Database(settings.database_url)
     store = PgCorpusStore(db)
     publisher = LocalDataPublisher(settings.data_dir)
@@ -84,7 +87,7 @@ async def _main(args: argparse.Namespace, settings: IngestSettings) -> int:
                 embedder=embedder,
                 scanner=GitleaksScanner(settings.gitleaks_binary),
                 allowlist=domain.pii_allowlist,
-                limits=load_limits(settings.limits_file),
+                limits=limits,
             )
             log.info("corpus_ingested", **asdict(summary))
             ingested = summary
@@ -109,6 +112,8 @@ async def _main(args: argparse.Namespace, settings: IngestSettings) -> int:
         # A failed ingest run has rejected its candidate. A failure after activation leaves the version
         # active, possibly without published data: re-running the ingest publishes a new version.
         log.exception("ingest_failed")
+        if ingested is not None:
+            _summary(ingested)
         return 1
     finally:
         await db.close()
@@ -132,7 +137,7 @@ def main() -> None:
         settings = IngestSettings()  # type: ignore[call-arg]
         configure_logging(settings.app_env, settings.log_level)
         sys.exit(asyncio.run(_main(args, settings)))
-    except (ValidationError, DomainError, ConfigError) as exc:
+    except (ValidationError, DomainError, ConfigError, yaml.YAMLError, OSError) as exc:
         print(f"rag-ingest: refusing to start: {exc}", file=sys.stderr)
         sys.exit(1)
 

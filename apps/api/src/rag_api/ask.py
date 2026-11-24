@@ -19,7 +19,7 @@ router = APIRouter()
 
 
 class AskRequest(BaseModel):
-    q: str = Field(max_length=2000)  # the exact limit (max_question_chars) applies after trimming
+    q: str  # bounded by the body cap; max_question_chars applies after trimming
     session: UUID
     turnstile: str = Field(min_length=1, max_length=2048)  # verified by the gate (F01-T04)
 
@@ -38,7 +38,9 @@ class QueueSink:
 async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
     state = request.app.state
     question = normalize(body.q, state.limits)
-    corpus = await corpus_service.servable(state.vector_store, state.embedder.tag)
+    corpus = await corpus_service.servable(
+        state.vector_store, state.embedder.tag, state.limits.request_deadline
+    )
     trace_id: str = request.state.trace_id
     stream = QueueSink()
     sink = FanOutSink([stream, *state.trace_sinks])

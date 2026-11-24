@@ -113,8 +113,10 @@ class PgCorpusStore:
                     try:
                         await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": INGEST_LOCK_KEY})
                     except Exception:
-                        # Closing the connection frees the lock anyway; never hide why the run stopped.
+                        # Discarding the connection ends its session and so the lock; never hide why the run
+                        # stopped.
                         log.warning("ingest_unlock_failed", exc_info=True)
+                        await base.invalidate()
 
     async def create_candidate(self, embed_model_tag: str) -> int:
         async with self.db.engine.begin() as conn:

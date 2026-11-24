@@ -30,7 +30,7 @@ EXPOSE 8000
 CMD ["python", "-m", "rag_api"]
 
 FROM base AS ingest
-# gitleaks, pinned and checked against the release checksum (apps/ingest/AGENTS.md).
+# gitleaks, pinned by version and by the tarball hash below (the owner of both values).
 ARG GITLEAKS_VERSION=8.30.1
 # The tarball's SHA-256, fixed here: a checksums file from the same release can't vouch for a tampered one.
 ARG GITLEAKS_SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb

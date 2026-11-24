@@ -30,7 +30,7 @@ class BodyLimit:
         while True:
             message = await receive()
             if message["type"] != "http.request":
-                break  # the client left; let the app see it
+                return  # the client left mid-body: there is nobody to answer
             chunks.append(message.get("body", b""))
             size += len(chunks[-1])
             if size > limit:

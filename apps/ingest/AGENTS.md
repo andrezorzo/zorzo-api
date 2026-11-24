@@ -5,14 +5,15 @@ own: the gate, chunking, writes, activation and publishing live in `rag_core.ing
 
 ## Prerequisites
 
-- **gitleaks 8.30.1** on the `PATH` (the ingest gate and its tests need it). The CI and the `ingest` image
-  install the same version, checked against the release checksum. On Ubuntu, not from apt (too old):
+- **gitleaks** on the `PATH` (the ingest gate and its tests need it), at the version and tarball SHA-256 in
+  `infra/Dockerfile` (`GITLEAKS_VERSION`, `GITLEAKS_SHA256`), which the CI uses too. On Ubuntu, not from apt
+  (too old); check the tarball against that fixed hash, never against the release's own checksums file:
 
   ```bash
-  cd /tmp && V=8.30.1 \
-  && curl -sSLO https://github.com/gitleaks/gitleaks/releases/download/v$V/gitleaks_${V}_linux_x64.tar.gz \
-  && curl -sSLO https://github.com/gitleaks/gitleaks/releases/download/v$V/gitleaks_${V}_checksums.txt \
-  && grep linux_x64.tar.gz gitleaks_${V}_checksums.txt | sha256sum -c - \
+  V=$(sed -n 's/^ARG GITLEAKS_VERSION=//p' infra/Dockerfile)
+  SHA=$(sed -n 's/^ARG GITLEAKS_SHA256=//p' infra/Dockerfile)
+  cd /tmp && curl -sSLO https://github.com/gitleaks/gitleaks/releases/download/v$V/gitleaks_${V}_linux_x64.tar.gz \
+  && echo "$SHA  gitleaks_${V}_linux_x64.tar.gz" | sha256sum -c - \
   && tar -xzf gitleaks_${V}_linux_x64.tar.gz gitleaks && mkdir -p ~/.local/bin && mv gitleaks ~/.local/bin/
   ```
 

@@ -16,8 +16,12 @@ from rag_core.ports import SearchHit
 
 MODEL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
 MODEL_FILE = "onnx/model_quint8_avx2.onnx"
-# SHA-256 of every file the model loads, checked after download (repository revision 1427fd65, the ONNX
-# hash equal to Hugging Face's LFS id). A changed file means a changed model: it is refused, not run.
+MODEL_REVISION = (
+    "1427fd652930e4ba29e8149678df786c240d8825"  # the repository commit the hashes below come from
+)
+# SHA-256 of every file the model loads (the ONNX hash equals Hugging Face's LFS id). The files are downloaded
+# at the pinned revision and checked before onnxruntime or the tokenizer read them: a changed file is refused,
+# never parsed.
 MODEL_FILES_SHA256 = {
     "onnx/model_quint8_avx2.onnx": "6c2513767fb63d008a4377bef7a7a3555433d9436342bb53e35a3a72ffc52d4b",
     "tokenizer.json": "62c24cdc13d4c9952d63718d6c9fa4c287974249e16b7ade6d5a85e7bbb75626",
@@ -28,22 +32,30 @@ MODEL_FILES_SHA256 = {
 
 
 RETRY_AFTER_S = 60
+LOCK_WAIT_S = 0.5
 
 
 class ModelIntegrityError(RuntimeError):
     pass
 
 
-def verify_model_files(cache_dir: Path) -> None:
-    """Raise unless one downloaded snapshot of the model has exactly the expected files."""
-    for snapshot in cache_dir.glob(f"models--{MODEL.replace('/', '--')}/snapshots/*"):
-        if all(
-            (snapshot / name).is_file()
-            and hashlib.sha256((snapshot / name).read_bytes()).hexdigest() == digest
-            for name, digest in MODEL_FILES_SHA256.items()
-        ):
-            return
-    raise ModelIntegrityError(f"the rerank model files in {cache_dir} don't match the pinned hashes")
+def verify_model_files(snapshot: Path) -> None:
+    """Raise unless this exact snapshot folder holds the expected files."""
+    for name, digest in MODEL_FILES_SHA256.items():
+        path = snapshot / name
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise ModelIntegrityError(f"rerank model file {name} in {snapshot} doesn't match its pinned hash")
+
+
+def _download(cache_dir: Path) -> Path:
+    """The pinned revision's files, from the cache when present (the image loads offline)."""
+    from huggingface_hub import snapshot_download
+
+    return Path(
+        snapshot_download(
+            MODEL, revision=MODEL_REVISION, allow_patterns=list(MODEL_FILES_SHA256), cache_dir=str(cache_dir)
+        )
+    )
 
 
 @functools.cache
@@ -74,20 +86,27 @@ class LocalReranker:
         self._failed_at: float | None = None
 
     def model(self) -> Any:
-        with self._load:
+        # Another thread loading the model means this question falls to the next level now, not later.
+        if not self._load.acquire(timeout=LOCK_WAIT_S):
+            raise RuntimeError("the rerank model is still loading")
+        try:
             if self._model is None:
                 # After a failed load, questions fall to the next level at once instead of queueing behind a
                 # new download attempt; it is tried again after a cooldown.
                 if self._failed_at is not None and time.monotonic() - self._failed_at < RETRY_AFTER_S:
                     raise RuntimeError("the rerank model failed to load recently")
                 try:
-                    model = _cross_encoder_class()(MODEL, cache_dir=str(self.cache_dir))
-                    verify_model_files(self.cache_dir)
+                    snapshot = _download(self.cache_dir)
+                    verify_model_files(snapshot)
+                    self._model = _cross_encoder_class()(
+                        MODEL, cache_dir=str(self.cache_dir), specific_model_path=str(snapshot)
+                    )
                 except Exception:
                     self._failed_at = time.monotonic()
                     raise
-                self._model = model
             return self._model
+        finally:
+            self._load.release()
 
     def warm(self) -> None:
         self.model()

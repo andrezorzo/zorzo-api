@@ -34,4 +34,4 @@ def test_refuses_a_model_whose_files_changed(tmp_path: Path) -> None:
     (copy / "tokenizer.json").unlink()  # cached files are read-only
     (copy / "tokenizer.json").write_text("{}")
     with pytest.raises(ModelIntegrityError):
-        verify_model_files(tmp_path)
+        verify_model_files(copy)

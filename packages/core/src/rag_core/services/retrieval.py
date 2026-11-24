@@ -27,7 +27,8 @@ async def rerank(
     for level in rerankers:
         try:
             # The cross-encoder is CPU-bound: keep it off the event loop (LLD "Process model").
-            ranked = await anyio.to_thread.run_sync(level.rerank, question, hits)
+            # abandon_on_cancel: the request deadline ends the wait even if the thread can't be stopped.
+            ranked = await anyio.to_thread.run_sync(level.rerank, question, hits, abandon_on_cancel=True)
             return ranked[: limits.rerank_top_n]
         except Exception:
             log.warning("rerank_level_failed", level=type(level).__name__, exc_info=True)
