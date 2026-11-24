@@ -1,6 +1,6 @@
 # HLD — zorzo.dev.br
 
-2026-11-23 · André de Castro Zorzo · Status: draft · LLD: [lld.md](lld.md) · Brief: [product-brief.md](product-brief.md)
+2026-11-24 · André de Castro Zorzo · Status: draft · LLD: [lld.md](lld.md) · Brief: [product-brief.md](product-brief.md)
 
 ## 1. Context and goals
 
@@ -106,6 +106,7 @@ flowchart LR
     github[GitHub<br/>repos, Actions, GHCR, API]
     uptime[UptimeRobot]
     telegram[Telegram Bot API]
+    email[Email]
 
     visitor -- "questions, page and dashboard views (HTTPS)" --> site
     site -- "streamed answers, traces, dashboards (HTTPS)" --> visitor
@@ -120,7 +121,7 @@ flowchart LR
     uptime -- "health checks (HTTPS)" --> site
     site -- "uptime figure pull (REST)" --> uptime
     site -- "alerts: budget exhausted, providers down (HTTPS)" --> telegram
-    uptime -- "alert: site down" --> telegram
+    uptime -- "alert: site down (email)" --> email
 ```
 
 Rounded boxes are people; rectangles are systems; zorzo.dev.br is the system described here.
@@ -132,7 +133,8 @@ Rounded boxes are people; rectangles are systems; zorzo.dev.br is the system des
 | Cloudflare Turnstile | Bot check | Browser widget + server-side verify | Visitor (widget), zorzo.dev.br (verify) |
 | GitHub | Code, CI/CD, image registry, ingest trigger, repo content | Actions over SSH, REST API | GitHub (deploy, ingest), zorzo.dev.br (repo fetch) |
 | UptimeRobot | External availability check; uptime figure for `/status` | HTTPS probe; REST pull | UptimeRobot (probe), zorzo.dev.br (pull) |
-| Telegram Bot API | Alerts to the owner | HTTPS | zorzo.dev.br, UptimeRobot |
+| Telegram Bot API | Alerts to the owner from the API | HTTPS | zorzo.dev.br |
+| Email | Site-down alert to the owner, straight from UptimeRobot (its free plan has no Telegram), so it arrives even when the VPS is down | SMTP (UptimeRobot) | UptimeRobot |
 
 AWS (CloudFront, S3, Route 53, WAF) and the VPS are where the system runs, not external systems: see
 sections 5 and 9.
@@ -389,8 +391,9 @@ the corpus and the brain data can be rebuilt from git.
   trace, and the trace leads to its logs.
 - **Metrics:** `/status` shows p50/p95 latency, cost per answer, budget used, the active model chain and
   breaker state, all computed from traces and counters. Quality metrics come from eval runs.
-- **Alerts:** sent to André on Telegram through a bot: site down (from UptimeRobot), daily budget
-  exhausted, and all answer providers down (both from the API). Each alert fires once per incident, not
+- **Alerts:** daily budget exhausted and all answer providers down go to André on Telegram through a bot,
+  from the API; site down goes by email straight from UptimeRobot, never through the API, so it arrives
+  even when the VPS is down. Each alert fires once per incident, not
   on every request. Failed ingest or deploy runs are already reported by GitHub.
 
 ### Errors, retries and idempotency
@@ -437,7 +440,7 @@ the corpus and the brain data can be rebuilt from git.
 | Production | The public site | CloudFront + S3 (AWS) and one Contabo VPS in US East (ADR 0002) |
 
 **Production.** One instance of each container on the VPS, kept up by compose restart policies and
-systemd. Availability comes from simplicity: no redundancy (non-goal 2), UptimeRobot alerts on Telegram,
+systemd. Availability comes from simplicity: no redundancy (non-goal 2), UptimeRobot alerts by email,
 a nightly backup with a monthly restore test, and a VPS rebuildable from the repo. There is no staging
 environment: with a US$10 budget and a team of one, the eval gate, the smoke test and the automatic
 rollback take its place.
@@ -488,7 +491,5 @@ CloudFront; LangSmith is optional. What local doesn't reproduce:
 - [ ] Uptime target: TBD.
 - [ ] Does SSE pass through CloudFront event by event? Test with a fake slow stream at M1.
 - [ ] Does the CloudFront Free flat-rate plan include WebSocket (SSE fallback)?
-- [ ] Does UptimeRobot's free plan send Telegram alerts? If not, it calls a webhook on the API, which sends
-  the message.
 - [ ] OpenRouter free limits: per model or per account? Measure before relying on several `:free` models in
   the chain.

@@ -1,6 +1,6 @@
 # LLD — zorzo.dev.br (zorzo-api)
 
-2026-11-23 · André de Castro Zorzo · Status: draft · HLD: [hld.md](hld.md)
+2026-11-24 · André de Castro Zorzo · Status: draft · HLD: [hld.md](hld.md)
 
 Scope: the `zorzo-api` repository. The front (`zorzo-site`) keeps its own LLD for rendering and the 3D brain;
 section 8 here covers only how the front behaves against the API, plus the dashboard pages.
@@ -17,9 +17,9 @@ Status labels used below: **existing**, **planned**, **to detail** (named, behav
 | Environment variables (type, required, default) | Each app's pydantic-settings class (planned) |
 | Rule values | `config/limits.yaml` (planned); values decided in section 9 of this document |
 | Model and rerank chains | `config/models.yaml`, `config/models.local.yaml` (planned) |
-| Commands and project practices | `README.md`, `AGENTS.md` (planned) |
+| Commands and project practices | `README.md`, `AGENTS.md` |
 | Where each piece of code lives, and why | `docs/code-map.md` (planned; also a corpus source) |
-| Vocabulary | `GLOSSARY.md` (planned); until then, the glossary in [product-brief.md](product-brief.md) |
+| Vocabulary | [GLOSSARY.md](../GLOSSARY.md) |
 | Architecture and its reasons | [hld.md](hld.md) |
 | Decisions with their reasons | `docs/adr/`, indexed in section 11 here and in the HLD |
 | Scope and audience | [product-brief.md](product-brief.md) |
@@ -291,7 +291,7 @@ Conventions:
 | Method and path | Status | Input | Output | Behavior |
 | --- | --- | --- | --- | --- |
 | `POST /api/v1/ask` | planned | `q` (≤ `MAX_QUESTION_CHARS`), `session`, `turnstile` | `200 text/event-stream`; errors per section 3 | The gate runs before the stream opens; after it passes, the events below |
-| `GET /api/healthz` | planned | — | `{status: ok \| down, mode: normal \| degraded, db: ok \| down}` | Never cached, no gate. Used by the front, the deploy smoke test and UptimeRobot |
+| `GET /api/healthz` | planned | — | `200 {status: ok, mode: normal \| degraded, db: ok}`; `503 {status: down, mode: unknown, db: down}` when the database can't be reached | Never cached (`Cache-Control: no-store`; CloudFront caches no error responses for `/api/*`), no gate. Used by the front, the deploy smoke test and UptimeRobot |
 
 JSON read routes for traces, evals, defenses, status and sources are not part of the API: the dashboard
 serves those pages from the database (section 8, ADR 0015).
@@ -511,7 +511,8 @@ Kinds: `site_down`, `budget_exhausted`, `providers_down`, `backup_failed`, `rest
 
 - One message when an incident opens, one when it closes, and a reminder every `ALERT_REPEAT_AFTER` while it
   stays open.
-- `site_down` comes from UptimeRobot (directly, or through an API webhook; see HLD open questions).
+- `site_down` is sent by UptimeRobot itself, by email (its free plan has no Telegram), never through the
+  API, so it arrives when the VPS is down; it has no row in `alert_states`.
   `budget_exhausted` and `providers_down` are detected by the API during requests. The other three come from
   the background tasks (section 7).
 
