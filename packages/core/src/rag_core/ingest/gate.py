@@ -92,12 +92,13 @@ def _is_email_domain(domain: str) -> bool:
     return bool(LETTER_TLD.search(domain))
 
 
-def _phone_spans(text: str) -> set[str]:
-    """The text of every phone-shaped span, read with each region's numbering plan."""
-    prepared = html.unescape(INVISIBLE_MARKUP.sub("", text))
+def _phone_spans(text: str) -> set[tuple[str, str]]:
+    """(region, text) of every phone-shaped span, read with each region's numbering plan."""
+    # Replaced by a space, not deleted: deleting would glue a label to the digits and hide the number.
+    prepared = html.unescape(INVISIBLE_MARKUP.sub(" ", text))
     prepared = ODD_SPACE.sub(" ", ONE_LINE_BREAK.sub(" ", prepared))
     return {
-        m.raw_string
+        (region, m.raw_string)
         for region in PHONE_REGIONS
         # The default stops after 65,535 candidates, which would leave the end of a long document unread.
         for m in phonenumbers.PhoneNumberMatcher(
@@ -110,34 +111,53 @@ def _digit_groups(text: str) -> tuple[str, ...]:
     return tuple(re.findall(r"\d+", text))
 
 
+@dataclass(frozen=True)
+class _PhoneShapes:
+    international: frozenset[tuple[str, ...]]  # with the country code: valid in any region's reading
+    national: frozenset[tuple[str, tuple[str, ...]]]  # (region, groups): only in that region's reading
+
+
 @functools.cache
-def _allowed_phone_shapes(allowlist: tuple[str, ...]) -> frozenset[tuple[str, ...]]:
+def _allowed_phone_shapes(allowlist: tuple[str, ...]) -> _PhoneShapes:
     """Digit groups of every standard rendering of the allowlisted phones.
 
-    A phone entry needs its +country code. Comparing digit groups lets `(415) 555-0132` match +1 415-555-0132
-    while `(41) 5555-0132`, the same digits in Brazil, stays someone else's number.
+    A phone entry needs its +country code. The grouping tells the country: `(415) 555-0132` is the US number
+    +1 415-555-0132, while `(41) 5555-0132`, the same digits grouped the Brazilian way, stays someone else's.
     """
-    shapes = set()
+    international: set[tuple[str, ...]] = set()
+    national: set[tuple[str, tuple[str, ...]]] = set()
+    fmt = phonenumbers.PhoneNumberFormat
     for entry in allowlist:
         try:
             number = phonenumbers.parse(entry, None)
         except phonenumbers.NumberParseException:
             continue  # national format or not a phone: such entries match as exact strings
-        if phonenumbers.is_valid_number(number):
-            for rendering in (
-                phonenumbers.PhoneNumberFormat.INTERNATIONAL,
-                phonenumbers.PhoneNumberFormat.NATIONAL,
-            ):
-                shapes.add(_digit_groups(phonenumbers.format_number(number, rendering)))
-    return frozenset(shapes)
+        if not phonenumbers.is_valid_number(number):
+            continue
+        region = phonenumbers.region_code_for_number(number)
+        international.add(_digit_groups(phonenumbers.format_number(number, fmt.INTERNATIONAL)))
+        international.add(_digit_groups(phonenumbers.format_number(number, fmt.E164)))
+        national_text = phonenumbers.format_number(number, fmt.NATIONAL)
+        national.add((region, _digit_groups(national_text)))
+        national.add((region, ("".join(_digit_groups(national_text)),)))  # written without separators
+    return _PhoneShapes(frozenset(international), frozenset(national))
 
 
 def _unlisted_phone(text: str, allowlist: tuple[str, ...], allowed_strings: set[str]) -> bool:
     shapes = _allowed_phone_shapes(allowlist)
-    return any(
-        _same_spaces(raw) not in allowed_strings and _digit_groups(raw) not in shapes
-        for raw in _phone_spans(text)
-    )
+    readings: dict[str, list[str]] = {}
+    for region, raw in _phone_spans(text):
+        readings.setdefault(raw, []).append(region)
+
+    def covered(raw: str, regions: list[str]) -> bool:
+        groups = _digit_groups(raw)
+        return (
+            _same_spaces(raw) in allowed_strings
+            or groups in shapes.international
+            or any((region, groups) in shapes.national for region in regions)
+        )
+
+    return any(not covered(raw, regions) for raw, regions in readings.items())
 
 
 def _same_spaces(value: str) -> str:

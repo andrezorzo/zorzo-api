@@ -204,3 +204,13 @@ def test_the_allowlist_can_be_any_iterable() -> None:
 )
 def test_an_allowlist_entry_covers_its_own_number(text: str, allow: str) -> None:
     assert personal_data(text, [allow]) == []
+
+
+@pytest.mark.parametrize("text", ["+5511987654321", "tel:+5511987654321", "11987654321", "(11) 98765-4321"])
+def test_an_allowlisted_phone_covers_its_compact_forms(text: str) -> None:
+    assert personal_data(text, ["+55 11 98765-4321"]) == []
+
+
+@pytest.mark.parametrize("text", ["contato_11987654321", "**Tel**11 98765-4321"])
+def test_markup_next_to_a_phone_doesnt_hide_it(text: str) -> None:
+    assert personal_data(text) == ["pii:phone"]
