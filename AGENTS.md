@@ -87,8 +87,8 @@ adds it there.
 - **Work branches:** `feature/*`, `bugfix/*`, `hotfix/*` and `docs/*`, created from `main` and merged by
   pull request.
 - **Commits:** conventional commits (`docs:`, `feat:`, `fix:` …), short and focused on why.
-- **Review before push:** no code reaches GitHub until a `code-review` at level `high` on the unreviewed
-  diff comes back with nothing accepted, plus a `security-review` when the diff touches logs, secrets,
+- **Review before push:** on the unreviewed diff, run `simplify`, then `code-review` at level `high`; no code
+  reaches GitHub until the review comes back with nothing accepted, plus a `security-review` when the diff touches logs, secrets,
   configuration, errors or authentication. Fixes from a review are new code and go through the same loop.
   When a library default affects security (logging, tracebacks, error rendering), check it in the installed
   source, not from memory.
