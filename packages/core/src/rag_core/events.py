@@ -141,8 +141,8 @@ EVENTS: tuple[type[StreamEvent], ...] = (
 
 ORDERING = (
     "SSE frames `event: <name>` and `data: <JSON>`; `: ping` comments keep the connection alive. "
-    "Ordering: `done` is always last, sent exactly once unless the connection drops; `blocked`, `degraded` "
-    "and `error` are followed only by `done`, except that `degraded` sends its `retrieval` hits first; every "
+    "Ordering: `done` is always last, sent exactly once unless the connection drops; `blocked` and `error` "
+    "are followed only by `done`; `degraded` is followed only by its `retrieval` hits, then `done`; every "
     "`token` comes before the first `claim`; a cached answer sends `stage`, the cached `claim` events, "
     "`usage` with cost 0 and `done {cached: true}`, with no `token`. v1 freezes at launch."
 )

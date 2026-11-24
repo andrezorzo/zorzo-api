@@ -91,8 +91,11 @@ async def _main(args: argparse.Namespace, settings: IngestSettings) -> int:
     except ActivationRefused as exc:
         log.error("activation_refused", reason=str(exc))
         return 1
+    except (ConfigError, DomainError):
+        raise  # reported by main() as a refusal to start
     except Exception:
-        # The candidate was already rejected by the pipeline; the traceback goes to the log.
+        # A failed ingest run has rejected its candidate. A failure after activation leaves the version
+        # active, possibly without published data: re-running the ingest publishes a new version.
         log.exception("ingest_failed")
         return 1
     finally:

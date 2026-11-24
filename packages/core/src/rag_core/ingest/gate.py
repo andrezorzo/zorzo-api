@@ -13,14 +13,16 @@ from pathlib import Path
 from rag_core.ingest.frontmatter import DocumentMeta, FrontMatterError, parse
 from rag_core.ports import Finding, SecretScanner
 
-# The domain starts with a letter, so asset names such as `logo@2x.png` aren't emails.
-EMAIL = re.compile(r"[\w.+-]+@[A-Za-z][\w-]*(?:\.[\w-]+)*\.[A-Za-z]{2,}\b")
+# An image extension in the TLD position means an asset name such as `logo@2x.png`, not an email.
+EMAIL = re.compile(
+    r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.(?!(?:png|jpe?g|gif|webp|svg|avif)\b)[A-Za-z]{2,}\b", re.IGNORECASE
+)
 # Phone formats with a marker that a year range or an id doesn't have: a +country code, parentheses around
 # the area code, or the Brazilian mobile shape "DD 9XXXX-XXXX".
 PHONE = re.compile(
     r"\+\d{1,3}[\s.-]?\(?\d{2,3}\)?[\s.-]?\d{3,5}[\s.-]?\d{4}\b"
     r"|\(\d{2,3}\)\s?\d{3,5}[\s.-]?\d{4}\b"
-    r"|\b\d{2}\s9\d{4}-\d{4}\b"
+    r"|\b\d{2}\s9\d{4}[\s-]?\d{4}\b"
 )
 CPF = re.compile(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b|\b\d{11}\b")
 CARD = re.compile(r"\b(?:\d[ -]?){12,18}\d\b")
@@ -79,7 +81,7 @@ async def check(
     for path in sorted(source.glob("*.md")):
         raw = path.read_bytes()
         try:
-            text = raw.decode("utf-8")
+            text = raw.decode("utf-8-sig")  # a byte order mark, as Windows editors write, is dropped
         except UnicodeDecodeError:
             problems.append(Finding(path.name, "not UTF-8"))
             continue

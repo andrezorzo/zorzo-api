@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 from rag_core.adapters.gitleaks import GitleaksError, GitleaksScanner
 from rag_core.ingest.frontmatter import FrontMatterError, parse
-from rag_core.ingest.gate import personal_data
+from rag_core.ingest.gate import check, personal_data
+from rag_core.ports import Finding
 
 VALID = "doc_key: d\ntitle: T\nkind: faq\nlang: en\nauthority: 1\nreviewed_by_owner: true\n"
 
@@ -54,3 +55,28 @@ def test_rejects_front_matter_that_is_not_a_mapping(head: str) -> None:
 async def test_a_failed_scan_is_an_error_not_a_clean_result(tmp_path: Path) -> None:
     with pytest.raises(GitleaksError):
         await GitleaksScanner().scan(tmp_path / "missing")
+
+
+def test_finds_emails_whose_domain_starts_with_a_digit() -> None:
+    assert personal_data("Mail li@163.com or x@1und1.de") == ["pii:email"]
+
+
+@pytest.mark.parametrize("text", ["Ligue 11 98765 4321.", "Ligue 11 987654321."])
+def test_finds_brazilian_mobiles_without_a_hyphen(text: str) -> None:
+    assert "pii:phone" in personal_data(text)
+
+
+def test_an_impossible_date_is_a_front_matter_problem() -> None:
+    with pytest.raises(FrontMatterError):
+        parse("---\n" + VALID + "updated: 2024-13-45\n---\nbody\n")
+
+
+class NoSecrets:
+    async def scan(self, folder: Path) -> list[Finding]:
+        return []
+
+
+async def test_reads_a_file_saved_with_a_byte_order_mark(tmp_path: Path) -> None:
+    (tmp_path / "bom.md").write_bytes(("﻿---\r\n" + VALID + "---\r\n# T\r\n\r\ntext\r\n").encode())
+    documents, problems = await check(tmp_path, NoSecrets(), ())
+    assert problems == [] and documents[0].meta.doc_key == "d"

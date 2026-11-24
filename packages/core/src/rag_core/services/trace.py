@@ -12,6 +12,8 @@ class FanOutSink:
     """The first sink is the visitor's stream; a failing extra sink is logged and skipped, never fatal."""
 
     def __init__(self, sinks: list[TraceSink]) -> None:
+        if not sinks:
+            raise ValueError("FanOutSink needs the stream sink first")
         self.sinks = sinks
 
     def record(self, event: StreamEvent) -> None:

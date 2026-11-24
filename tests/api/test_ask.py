@@ -172,3 +172,14 @@ def test_a_failing_trace_sink_still_ends_the_stream(client: TestClient) -> None:
     finally:
         app.state.trace_sinks.clear()
     assert stream.names()[-1] == "done"
+
+
+def test_a_failure_outside_the_search_ends_with_error_then_done(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def broken(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr("rag_api.ask.run_search_only", broken)
+    stream = ask(client)
+    assert stream.names() == ["error", "done"]

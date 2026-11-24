@@ -3,10 +3,14 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+import structlog
+
 from rag_core.ingest import gate
 from rag_core.ingest.chunking import ChunkDraft, split
 from rag_core.limits import Limits
 from rag_core.ports import ChunkRow, CorpusStore, DocumentRow, Embedder, Finding, SecretScanner
+
+log = structlog.get_logger()
 
 
 @dataclass(frozen=True)
@@ -44,8 +48,12 @@ async def run_ingest(
     try:
         return await _fill_candidate(version, source, store, embedder, scanner, allowlist, limits)
     except BaseException:
-        # Whatever stopped the run, the version must not stay a candidate that could be activated.
-        await store.reject(version)
+        # Whatever stopped the run, the version must not stay a candidate that could be activated. A failing
+        # reject is logged, never allowed to hide why the run stopped.
+        try:
+            await store.reject(version)
+        except Exception:
+            log.exception("reject_failed", version=version)
         raise
 
 

@@ -36,7 +36,7 @@ def parse(text: str) -> tuple[DocumentMeta, str]:
         head, body = text[4:].rstrip("\n")[: -len("\n---")], ""
     try:
         raw = yaml.safe_load(head)
-    except yaml.YAMLError:
+    except (yaml.YAMLError, ValueError, TypeError):  # PyYAML builds dates while loading
         raise FrontMatterError("invalid front matter (unreadable YAML)") from None
     if not isinstance(raw, dict):
         raise FrontMatterError("invalid front matter (not a mapping)")
