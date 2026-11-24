@@ -86,6 +86,10 @@ the other records are written during implementation and go in the task's PR.
   configuration, errors or authentication. Fixes from a review are new code and go through the same loop.
   When a library default affects security (logging, tracebacks, error rendering), check it in the installed
   source, not from memory.
+- **Pull request description:** follows `.github/pull_request_template.md`. A task PR has the task title, a
+  summary, the plan path, a "Criteria" section with one item per `AC<n>` (the test that proves it, or what
+  a human reviewer checks and where) and optional "Notes". Any other PR has "What", "Why" (where it came
+  from, e.g. a review) and "Review" (the files and sections to look at).
 - **No AI attribution:** no co-author trailers or "generated with" lines in commits or pull requests.
 - **Merge:** merging is the owner's decision. An agent merges only when the owner explicitly authorizes
   that PR or task, and a refused `gh pr merge` is never worked around.
