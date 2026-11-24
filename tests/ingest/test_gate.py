@@ -38,10 +38,11 @@ def test_finds_emails_but_not_asset_names() -> None:
     "text",
     [
         "![logo](img/logo@2x.png)",
-        "icon@2x.dark.png",
-        "hero@2x.min.svg",
+        "logo@2x-dark.png",
+        "logo@1.5x.png",
         "favicon@2x.ico",
         "pkg@1.0.0-beta.rc",
+        "pkg@1.0.0+build.5",
     ],
 )
 def test_leaves_asset_names_and_versions_alone(text: str) -> None:
@@ -80,6 +81,12 @@ async def test_a_failed_scan_is_an_error_not_a_clean_result(tmp_path: Path) -> N
         "ana@3x.com.br",
         "joe@2x.io",
         "x@1.2.example.com",
+        "x@1.2.3.example.com",
+        "![](img/joe@2x.io.png)",
+        # Fails closed: a retina name with an extra label can't be told from an address in a file name.
+        "icon@2x.dark.png",
+        "user@host@example.com",
+        "_joao@gmail.com_",
     ],
 )
 def test_finds_emails_that_look_like_asset_names(text: str) -> None:
@@ -97,7 +104,20 @@ def test_finds_brazilian_mobiles(text: str) -> None:
     assert "pii:phone" in personal_data(text)
 
 
-@pytest.mark.parametrize("text", ["issue 42\n91234-5678", "(11)\n98765 4321", "+55 11\n98765-4321"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "+55\u00a011\u00a098765-4321",
+        "(11)\u00a098765-4321",
+        "contato: +55 (11)\n98765-4321",
+        "(11)\n98765 4321",
+    ],
+)
+def test_finds_phones_across_odd_spaces_and_a_wrapped_line(text: str) -> None:
+    assert "pii:phone" in personal_data(text)
+
+
+@pytest.mark.parametrize("text", ["issue 42\n91234-5678"])
 def test_leaves_plain_numbers_alone(text: str) -> None:
     assert personal_data(text) == []
 
