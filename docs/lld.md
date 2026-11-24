@@ -73,7 +73,7 @@ means adding `domains/<other>/`, not changing `core`.
 | Tracing | langsmith SDK + a custom LangChain CallbackHandler | The handler feeds SSE events and the public trace from the same step events |
 | Evals | DeepEval + plain Python metrics | Decisions log, 2026-11-18 |
 | Logs | structlog | Events with fields, `bind(trace_id=…)`, JSON in production, readable locally |
-| Secret scan | gitleaks + a PII regex pass | Ingest gate (HLD flow 6.3) |
+| Secret scan | gitleaks + a PII pass: phones by `phonenumbers` (Google's libphonenumber, BR and US plans, pinned), emails by our own extraction, CPF and card numbers by check digits | Ingest gate (HLD flow 6.3); real numbering plans keep year ranges and ports from counting as phones |
 | Tests | pytest + pytest-asyncio; fake OpenRouter server | Real model calls only in eval runs |
 | Lint and types | ruff + mypy | mypy has the Django plugin |
 | Scheduled jobs | systemd timers on the VPS, calling Django commands and containers | Nothing extra running; logs in journald |
