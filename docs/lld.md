@@ -438,7 +438,7 @@ untrusted data, like retrieved chunks.
 | `search_corpus` | planned | Same pipeline as retrieval; optional `kind` filter. Questions about the code land here, answered from `docs/code-map.md` |
 | `get_document` | planned | `doc_key` from an enum of indexed documents → metadata and summary |
 | `list_projects` | planned | Public projects with links and status, from corpus metadata |
-| `github_activity` | planned | `repo` from the allowlist → last commits, open issues count, last release; cached `GITHUB_CACHE_TTL` |
+| `github_activity` | planned | `repo` from the allowlist → the last `GITHUB_COMMITS_MAX` commits (title and date), open issues count, last release, from the public REST API; never reads repository content; cached `GITHUB_CACHE_TTL`; cited as a source with `fetched_at`; when GitHub is unavailable the answer says so and falls back to the corpus |
 | `contact_options` | planned | Returns links only; never sends anything |
 | `check_answerable`, `query_career_graph` | to detail | Phase 2 (career graph) |
 
@@ -553,7 +553,7 @@ Behavior only; rendering and the 3D brain are in `zorzo-site`'s LLD.
   | `429 rate_limited` | Shows when to try again, from `Retry-After` |
   | `503` or network failure | `offline` state |
   | Stream dropped before `done` | "Connection lost, ask again" (no resume) |
-  | `blocked` | The layer's message |
+  | `blocked` | The defense layer and the reason in plain words, a link to `/dash/defenses`, and "this was a mistake?" linking to the contact options |
   | `degraded` | Banner plus the list of sources |
   | `error` | Generic message with the trace link |
 
@@ -568,7 +568,7 @@ Behavior only; rendering and the 3D brain are in `zorzo-site`'s LLD.
 | `/dash/` | Public | Traces, spans, budget, snapshots, log events | KPIs (questions and sessions, p50/p95, success and fallback rates, tokens in and out); stacked latency per step; intent distribution; questions per day; most cited documents; recent questions (only outcome `answered`, `abstained` or `cached`, with `public_ok` true and no `removed_at`), each linking to its trace; status (uptime, budget used today, active chain, breakers) | planned |
 | `/dash/t/<id>` | Public (random UUID) | `public_traces`, `trace_spans` | Timeline of one answer: scrubbed question, retrieved chunks with scores, tools, models and fallbacks, claims with verdicts, cost and latency; with `public_ok` false the question shows as "[hidden: not shown in public]"; 410 "this trace was removed" when `removed_at` is set; 404 "this trace expired" after expiry | planned |
 | `/dash/evals` | Public | `eval_runs`, `eval_results`, LangSmith snapshots | Latest run of the active version with date and pass or fail per target; each metric with one plain sentence, split by layer, PT and EN separately, `pre_release` and `nightly` separately; trend across versions with gate-blocked versions marked; failures of the latest run and verdicts flipped between the last two versions, without the answer when `career_fact` is true; links to the datasets; a stale notice when the latest `nightly` run is older than `EVAL_STALE_AFTER` | planned |
-| `/dash/defenses` | Public | `defense_events`, eval runs | Blocks per layer and category (7 and 30 days), anonymized examples, false-block rate | planned |
+| `/dash/defenses` | Public | `defense_events`, eval runs | Blocks per layer and category (7 and 30 days) with one plain sentence per layer; examples only from the `adversarial` dataset, real attacks only as counts; false-block rate from the `benign_tricky` dataset | planned |
 | `/dash/sources` | Public | `documents` of the active version | Each document with kind, date and link; the FAQ and career narrative readable in full on a page of their own | planned |
 | `/dash/logs` | Public | — | Phase 2 | to detail |
 | `/dash/admin` | Owner, SSH tunnel only | All tables | Read-only Django admin, except the "remove from public view" action on traces; the only place with a link to the full LangSmith trace | planned |
@@ -624,6 +624,7 @@ endpoints and per-environment switches.
 | `ALERT_REPEAT_AFTER` | 12 h | Alert reminders | `limits.yaml` |
 | `SNAPSHOT_INTERVAL` | 15 min | Snapshot pull timer | systemd timer |
 | `GITHUB_CACHE_TTL` | 10 min | `github_activity` | `limits.yaml` |
+| `GITHUB_COMMITS_MAX` | 3 | `github_activity` | `limits.yaml` |
 | `HEALTH_POLL_INTERVAL` | 30 s | Front, while offline | Front config |
 | `DASH_CACHE_TTL` | 60 s | Edge cache of `/dash/*` | Terraform |
 | `EVAL_STALE_AFTER` | 48 h | Stale notice on `/dash/evals` | `limits.yaml` |
