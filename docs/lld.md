@@ -242,6 +242,7 @@ erDiagram
     corpus_versions ||--o{ documents : "groups"
     documents ||--o{ chunks : "is split into"
     corpus_versions ||--o{ eval_runs : "is evaluated by"
+    eval_runs ||--o{ eval_results : "has results"
     public_traces ||--o{ trace_spans : "has steps"
     public_traces ||--|| questions_log : "logs one question"
     public_traces ||--o{ log_events : "is referenced by"
@@ -268,7 +269,8 @@ All tables are **planned**; their shape lives here until the migrations exist.
 | `log_events` | id, at, level, source (`app`, `langsmith`), component, event, trace_id, fields (JSON) | Closed event catalog |
 | `rate_buckets` | key (pk: scope + hashed IP or session), tokens, refilled_at | |
 | `budget_daily` | day (pk, UTC), cost_usd (reservations included), requests, paid_disabled_at, degraded_at | |
-| `eval_runs` | id, created_at, corpus_version, model_config_version, dataset, metrics (JSON, PT and EN separate), passed | |
+| `eval_runs` | id, created_at, corpus_version, model_config_version, run_kind, dataset, metrics (JSON, PT and EN separate), passed | run_kind: `pre_release`, `nightly` |
+| `eval_results` | id, eval_run_id (fk, cascade), question_id, lang, layer, career_fact, passed, reason, expected, answer | One row per question per run; feeds failures and flipped verdicts on `/dash/evals` |
 | `external_snapshots` | id, taken_at, source (`langsmith`, `uptimerobot`), kind, payload (JSON) | |
 | `alert_states` | kind (pk), open_since, last_sent_at, closed_at | |
 | `entities`, `facts` | — | **To detail** (Phase 2, career graph) |
@@ -342,6 +344,9 @@ States of a corpus version; arrows carry the event that causes the transition.
 
 - Exactly one `active` version at any time; activation is one transaction (section 3 "Transactions").
 - A candidate is activated only with a linked `eval_run` that has `passed = true`.
+- A change of `model_config_version` and a change of the judge model never ship in the same version: a
+  new judge is used only after its agreement with a sample labeled by the owner reaches
+  `JUDGE_AGREEMENT_MIN`, so quality is never measured with a new ruler and a new model at once.
 - Documents without `reviewed_by_owner: true`, or with a scan hit (gitleaks or the PII pass), fail the run;
   the candidate becomes `rejected`.
 - The API refuses to serve a version whose `embed_model_tag` differs from the loaded embedding model: it
@@ -562,7 +567,7 @@ Behavior only; rendering and the 3D brain are in `zorzo-site`'s LLD.
 | --- | --- | --- | --- | --- |
 | `/dash/` | Public | Traces, spans, budget, snapshots, log events | KPIs (questions and sessions, p50/p95, success and fallback rates, tokens in and out); stacked latency per step; intent distribution; questions per day; most cited documents; recent questions (only outcome `answered`, `abstained` or `cached`, with `public_ok` true and no `removed_at`), each linking to its trace; status (uptime, budget used today, active chain, breakers) | planned |
 | `/dash/t/<id>` | Public (random UUID) | `public_traces`, `trace_spans` | Timeline of one answer: scrubbed question, retrieved chunks with scores, tools, models and fallbacks, claims with verdicts, cost and latency; with `public_ok` false the question shows as "[hidden: not shown in public]"; 410 "this trace was removed" when `removed_at` is set; 404 "this trace expired" after expiry | planned |
-| `/dash/evals` | Public | `eval_runs`, LangSmith snapshots | Latest run per corpus and model version, trend, PT and EN separately | planned |
+| `/dash/evals` | Public | `eval_runs`, `eval_results`, LangSmith snapshots | Latest run of the active version with date and pass or fail per target; each metric with one plain sentence, split by layer, PT and EN separately, `pre_release` and `nightly` separately; trend across versions with gate-blocked versions marked; failures of the latest run and verdicts flipped between the last two versions, without the answer when `career_fact` is true; links to the datasets; a stale notice when the latest `nightly` run is older than `EVAL_STALE_AFTER` | planned |
 | `/dash/defenses` | Public | `defense_events`, eval runs | Blocks per layer and category (7 and 30 days), anonymized examples, false-block rate | planned |
 | `/dash/sources` | Public | `documents` of the active version | Each document with kind, date and link; the FAQ and career narrative readable in full on a page of their own | planned |
 | `/dash/logs` | Public | — | Phase 2 | to detail |
@@ -621,6 +626,8 @@ endpoints and per-environment switches.
 | `GITHUB_CACHE_TTL` | 10 min | `github_activity` | `limits.yaml` |
 | `HEALTH_POLL_INTERVAL` | 30 s | Front, while offline | Front config |
 | `DASH_CACHE_TTL` | 60 s | Edge cache of `/dash/*` | Terraform |
+| `EVAL_STALE_AFTER` | 48 h | Stale notice on `/dash/evals` | `limits.yaml` |
+| `JUDGE_AGREEMENT_MIN` | 90% | Judge change rule (section 6.1) | `limits.yaml` |
 | `WAF_RATE_LIMIT` | 300 requests per 5 min per IP | WAF on `/api/*` | Terraform |
 | `API_WORKERS` | 1 | uvicorn (section 6.3) | compose |
 
