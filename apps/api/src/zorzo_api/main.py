@@ -14,6 +14,8 @@ from zorzo_api.settings import ApiSettings
 
 def create_app(settings: ApiSettings) -> FastAPI:
     configure_logging(settings.app_env)
+    # The domain package (domain_<name>, ADR 0011) holds what makes the generic core about one
+    # person: languages, contact, prompts. DOMAIN selects it.
     domain = load_domain(settings.domain)
     db = Database(settings.database_url)
 

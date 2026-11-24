@@ -10,5 +10,5 @@ class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
     app_env: Literal["local", "production"] = "production"
-    domain: str = Field(min_length=1)
+    domain: str = Field(min_length=1, description="Name of the domain_<name> package to load (ADR 0011)")
     database_url: str = Field(min_length=1)
