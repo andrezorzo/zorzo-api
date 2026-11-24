@@ -156,7 +156,8 @@ domain pieces, not ports (section 6.5).
   `MAX_BODY_BYTES` in Caddy.
 - **CORS:** one origin; the allowlist holds `https://zorzo.dev.br`, plus localhost when `APP_ENV=local`.
 - **Admin:** the Django admin listens on a local port, reachable only through an SSH tunnel; its views are
-  read-only.
+  read-only, except the "remove from public view" action on traces, which sets `removed_at` and writes a
+  `trace_removals` row.
 - **Secrets:** read once at startup from settings; never logged, never in a trace. The canary lives in the
   environment.
 
@@ -245,6 +246,7 @@ erDiagram
     public_traces ||--|| questions_log : "logs one question"
     public_traces ||--o{ log_events : "is referenced by"
     public_traces ||--o{ answer_cache : "source of"
+    public_traces ||--o{ trace_removals : "is removed by"
 ```
 
 Entities and relations only; standalone tables (`rate_buckets`, `budget_daily`, `defense_events`,
@@ -258,8 +260,9 @@ All tables are **planned**; their shape lives here until the migrations exist.
 | `documents` | id, corpus_version (fk), doc_key, title, kind, lang, authority, source_url, updated, hash | Metadata from the document front matter |
 | `chunks` | id, document_id (fk), corpus_version, heading_path, content, tokens, embedding `vector(N)`, tsv `tsvector`, hash | HNSW on embedding, GIN on tsv; N follows the embedding model (open question) |
 | `answer_cache` | id, question_scrubbed, embedding `vector(N)`, lang, corpus_version, model_config_version, answer (claims JSON), trace_id, created_at, expires_at, hits | HNSW on embedding (ADR 0014) |
-| `public_traces` | id (UUID), created_at, expires_at, outcome, intent, lang, corpus_version, model_config_version, latency_ms, cost_usd, payload (redacted JSON) | outcome: `answered`, `abstained`, `declined`, `blocked`, `degraded`, `cached` |
+| `public_traces` | id (UUID), created_at, expires_at, outcome, intent, lang, corpus_version, model_config_version, latency_ms, cost_usd, public_ok, removed_at (null), payload (redacted JSON) | outcome: `answered`, `abstained`, `declined`, `blocked`, `degraded`, `cached` |
 | `trace_spans` | id, trace_id (fk, cascade), step, started_at, latency_ms, model, provider, fallback_reason, tokens_in, tokens_out, cost_usd | One row per step; feeds the latency and fallback charts |
+| `trace_removals` | id, trace_id (fk), removed_at, reason | Private record of the owner's manual removals; never shown in public |
 | `questions_log` | id, trace_id (fk), created_at, question_scrubbed, intent, outcome | For eval curation |
 | `defense_events` | id, created_at, trace_id, layer, category, action, example_scrubbed | |
 | `log_events` | id, at, level, source (`app`, `langsmith`), component, event, trace_id, fields (JSON) | Closed event catalog |
@@ -373,7 +376,10 @@ States of the day's budget row; the day is UTC, so every visitor sees the same "
 ### 6.3 Agent run
 
 - **Routing:** `route` classifies the intent (`career_fact`, `about_andre`, `about_system`, `projects_live`,
-  `contact`, `off_topic`) with structured output and rewrites a follow-up into a standalone question. In the
+  `contact`, `off_topic`) with structured output and rewrites a follow-up into a standalone question. The
+  same output carries `public_ok`: whether the question may appear on public pages, judged by content
+  category (offensive, harassment, sexual content, attacks on other people, personal data), not by
+  sentiment. It adds no model call and never changes the answer, only what public pages show (section 8). In the
   MVP `career_fact` goes through RAG; `off_topic` → decline; `contact` → `contact_options`.
 - **Limits per request:** `MAX_LOOP_MODEL_CALLS` model calls beyond `route`, `MAX_TOOL_CALLS` tool calls,
   `MAX_REFORMULATE` rewrites, `MAX_REPAIR` repairs, `REQUEST_DEADLINE` of wall clock, and `RECURSION_LIMIT` as
@@ -554,15 +560,16 @@ Behavior only; rendering and the 3D brain are in `zorzo-site`'s LLD.
 
 | Route | Access | Reads | Shows | Status |
 | --- | --- | --- | --- | --- |
-| `/dash/` | Public | Traces, spans, budget, snapshots, log events | KPIs (questions and sessions, p50/p95, success and fallback rates, tokens in and out); stacked latency per step; intent distribution; questions per day; most cited documents; recent traces; status (uptime, budget used today, active chain, breakers) | planned |
-| `/dash/t/<id>` | Public (random UUID) | `public_traces`, `trace_spans` | Timeline of one answer: scrubbed question, retrieved chunks with scores, tools, models and fallbacks, claims with verdicts, cost and latency; 404 "this trace expired" after expiry | planned |
+| `/dash/` | Public | Traces, spans, budget, snapshots, log events | KPIs (questions and sessions, p50/p95, success and fallback rates, tokens in and out); stacked latency per step; intent distribution; questions per day; most cited documents; recent questions (only outcome `answered`, `abstained` or `cached`, with `public_ok` true and no `removed_at`), each linking to its trace; status (uptime, budget used today, active chain, breakers) | planned |
+| `/dash/t/<id>` | Public (random UUID) | `public_traces`, `trace_spans` | Timeline of one answer: scrubbed question, retrieved chunks with scores, tools, models and fallbacks, claims with verdicts, cost and latency; with `public_ok` false the question shows as "[hidden: not shown in public]"; 410 "this trace was removed" when `removed_at` is set; 404 "this trace expired" after expiry | planned |
 | `/dash/evals` | Public | `eval_runs`, LangSmith snapshots | Latest run per corpus and model version, trend, PT and EN separately | planned |
 | `/dash/defenses` | Public | `defense_events`, eval runs | Blocks per layer and category (7 and 30 days), anonymized examples, false-block rate | planned |
-| `/dash/sources` | Public | `documents` of the active version | Each document with kind, date and link | planned |
+| `/dash/sources` | Public | `documents` of the active version | Each document with kind, date and link; the FAQ and career narrative readable in full on a page of their own | planned |
 | `/dash/logs` | Public | — | Phase 2 | to detail |
-| `/dash/admin` | Owner, SSH tunnel only | All tables | Read-only Django admin; the only place with a link to the full LangSmith trace | planned |
+| `/dash/admin` | Owner, SSH tunnel only | All tables | Read-only Django admin, except the "remove from public view" action on traces; the only place with a link to the full LangSmith trace | planned |
 
-Pages are server-rendered and cached at the edge for `DASH_CACHE_TTL`.
+Pages are server-rendered and cached at the edge for `DASH_CACHE_TTL`, so a removal shows within that time;
+no cache invalidation from the VPS for `/dash/*`.
 
 ## 9. Values and configuration
 

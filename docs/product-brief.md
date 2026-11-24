@@ -64,6 +64,7 @@ The targets are guesses until there is real traffic.
 | Inbound opportunities | Contacts from recruiters, managers or clients that mention the site (job or freelance) | ≥ 3 |
 | Ask rate | Share of visitors who send at least one question | ≥ 20% |
 | Follow-up rate | Share of askers who send a second question in the same visit | ≥ 40% |
+| Trace open rate | Share of answers whose public trace is opened (tests the hypothesis that inspecting builds trust) | ≥ 10% |
 | Answer quality | Faithfulness on the public eval set (answers backed by the cited sources) | ≥ 0.90 |
 | Monthly cost | Recurring running cost of the site (one-time model credits excluded) | < US$10/month |
 
