@@ -383,8 +383,9 @@ States of a corpus version; arrows carry the event that causes the transition.
   which covers its international and national renderings), fail the run. The PII pass fails closed: text shaped like an
   address or a phone counts unless it is exactly a retina asset name or a semantic version, and a false
   hit is fixed by rewording the line. It guards against personal data that slips into the owner's own
-  documents by accident; deliberate hiding (zero-width characters, HTML tags inside a number, a label glued
-  to the digits) is out of its scope and left to the owner's review; the candidate becomes `rejected`. The whole source is checked before
+  documents by accident; deliberate hiding (zero-width characters, HTML tags or encoded line breaks inside a
+  number, a label glued to the digits) is out of its scope and left to the owner's review, and so is a phone
+  without a (DD) or +CC marker inside a row of more than 12 numbers; the candidate becomes `rejected`. The whole source is checked before
   anything is embedded or written, and the report names the file and the rule, never the match.
 - The API refuses to serve a version whose `embed_model_tag` differs from the loaded embedding model: it
   starts as `unavailable` (503) instead of serving mismatched vectors.
