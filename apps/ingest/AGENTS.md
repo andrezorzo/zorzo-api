@@ -38,8 +38,8 @@ Run from the repository root, with Postgres up and migrated.
 | Tests of this app | `uv run pytest tests/ingest -q` |
 
 The command prints one line `{"summary": {...}}` (version, status, documents, chunks, embedded, copied)
-whenever it created or changed a version, with the status the run left it in (`rejected`, `candidate` or
-`active`), and exits 1 on a rejected or failed run, a refused activation, a failed publish or when another
+whenever it created or changed a version, with the status the run left it in (`rejected`, `candidate`,
+`active`, or `unknown` when a write may or may not have reached the database), and exits 1 on a rejected or failed run, a refused activation, a failed publish or when another
 run holds the lock.
 
 ## Practices

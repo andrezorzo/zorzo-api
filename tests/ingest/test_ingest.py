@@ -150,6 +150,21 @@ def test_rejects_a_symlinked_document(db: str, source: Path, tmp_path: Path) -> 
     assert_rejected(db, ingest(db, tmp_path / "data", "--source", str(source)), "linked.md")
 
 
+def test_a_failed_publish_reports_the_version_as_active(db: str, source: Path, tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    data.chmod(0o500)  # read-only: publishing fails after the activation
+    try:
+        run = ingest(db, data, "--source", str(source), "--activate")
+    finally:
+        data.chmod(0o700)
+    assert run.code == 1
+    assert "publish_failed" in run.output
+    assert run.summary["status"] == "active"
+    assert run.summary["chunks"] > 0
+    assert status(db, run.summary["version"]) == "active"
+
+
 def test_lets_the_owners_listed_contact_through(db: str, source: Path, tmp_path: Path) -> None:
     write_doc(source, "contact.md", "Write to andre_zorzo@yahoo.com.")
     run = ingest(db, tmp_path / "data", "--source", str(source))

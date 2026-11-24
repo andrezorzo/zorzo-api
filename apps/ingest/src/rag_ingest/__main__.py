@@ -4,8 +4,9 @@
     python -m rag_ingest --activate-version N          activate an existing candidate
 
 Prints one JSON summary line (`{"summary": {...}}`) whenever it created a version or changed one, with the
-status the run left it in (`rejected`, `candidate` or `active`), and exits 1 on a rejected or failed run, a
-refused activation, a failed publish or a busy lock.
+status the run left it in (`rejected`, `candidate`, `active`, or `unknown` when a write may or may not have
+reached the database), and exits 1 on a rejected or failed run, a refused activation, a failed publish or a
+busy lock.
 """
 
 import argparse
@@ -30,11 +31,11 @@ from rag_core.ingest.pipeline import (
     IngestRejected,
     PublishFailed,
     Summary,
-    activate_and_publish,
+    activate,
+    publish_active,
     run_ingest,
 )
 from rag_core.limits import Limits, load_limits
-from rag_core.ports import DataPublisher
 from rag_core.telemetry import configure_logging
 
 from rag_ingest.settings import IngestSettings
@@ -44,24 +45,6 @@ log = structlog.get_logger()
 
 def _summary(summary: Summary) -> None:
     print(json.dumps({"summary": asdict(summary)}), flush=True)
-
-
-async def _activate_and_publish(
-    version: int,
-    store: PgCorpusStore,
-    publisher: DataPublisher,
-    settings: IngestSettings,
-    examples: list[Example],
-) -> None:
-    folder = await activate_and_publish(
-        version,
-        store=store,
-        publisher=publisher,
-        examples=examples,
-        # Local may activate without an eval run; production never does (LLD "6.1 Corpus version").
-        require_eval=settings.app_env != "local",
-    )
-    log.info("corpus_activated_and_published", version=version, path=folder)
 
 
 @dataclass(frozen=True)
@@ -78,32 +61,46 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
     db = Database(settings.database_url)
     store = PgCorpusStore(db)
     publisher = LocalDataPublisher(settings.data_dir)
-    # What this run knows about the version it created, kept current as it goes, so a failure reports it
-    # without reading the database (which may be why the run failed).
+    # What this run knows about the version it created or changed, kept current step by step, so a failure
+    # reports it without reading the database (which may be why the run failed).
     known: Summary | None = None
+
+    async def go_live(version: int) -> None:
+        nonlocal known
+        try:
+            # Local may activate without an eval run; production never does (LLD "6.1 Corpus version").
+            await activate(version, store=store, require_eval=settings.app_env != "local")
+        except ActivationRefused:
+            raise
+        except Exception:
+            if known is not None:
+                known = replace(known, status="unknown")  # the activation may or may not have committed
+            raise
+        known = replace(known, status="active") if known else Summary(version, "active")
+        folder = await publish_active(version, store=store, publisher=publisher, examples=examples)
+        log.info("corpus_activated_and_published", version=version, path=folder)
+
     try:
         async with store.lock() as got:
             if not got:
                 log.error("ingest_busy", reason="another ingest run holds the lock")
                 return 1
             if args.activate_version is not None:
-                await _activate_and_publish(args.activate_version, store, publisher, settings, examples)
-                _summary(Summary(args.activate_version, "active"))
-                return 0
-            embedder = build_embedder(settings)
-            known = await run_ingest(
-                args.source or corpus_dir(settings.domain),
-                store=store,
-                embedder=embedder,
-                scanner=GitleaksScanner(settings.gitleaks_binary),
-                allowlist=domain.pii_allowlist,
-                limits=limits,
-            )
-            log.info("corpus_ingested", **asdict(known))
-            if args.activate:
-                await _activate_and_publish(known.version, store, publisher, settings, examples)
-                known = replace(known, status="active")
-            _summary(known)
+                await go_live(args.activate_version)
+            else:
+                known = await run_ingest(
+                    args.source or corpus_dir(settings.domain),
+                    store=store,
+                    embedder=build_embedder(settings),
+                    scanner=GitleaksScanner(settings.gitleaks_binary),
+                    allowlist=domain.pii_allowlist,
+                    limits=limits,
+                )
+                log.info("corpus_ingested", **asdict(known))
+                if args.activate:
+                    await go_live(known.version)
+            if known is not None:  # always set by now; the check keeps the type honest
+                _summary(known)
             return 0
     except IngestRejected as exc:
         for problem in exc.problems:
@@ -122,12 +119,17 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
     except PublishFailed as exc:
         # Live but unpublished: re-running the ingest publishes a new version.
         log.exception("publish_failed", version=exc.version)
-        _summary(replace(known, status="active") if known else Summary(exc.version, "active"))
+        if known is not None:
+            _summary(known)
         return 1
     except ConfigError:
         raise  # reported by main()
-    except BaseException:
+    except Exception:
         log.exception("ingest_failed")
+        if known is not None:
+            _summary(known)
+        return 1
+    except BaseException:  # interrupted: still say what was left behind, then stop
         if known is not None:
             _summary(known)
         raise

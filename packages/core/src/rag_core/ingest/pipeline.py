@@ -77,13 +77,14 @@ async def run_ingest(
 async def _reject_quietly(store: CorpusStore, version: int) -> str:
     """Reject the version so it can't be activated; returns the status it is left in.
 
-    A failing reject never hides why the run stopped: it is logged, and the version stays `candidate`.
+    A failing reject never hides why the run stopped: it is logged, and the status is `unknown`, since the
+    reject may or may not have reached the database.
     """
     try:
         await store.reject(version)
     except Exception:
         log.exception("reject_failed", version=version)
-        return "candidate"
+        return "unknown"
     return "rejected"
 
 
@@ -139,22 +140,16 @@ async def _fill_candidate(
     )
 
 
-async def activate_and_publish(
-    version: int,
-    *,
-    store: CorpusStore,
-    publisher: DataPublisher,
-    examples: list[Example],
-    require_eval: bool,
+async def publish_active(
+    version: int, *, store: CorpusStore, publisher: DataPublisher, examples: list[Example]
 ) -> str:
-    """Activate the version, then publish its brain and corpus data; returns the published folder.
+    """Publish the brain and corpus data of an active version; returns the published folder.
 
-    A failure after the activation raises PublishFailed: the version is live, its data not yet published.
+    Any failure raises PublishFailed: the version is live, its data not yet published.
     """
-    await activate(version, store=store, require_eval=require_eval)
     try:
         tag = await store.embed_model_tag(version)
-        if tag is None:  # unreachable once activated; keeps the type honest
+        if tag is None:
             raise LookupError(f"corpus version {version} does not exist")
         folder, files, manifest = publish.build(version, tag, await store.published_chunks(version), examples)
         await publisher.publish(folder, files, manifest)
