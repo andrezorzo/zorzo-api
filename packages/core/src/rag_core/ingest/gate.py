@@ -13,10 +13,14 @@ from pathlib import Path
 from rag_core.ingest.frontmatter import DocumentMeta, FrontMatterError, parse
 from rag_core.ports import Finding, SecretScanner
 
-EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
-# International (+CC) or Brazilian ((DD)) formats; a bare run of digits is too often a year range or an id.
+# The domain starts with a letter, so asset names such as `logo@2x.png` aren't emails.
+EMAIL = re.compile(r"[\w.+-]+@[A-Za-z][\w-]*(?:\.[\w-]+)*\.[A-Za-z]{2,}\b")
+# Phone formats with a marker that a year range or an id doesn't have: a +country code, parentheses around
+# the area code, or the Brazilian mobile shape "DD 9XXXX-XXXX".
 PHONE = re.compile(
-    r"\+\d{1,3}[\s.-]?\(?\d{2,3}\)?[\s.-]?\d{4,5}[\s.-]?\d{4}\b|\(\d{2,3}\)\s?\d{4,5}-?\d{4}\b"
+    r"\+\d{1,3}[\s.-]?\(?\d{2,3}\)?[\s.-]?\d{3,5}[\s.-]?\d{4}\b"
+    r"|\(\d{2,3}\)\s?\d{3,5}[\s.-]?\d{4}\b"
+    r"|\b\d{2}\s9\d{4}-\d{4}\b"
 )
 CPF = re.compile(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b|\b\d{11}\b")
 CARD = re.compile(r"\b(?:\d[ -]?){12,18}\d\b")
@@ -53,11 +57,11 @@ def _luhn(value: str) -> bool:
 
 def personal_data(text: str, allowlist: Iterable[str] = ()) -> list[str]:
     """The PII rules a text breaks; matches equal to an allowlisted string don't count."""
-    allowed = set(allowlist)
+    allowed = {a.lower() for a in allowlist}
     rules = []
-    if any(m.group() not in allowed for m in EMAIL.finditer(text)):
+    if any(m.group().lower() not in allowed for m in EMAIL.finditer(text)):
         rules.append("pii:email")
-    if any(m.group() not in allowed for m in PHONE.finditer(text)):
+    if any(m.group().lower() not in allowed for m in PHONE.finditer(text)):
         rules.append("pii:phone")
     if any(_cpf_valid(m.group()) for m in CPF.finditer(text)):
         rules.append("pii:cpf")
@@ -71,9 +75,14 @@ async def check(
 ) -> tuple[list[Document], list[Finding]]:
     documents: list[Document] = []
     problems: list[Finding] = []
+    seen: set[str] = set()
     for path in sorted(source.glob("*.md")):
         raw = path.read_bytes()
-        text = raw.decode("utf-8")
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            problems.append(Finding(path.name, "not UTF-8"))
+            continue
         try:
             meta, body = parse(text)
         except FrontMatterError as exc:
@@ -81,7 +90,11 @@ async def check(
             continue
         if not meta.reviewed_by_owner:
             problems.append(Finding(path.name, "not reviewed_by_owner"))
-        problems.extend(Finding(path.name, rule) for rule in personal_data(body, allowlist))
+        if meta.doc_key in seen:
+            problems.append(Finding(path.name, "duplicate doc_key"))
+        seen.add(meta.doc_key)
+        # The whole text: front matter values (the title) are published and indexed too.
+        problems.extend(Finding(path.name, rule) for rule in personal_data(text, allowlist))
         documents.append(Document(path, meta, body, raw))
     problems.extend(await scanner.scan(source))
     return documents, problems

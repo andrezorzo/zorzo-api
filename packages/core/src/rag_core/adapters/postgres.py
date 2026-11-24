@@ -18,6 +18,8 @@ class Database:
         self.engine: AsyncEngine = create_async_engine(
             make_url(url).set(drivername="postgresql+psycopg"),
             pool_pre_ping=True,
+            # Errors would otherwise quote bound values, such as the visitor's question, into the logs.
+            hide_parameters=True,
             connect_args={"connect_timeout": CONNECT_TIMEOUT_S},
         )
         self.metadata = MetaData()

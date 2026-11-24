@@ -41,11 +41,27 @@ async def run_ingest(
 ) -> Summary:
     """Write a new candidate version from `source`; nothing is embedded or written unless the gate passes."""
     version = await store.create_candidate(embedder.tag)
+    try:
+        return await _fill_candidate(version, source, store, embedder, scanner, allowlist, limits)
+    except BaseException:
+        # Whatever stopped the run, the version must not stay a candidate that could be activated.
+        await store.reject(version)
+        raise
+
+
+async def _fill_candidate(
+    version: int,
+    source: Path,
+    store: CorpusStore,
+    embedder: Embedder,
+    scanner: SecretScanner,
+    allowlist: tuple[str, ...],
+    limits: Limits,
+) -> Summary:
     documents, problems = await gate.check(source, scanner, allowlist)
     if not documents and not problems:
         problems = [Finding(str(source), "no documents")]
     if problems:
-        await store.reject(version)
         raise IngestRejected(Summary(version, "rejected"), problems)
 
     doc_rows: list[DocumentRow] = []
@@ -68,6 +84,8 @@ async def run_ingest(
             (meta.doc_key, d) for d in split(meta, doc.body, limits.chunk_tokens, limits.chunk_overlap)
         )
 
+    # Identical sections of one document are one chunk.
+    drafts = list({d.hash: (key, d) for key, d in drafts}.values())
     reusable = await store.reusable_embeddings([d.hash for _, d in drafts], embedder.tag)
     missing = [d for _, d in drafts if d.hash not in reusable]
     # The heading path goes into the embedded text: it carries the section's context.
@@ -87,4 +105,7 @@ async def activate(version: int, *, store: CorpusStore, require_eval: bool) -> N
     """With `require_eval` (production), only a version with a passing eval run is activated."""
     if require_eval and not await store.eval_passed(version):
         raise ActivationRefused(f"corpus version {version} has no passing eval run")
-    await store.activate(version)
+    try:
+        await store.activate(version)
+    except LookupError as exc:
+        raise ActivationRefused(str(exc)) from exc

@@ -4,7 +4,7 @@ import datetime
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, ValidationError
 
 
 class DocumentMeta(BaseModel):
@@ -26,16 +26,24 @@ class FrontMatterError(ValueError):
 
 def parse(text: str) -> tuple[DocumentMeta, str]:
     """Split a document into its validated front matter and its Markdown body."""
+    text = text.replace("\r\n", "\n")
     if not text.startswith("---\n"):
         raise FrontMatterError("missing front matter")
+    head, sep, body = text[4:].partition("\n---\n")
+    if not sep:
+        if not text.rstrip("\n").endswith("\n---"):
+            raise FrontMatterError("unterminated front matter")
+        head, body = text[4:].rstrip("\n")[: -len("\n---")], ""
     try:
-        head, body = text[4:].split("\n---\n", 1)
-    except ValueError as exc:
-        raise FrontMatterError("unterminated front matter") from exc
+        raw = yaml.safe_load(head)
+    except yaml.YAMLError:
+        raise FrontMatterError("invalid front matter (unreadable YAML)") from None
+    if not isinstance(raw, dict):
+        raise FrontMatterError("invalid front matter (not a mapping)")
     try:
-        meta = DocumentMeta.model_validate(yaml.safe_load(head))
-    except Exception as exc:
+        meta = DocumentMeta.model_validate(raw)
+    except ValidationError as exc:
         # Only the field names: a value could be what the gate is protecting.
-        fields = ", ".join(str(e["loc"][0]) for e in getattr(exc, "errors", lambda: [])()) or "unreadable"
+        fields = ", ".join(sorted({str(e["loc"][0]) for e in exc.errors() if e["loc"]})) or "values"
         raise FrontMatterError(f"invalid front matter ({fields})") from None
     return meta, body

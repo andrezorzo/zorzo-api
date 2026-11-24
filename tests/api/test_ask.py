@@ -157,3 +157,18 @@ def test_answers_unavailable_when_the_embedding_model_differs(corpus_database: s
         response = client.post("/api/v1/ask", json=QUESTION)
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "unavailable"
+
+
+def test_a_failing_trace_sink_still_ends_the_stream(client: TestClient) -> None:
+    class Failing:
+        def record(self, event: StreamEvent) -> None:
+            if event.kind == "degraded":
+                raise RuntimeError("sink down")
+
+    app: Any = client.app
+    app.state.trace_sinks.append(Failing())
+    try:
+        stream = ask(client)
+    finally:
+        app.state.trace_sinks.clear()
+    assert stream.names()[-1] == "done"

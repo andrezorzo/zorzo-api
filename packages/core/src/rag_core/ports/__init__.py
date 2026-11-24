@@ -122,7 +122,10 @@ class CorpusStore(Protocol):
         """Whether the version has a linked eval run that passed."""
 
     async def activate(self, version: int) -> None:
-        """The candidate becomes active and the previous active retired, in one transaction."""
+        """The candidate becomes active and the previous active retired, in one transaction.
+
+        Raises LookupError when the version isn't a candidate.
+        """
 
     async def published_chunks(self, version: int) -> list[PublishedChunk]: ...
 

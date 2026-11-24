@@ -42,8 +42,8 @@ def source(tmp_path: Path) -> Path:
     return folder
 
 
-def ingest(db: str, data_dir: Path, *args: str, app_env: str = "local") -> Run:
-    result = run_ingest(db, data_dir, *args, app_env=app_env)
+def ingest(db: str, data_dir: Path, *args: str, app_env: str = "local", embedder: str = "fake") -> Run:
+    result = run_ingest(db, data_dir, *args, app_env=app_env, embedder=embedder)
     lines = [line for line in result.stdout.splitlines() if line.startswith('{"summary"')]
     summary = json.loads(lines[-1])["summary"] if lines else {}
     return Run(result.returncode, result.stdout + result.stderr, summary)
@@ -98,6 +98,36 @@ def test_rejects_a_document_with_personal_data(db: str, source: Path, tmp_path: 
     assert_rejected(db, run, "contact.md")
     assert "maria.silva@example.org" not in run.output
     assert "98765-4321" not in run.output
+
+
+def test_rejects_personal_data_in_the_front_matter(db: str, source: Path, tmp_path: Path) -> None:
+    (source / "titled.md").write_text(
+        "---\ndoc_key: titled\ntitle: Contact joao.silva@gmail.com\nkind: post\nlang: en\nauthority: 1\n"
+        "reviewed_by_owner: true\n---\n# Clean\n\nNothing here.\n"
+    )
+    assert_rejected(db, ingest(db, tmp_path / "data", "--source", str(source)), "titled.md")
+
+
+def test_rejects_a_repeated_doc_key(db: str, source: Path, tmp_path: Path) -> None:
+    (source / "faq-copy.md").write_text((source / "faq-en.md").read_text())
+    run = ingest(db, tmp_path / "data", "--source", str(source))
+    # Files are read in name order, so the second one with the key is the one reported.
+    assert_rejected(db, run, "faq-en.md")
+    assert "duplicate doc_key" in run.output
+
+
+def test_rejects_the_candidate_when_embedding_fails(db: str, source: Path, tmp_path: Path) -> None:
+    run = ingest(db, tmp_path / "data", "--source", str(source), embedder="ollama")
+    assert run.code == 1
+    versions = rows(db, "SELECT status FROM corpus_versions")
+    assert versions == [("rejected",)]
+
+
+def test_refuses_to_activate_a_version_that_is_not_a_candidate(db: str, source: Path, tmp_path: Path) -> None:
+    active = ingest(db, tmp_path / "data", "--source", str(source), "--activate")
+    again = ingest(db, tmp_path / "data", "--activate-version", str(active.summary["version"]))
+    assert again.code == 1
+    assert "activation_refused" in again.output
 
 
 def test_lets_the_owners_listed_contact_through(db: str, source: Path, tmp_path: Path) -> None:

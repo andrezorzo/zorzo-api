@@ -204,7 +204,7 @@ class PgCorpusStore:
                 {"v": version},
             )
             if result.rowcount != 1:
-                raise ValueError(f"corpus version {version} is not a candidate")
+                raise LookupError(f"corpus version {version} is not a candidate")
 
     async def published_chunks(self, version: int) -> list[PublishedChunk]:
         async with self.db.engine.connect() as conn:

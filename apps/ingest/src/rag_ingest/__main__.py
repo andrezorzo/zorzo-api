@@ -91,6 +91,10 @@ async def _main(args: argparse.Namespace, settings: IngestSettings) -> int:
     except ActivationRefused as exc:
         log.error("activation_refused", reason=str(exc))
         return 1
+    except Exception:
+        # The candidate was already rejected by the pipeline; the traceback goes to the log.
+        log.exception("ingest_failed")
+        return 1
     finally:
         await db.close()
 

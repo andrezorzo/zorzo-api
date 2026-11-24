@@ -7,7 +7,8 @@ from uuid import UUID
 import structlog
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
-from rag_core.events import Done, StreamEvent
+from rag_core.errors import DEFAULT_MESSAGE, ErrorCode
+from rag_core.events import Done, Error, StreamEvent
 from rag_core.services import corpus as corpus_service
 from rag_core.services.question import normalize
 from rag_core.services.search_only import run_search_only
@@ -46,16 +47,23 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
     async def run() -> None:
         # The stream outlives the middleware's log context, so the trace id is bound again here.
         with structlog.contextvars.bound_contextvars(trace_id=trace_id):
-            await run_search_only(
-                question,
-                corpus,
-                UUID(trace_id),
-                sink=sink,
-                embedder=state.embedder,
-                store=state.vector_store,
-                rerankers=state.rerankers,
-                limits=state.limits,
-            )
+            try:
+                await run_search_only(
+                    question,
+                    corpus,
+                    UUID(trace_id),
+                    sink=sink,
+                    embedder=state.embedder,
+                    store=state.vector_store,
+                    rerankers=state.rerankers,
+                    limits=state.limits,
+                )
+            except Exception:
+                # A failing sink must not leave the visitor's stream open without `done`.
+                log.exception("stream_failed")
+                code = ErrorCode.INTERNAL
+                stream.record(Error(code=code.value, message=DEFAULT_MESSAGE[code]))
+                stream.record(Done(trace_id=UUID(trace_id), cached=False, abstained=False, suggestion=None))
 
     async def events() -> AsyncIterator[ServerSentEvent]:
         task = asyncio.create_task(run())

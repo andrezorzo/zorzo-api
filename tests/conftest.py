@@ -71,9 +71,9 @@ def database_url() -> Iterator[str]:
 
 
 def run_ingest(
-    url: str, data_dir: Path, *args: str, app_env: str = "local"
+    url: str, data_dir: Path, *args: str, app_env: str = "local", embedder: str = "fake"
 ) -> subprocess.CompletedProcess[str]:
-    """The real ingest command with the fake embedder, against the given database."""
+    """The real ingest command (fake embedder by default) against the given database."""
     return subprocess.run(
         [sys.executable, "-m", "rag_ingest", *args],
         cwd=ROOT,
@@ -82,7 +82,9 @@ def run_ingest(
             "DATABASE_URL": url,
             "APP_ENV": app_env,
             "DOMAIN": "zorzo",
-            "EMBEDDER": "fake",
+            "EMBEDDER": embedder,
+            # Nothing listens here: with EMBEDDER=ollama, embedding fails at once.
+            "OLLAMA_URL": "http://127.0.0.1:9",
             "DATA_DIR": str(data_dir),
         },
         capture_output=True,
