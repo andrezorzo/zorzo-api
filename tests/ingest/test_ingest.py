@@ -1,6 +1,7 @@
 """AC1, AC2, AC3, AC8: the ingest command, run as a subprocess against a fresh migrated database."""
 
 import json
+import os
 import secrets
 import shutil
 import string
@@ -150,6 +151,7 @@ def test_rejects_a_symlinked_document(db: str, source: Path, tmp_path: Path) -> 
     assert_rejected(db, ingest(db, tmp_path / "data", "--source", str(source)), "linked.md")
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the read-only folder that makes publishing fail")
 def test_a_failed_publish_reports_the_version_as_active(db: str, source: Path, tmp_path: Path) -> None:
     data = tmp_path / "data"
     data.mkdir()

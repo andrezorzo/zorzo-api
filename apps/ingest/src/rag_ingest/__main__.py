@@ -3,10 +3,8 @@
     python -m rag_ingest [--source DIR] [--activate]   write a new candidate version, optionally activate it
     python -m rag_ingest --activate-version N          activate an existing candidate
 
-Prints one JSON summary line (`{"summary": {...}}`) whenever it created a version or changed one, with the
-status the run left it in (`rejected`, `candidate`, `active`, or `unknown` when a write may or may not have
-reached the database), and exits 1 on a rejected or failed run, a refused activation, a failed publish or a
-busy lock.
+Prints one JSON summary line and exits 1 on failures: the contract is in apps/ingest/AGENTS.md
+("Commands").
 """
 
 import argparse
@@ -67,16 +65,17 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
 
     async def go_live(version: int) -> None:
         nonlocal known
+        before = known
+        # Until the activation returns, the version's status is unknown: a failure or an interruption may come
+        # after the commit reached the database.
+        known = replace(known, status="unknown") if known else Summary(version, "unknown")
         try:
             # Local may activate without an eval run; production never does (LLD "6.1 Corpus version").
             await activate(version, store=store, require_eval=settings.app_env != "local")
         except ActivationRefused:
+            known = before  # refused before any write, or rolled back: nothing changed
             raise
-        except Exception:
-            if known is not None:
-                known = replace(known, status="unknown")  # the activation may or may not have committed
-            raise
-        known = replace(known, status="active") if known else Summary(version, "active")
+        known = replace(known, status="active")
         folder = await publish_active(version, store=store, publisher=publisher, examples=examples)
         log.info("corpus_activated_and_published", version=version, path=folder)
 
@@ -88,6 +87,11 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
             if args.activate_version is not None:
                 await go_live(args.activate_version)
             else:
+
+                def created(version: int) -> None:
+                    nonlocal known
+                    known = Summary(version, "candidate")
+
                 known = await run_ingest(
                     args.source or corpus_dir(settings.domain),
                     store=store,
@@ -95,6 +99,7 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
                     scanner=GitleaksScanner(settings.gitleaks_binary),
                     allowlist=domain.pii_allowlist,
                     limits=limits,
+                    on_created=created,
                 )
                 log.info("corpus_ingested", **asdict(known))
                 if args.activate:
@@ -117,7 +122,8 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
             _summary(known)  # the candidate this run wrote, still a candidate
         return 1
     except PublishFailed as exc:
-        # Live but unpublished: re-running the ingest publishes a new version.
+        # Live but unpublished. Recovery: run the ingest again; it publishes a new version (unchanged chunks
+        # are copied, not embedded again).
         log.exception("publish_failed", version=exc.version)
         if known is not None:
             _summary(known)
@@ -129,9 +135,10 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
         if known is not None:
             _summary(known)
         return 1
-    except BaseException:  # interrupted: still say what was left behind, then stop
+    except BaseException:  # interrupted: whatever was in flight may or may not have reached the database
+        log.warning("ingest_interrupted", version=known.version if known else None)
         if known is not None:
-            _summary(known)
+            _summary(replace(known, status="unknown"))
         raise
     finally:
         await db.close()

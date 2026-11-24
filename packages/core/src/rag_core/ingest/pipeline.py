@@ -1,5 +1,6 @@
 """Ingest run and activation (LLD "6.1 Corpus version")."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -59,9 +60,14 @@ async def run_ingest(
     scanner: SecretScanner,
     allowlist: tuple[str, ...],
     limits: Limits,
+    on_created: Callable[[int], None] = lambda version: None,
 ) -> Summary:
-    """Write a new candidate version from `source`; nothing is embedded or written unless the gate passes."""
+    """Write a new candidate version from `source`; nothing is embedded or written unless the gate passes.
+
+    `on_created` hears the new version's number at once, so a caller interrupted mid-run can still report it.
+    """
     version = await store.create_candidate(embedder.tag)
+    on_created(version)
     try:
         return await _fill_candidate(version, source, store, embedder, scanner, allowlist, limits)
     except IngestRejected as exc:
