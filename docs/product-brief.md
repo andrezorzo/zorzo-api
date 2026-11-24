@@ -165,15 +165,4 @@ None at this time.
 
 ## Glossary
 
-This list grows with the project; it moves to the repository's `GLOSSARY.md` once that exists.
-
-| Term | Definition |
-| --- | --- |
-| Corpus | The reviewed material the agent answers from. Not the whole internet, and not unreviewed notes. |
-| Source | One document in the corpus, cited in an answer. |
-| Trace | The public, redacted record of how one answer was produced. Not an analytics log of the visitor. |
-| Eval set | Fixed questions with expected answers, used to measure quality before any change ships. |
-| Faithfulness | Share of an answer's claims that the cited sources back up. Not the same as being correct about the world. |
-| Degraded mode | The site keeps working with search only when models are down or the budget runs out. |
-| Blocked attempt | A request a defense stopped (bot, injection, off-topic abuse), counted in public. |
-| Budget cap | The daily spending limit on models; reaching it triggers degraded mode, never extra spending. |
+The project's vocabulary lives in [GLOSSARY.md](../GLOSSARY.md).

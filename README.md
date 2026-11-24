@@ -16,6 +16,9 @@ Status: design phase. No code yet.
 - [HLD](docs/hld.md): how the system is organized and why.
 - [LLD](docs/lld.md): how each part works inside.
 - [ADRs](docs/adr/): the decisions, with the alternatives discarded.
+- [Roadmap](docs/roadmap.md): the features, their order and status; each has a PRD in `docs/features/`.
+- [Glossary](GLOSSARY.md): the project's vocabulary.
+- [AGENTS.md](AGENTS.md): conventions for agents and contributors.
 
 ## License
 
