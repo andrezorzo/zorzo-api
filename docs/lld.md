@@ -197,6 +197,8 @@ domain pieces, not ports (section 6.5).
   | `bot_check_failed` | 403 | Turnstile token invalid, expired, or the provider errored |
   | `rate_limited` | 429 | A bucket is empty; `Retry-After` says when to try again |
   | `unavailable` | 503 | The backend can't serve (database down, corpus tag mismatch) |
+  | `not_found` | 404 | No route at that path |
+  | `method_not_allowed` | 405 | The route exists but not with that method |
   | `internal` | 500 | A bug before the stream opened |
 
 - **After the stream opens** the response is never an HTTP error. Outcomes are events: `blocked`, `degraded`,

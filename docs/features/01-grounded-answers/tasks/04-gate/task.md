@@ -14,3 +14,4 @@
 - [ ] **AC4** · The raw IP is never stored or logged; only the daily HMAC is.
 - [ ] **AC5** · The page reacts to 422, 403, 429 and 503 as in LLD "Front against the API".
 - [ ] **AC6** · Tests use Turnstile's test keys (always pass, always fail).
+- [ ] **AC7** · An unknown path answers `404 not_found` and a wrong method `405 method_not_allowed`, with the catalog body and a `trace_id` (LLD "Errors").
