@@ -35,7 +35,5 @@ jobs:
         run: uv run ruff check . && uv run ruff format --check .
       - name: Types
         run: uv run mypy .
-      - name: Import contracts
-        run: uv run lint-imports --no-cache
       - name: Tests
         run: uv run pytest -q

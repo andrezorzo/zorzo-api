@@ -37,7 +37,7 @@ async def unavailable() -> None:
 
 @pytest.fixture
 def client(database_url: str) -> Iterator[TestClient]:
-    app = create_app(api_settings(database_url))  # type: ignore[arg-type]
+    app = create_app(api_settings(database_url))
     app.include_router(probe)
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c

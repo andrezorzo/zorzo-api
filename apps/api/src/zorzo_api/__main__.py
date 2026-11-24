@@ -1,6 +1,5 @@
 """Process entry point: validate settings and the domain, then serve. Fails fast before serving."""
 
-import os
 import sys
 
 import uvicorn
@@ -18,7 +17,7 @@ def main() -> None:
     except (ValidationError, DomainError) as exc:
         print(f"zorzo-api: refusing to start: {exc}", file=sys.stderr)
         sys.exit(1)
-    uvicorn.run(app, host=os.environ.get("HOST", "127.0.0.1"), port=int(os.environ.get("PORT", "8000")))
+    uvicorn.run(app, host=settings.host, port=settings.port)
 
 
 if __name__ == "__main__":

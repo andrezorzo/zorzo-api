@@ -39,10 +39,6 @@ class ApiError(Exception):
         self.headers = headers or {}
         super().__init__(self.message)
 
-    @property
-    def status(self) -> int:
-        return STATUS[self.code]
-
 
 def error_body(code: ErrorCode, message: str, trace_id: str) -> dict[str, dict[str, str]]:
     return {"error": {"code": code.value, "message": message, "trace_id": trace_id}}

@@ -21,4 +21,4 @@ Run from the repository root, with Postgres up (`docker compose -f infra/compose
 ## Full verification
 
 From the repository root: `uv run ruff check . && uv run ruff format --check . && uv run mypy . &&
-uv run lint-imports --no-cache && uv run pytest -q` (mypy needs `DATABASE_URL` set to any value).
+uv run pytest -q` (mypy needs `DATABASE_URL` set to any value; the import contracts run inside pytest).

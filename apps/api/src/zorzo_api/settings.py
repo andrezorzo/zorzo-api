@@ -1,14 +1,9 @@
 """API settings, validated at startup (LLD "Configuration")."""
 
-from typing import Literal
-
 from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from zorzo_core.settings import AppSettings
 
 
-class ApiSettings(BaseSettings):
-    model_config = SettingsConfigDict(extra="ignore")
-
-    app_env: Literal["local", "production"] = "production"
-    domain: str = Field(min_length=1)
-    database_url: str = Field(min_length=1)
+class ApiSettings(AppSettings):
+    host: str = "127.0.0.1"
+    port: int = Field(default=8000, ge=0, le=65535)

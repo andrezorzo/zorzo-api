@@ -5,23 +5,19 @@ Django owns the schema (LLD "Data"); this module reflects it at startup and neve
 
 import asyncio
 
-from sqlalchemy import MetaData, func, select, text
+from sqlalchemy import MetaData, func, make_url, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+CONNECT_TIMEOUT_S = 5
 PROBE_TIMEOUT_S = 2.0
-
-
-def _async_url(url: str) -> str:
-    scheme, sep, rest = url.partition("://")
-    if scheme in ("postgres", "postgresql"):
-        return f"postgresql+psycopg{sep}{rest}"
-    return url
 
 
 class Database:
     def __init__(self, url: str) -> None:
         self.engine: AsyncEngine = create_async_engine(
-            _async_url(url), pool_pre_ping=True, connect_args={"connect_timeout": int(PROBE_TIMEOUT_S)}
+            make_url(url).set(drivername="postgresql+psycopg"),
+            pool_pre_ping=True,
+            connect_args={"connect_timeout": CONNECT_TIMEOUT_S},
         )
         self.metadata = MetaData()
 

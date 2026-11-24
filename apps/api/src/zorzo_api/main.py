@@ -24,7 +24,6 @@ def create_app(settings: ApiSettings) -> FastAPI:
         await db.close()
 
     app = FastAPI(title="zorzo-api", lifespan=lifespan, docs_url=None, redoc_url=None)
-    app.state.settings = settings
     app.state.domain = domain
     app.state.db = db
     errors.install(app)

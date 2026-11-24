@@ -87,6 +87,7 @@ source_modules = [
     "zorzo_core.ports",
     "zorzo_core.services",
     "zorzo_core.domain",
+    "zorzo_core.settings",
     "zorzo_core.telemetry",
     "zorzo_api",
     "zorzo_ingest",

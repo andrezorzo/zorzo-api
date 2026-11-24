@@ -9,14 +9,15 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from sqlalchemy import make_url
+from zorzo_api.settings import ApiSettings
 
 ROOT = Path(__file__).resolve().parents[1]
 ADMIN_URL = os.environ.get("TEST_DATABASE_ADMIN_URL", "postgresql://zorzo:zorzo@localhost:5432/postgres")
 
 
 def _url_for(name: str) -> str:
-    base, _, _ = ADMIN_URL.rpartition("/")
-    return f"{base}/{name}"
+    return make_url(ADMIN_URL).set(database=name).render_as_string(hide_password=False)
 
 
 def create_migrated_database() -> str:
@@ -47,9 +48,6 @@ def database_url() -> Iterator[str]:
     drop_database(url)
 
 
-def api_settings(url: str, **overrides: str) -> "object":
+def api_settings(url: str, domain: str = "zorzo") -> ApiSettings:
     """Settings for an API under test, pointing at the given database."""
-    from zorzo_api.settings import ApiSettings
-
-    values = {"app_env": "local", "domain": "zorzo", "database_url": url, **overrides}
-    return ApiSettings(**values)  # type: ignore[arg-type]
+    return ApiSettings(app_env="local", domain=domain, database_url=url)

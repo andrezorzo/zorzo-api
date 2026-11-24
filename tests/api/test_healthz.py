@@ -12,7 +12,7 @@ from tests.conftest import api_settings, create_migrated_database, drop_database
 
 @pytest.fixture
 def client(database_url: str) -> Iterator[TestClient]:
-    with TestClient(create_app(api_settings(database_url))) as c:  # type: ignore[arg-type]
+    with TestClient(create_app(api_settings(database_url))) as c:
         yield c
 
 
@@ -42,7 +42,7 @@ def test_reports_degraded_when_todays_budget_is_exhausted(client: TestClient, da
 
 def test_reports_down_when_the_database_is_unreachable() -> None:
     url = create_migrated_database()
-    with TestClient(create_app(api_settings(url))) as client:  # type: ignore[arg-type]
+    with TestClient(create_app(api_settings(url))) as client:
         drop_database(url)
         response = client.get("/api/healthz")
     assert response.status_code == 503

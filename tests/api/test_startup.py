@@ -24,14 +24,14 @@ def _start(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
 
 
 def test_loads_the_domain_chosen_by_domain(database_url: str) -> None:
-    app = create_app(api_settings(database_url))  # type: ignore[arg-type]
+    app = create_app(api_settings(database_url))
     assert app.state.domain.name == "zorzo"
     assert app.state.domain.languages == ("en", "pt")
 
 
 def test_refuses_a_missing_domain(database_url: str) -> None:
     with pytest.raises(DomainError, match="domain_missing"):
-        create_app(api_settings(database_url, domain="missing"))  # type: ignore[arg-type]
+        create_app(api_settings(database_url, domain="missing"))
     result = _start({"DATABASE_URL": database_url, "DOMAIN": "missing"})
     assert result.returncode != 0
     assert "domain_missing" in result.stderr

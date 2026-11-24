@@ -26,22 +26,22 @@ def install(app: FastAPI) -> None:
     ) -> Response:
         trace_id = str(uuid.uuid4())
         request.state.trace_id = trace_id
-        structlog.contextvars.bind_contextvars(trace_id=trace_id)
         started = time.perf_counter()
-        try:
-            response = await call_next(request)
-        except Exception:
-            log.exception("unhandled_error")
-            response = _error_response(ErrorCode.INTERNAL, DEFAULT_MESSAGE[ErrorCode.INTERNAL], trace_id)
-        log.info(
-            "request",
-            trace_id=trace_id,
-            method=request.method,
-            path=request.url.path,
-            status=response.status_code,
-            ms=round((time.perf_counter() - started) * 1000),
-        )
-        structlog.contextvars.unbind_contextvars("trace_id")
+        with structlog.contextvars.bound_contextvars(trace_id=trace_id):
+            try:
+                response = await call_next(request)
+            except Exception:
+                log.exception("unhandled_error")
+                response = _error_response(ErrorCode.INTERNAL, DEFAULT_MESSAGE[ErrorCode.INTERNAL], trace_id)
+            # trace_id is passed explicitly too, so the line carries it under any processor chain.
+            log.info(
+                "request",
+                trace_id=trace_id,
+                method=request.method,
+                path=request.url.path,
+                status=response.status_code,
+                ms=round((time.perf_counter() - started) * 1000),
+            )
         return response
 
     @app.exception_handler(ApiError)
