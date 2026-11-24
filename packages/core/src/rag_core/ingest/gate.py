@@ -37,8 +37,12 @@ SEMVER = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?")
 PHONE_REGIONS = ("BR", "US")
 ONE_LINE_BREAK = re.compile(r"[^\S\n]*\n(?![^\S\n]*\n)[^\S\n]*")
 ODD_SPACE = re.compile(r"[^\S\n]")  # no-break, thin and other spaces the matcher doesn't treat as separators
-# Markup that disappears when the page renders: emphasis, backslash escapes, zero-width characters.
-INVISIBLE_MARKUP = re.compile(r"[*_\\\u200b-\u200d\u2060\ufeff]")
+# Markup that disappears when the page renders: emphasis, inline code, backslash escapes, inline HTML tags and
+# zero-width characters. A run of it, with the spaces around it, becomes one space.
+INVISIBLE_MARKUP = re.compile(r"(?:\s*(?:[*_`\\\u200b-\u200d\u2060\ufeff]|<[^>\n]{1,40}>)+)+\s*")
+# Digits with separators: a phone may be the tail of a longer run (`Ref 2024 11 98765-4321`).
+NUMBER_RUN = re.compile(r"[\d(+][\d\s().+-]*\d")
+MAX_RUN_GROUPS = 12
 CPF = re.compile(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b|\b\d{11}\b")
 CARD = re.compile(r"\b(?:\d[ -]?){12,18}\d\b")
 
@@ -93,16 +97,32 @@ def _is_email_domain(domain: str) -> bool:
 
 
 def _phone_spans(text: str) -> set[tuple[int, str]]:
-    """(country code, text) of every phone-shaped span, read with each region's numbering plan."""
-    # Replaced by a space, not deleted: deleting would glue a label to the digits and hide the number.
-    prepared = html.unescape(INVISIBLE_MARKUP.sub(" ", text))
-    prepared = re.sub(r" {2,}", " ", ODD_SPACE.sub(" ", ONE_LINE_BREAK.sub(" ", prepared)))
+    """(country code, text) of every phone-shaped span, read with each region's numbering plan.
+
+    The matcher reads the longest run of digits and separators as one candidate and gives up when the run as
+    a whole isn't a number, so every window of up to five space-separated groups of a run is tried too
+    (`Ref 2024 11 98765-4321`, `123 11 98765-4321 456`).
+    """
+    prepared = INVISIBLE_MARKUP.sub(" ", html.unescape(text))
+    prepared = ODD_SPACE.sub(" ", ONE_LINE_BREAK.sub(" ", prepared))
+    candidates = [prepared]
+    for run in NUMBER_RUN.finditer(prepared):
+        groups = run.group().split()
+        # Sentence-sized runs only: a long numeric table would multiply the work, and the scan of the whole
+        # text still reads a phone in it when its marker ((DD), +CC) sets it apart.
+        if 1 < len(groups) <= MAX_RUN_GROUPS:
+            candidates.extend(
+                " ".join(groups[i:j])
+                for i in range(len(groups))
+                for j in range(i + 1, min(i + 6, len(groups) + 1))
+            )
     return {
         (m.number.country_code or 0, m.raw_string)
+        for candidate in candidates
         for region in PHONE_REGIONS
         # The default stops after 65,535 candidates, which would leave the end of a long document unread.
         for m in phonenumbers.PhoneNumberMatcher(
-            prepared, region, leniency=phonenumbers.Leniency.VALID, max_tries=sys.maxsize
+            candidate, region, leniency=phonenumbers.Leniency.VALID, max_tries=sys.maxsize
         )
     }
 

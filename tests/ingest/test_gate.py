@@ -223,3 +223,21 @@ def test_finds_a_phone_with_each_group_emphasized(text: str) -> None:
 
 def test_an_allowlisted_number_from_another_country_covers_its_national_form() -> None:
     assert personal_data("(416) 555-0132", ["+1 416 555 0132"]) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "123     11 98765-4321",
+        "CEP 01310-100     11 98765-4321",
+        "**Ref 2024** **11 98765-4321**",
+        "Ref 2024 11 98765-4321",
+        "123 11 98765-4321 456",
+        "1999  2024     415 555 0132",
+        "<b>11</b> <b>98765-4321</b>",
+        "`11` `98765-4321`",
+        "11&#42;98765-4321",
+    ],
+)
+def test_finds_a_phone_after_other_numbers_or_inside_markup(text: str) -> None:
+    assert personal_data(text) == ["pii:phone"]
