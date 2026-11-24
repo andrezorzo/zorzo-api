@@ -288,7 +288,7 @@ Conventions:
 | `POST /api/v1/ask` | planned | `q` (≤ `MAX_QUESTION_CHARS`), `session`, `turnstile` | `200 text/event-stream`; errors per section 3 | The gate runs before the stream opens; after it passes, the events below |
 | `GET /api/healthz` | planned | — | `{status: ok \| down, mode: normal \| degraded, db: ok \| down}` | Never cached, no gate. Used by the front, the deploy smoke test and UptimeRobot |
 
-The spec's JSON read routes (trace, evals, defenses, status, sources) are not part of the API: the dashboard
+JSON read routes for traces, evals, defenses, status and sources are not part of the API: the dashboard
 serves those pages from the database (section 8, ADR 0015).
 
 ### Stream events
@@ -389,7 +389,8 @@ States of the day's budget row; the day is UTC, so every visitor sees the same "
   `answer` or `abstain`. A step that adds no new chunk ids ends the loop.
 - **Evidence:** below `RELEVANCE_FLOOR` (best fused score) the run abstains without calling `assess`; above
   `ASSESS_SKIP_SCORE` it skips `assess`. Both are calibrated on the eval set at M3.
-- **Advisor** (spec §10.3): off in the MVP behind a flag; turned on only if the M3 comparison justifies it.
+- **Advisor** (the cheap model consults a stronger one only at a decision it cannot settle: borderline
+  evidence after `reformulate`, `verify` failing before `repair`, low `route` confidence): off in the MVP behind a flag; turned on only if the M3 comparison justifies it.
 - **Context window:** each call is assembled from fixed slots sized for the smallest window in the chain
   (system prompt, question, chunks ≤ `CONTEXT_MAX_TOKENS`, history ≤ `HISTORY_MAX_TOKENS`); over budget, the
   oldest history goes first, then the lowest-ranked whole chunks. A provider "context too long" error is a
@@ -430,7 +431,7 @@ untrusted data, like retrieved chunks.
 | `contact_options` | planned | Returns links only; never sends anything |
 | `check_answerable`, `query_career_graph` | to detail | Phase 2 (career graph) |
 
-`search_site_code` from the spec is not built: a curated `docs/code-map.md` (one section per module: what it
+A code-search tool over the site's own repository (`search_site_code`) is not built: a curated `docs/code-map.md` (one section per module: what it
 does, where it lives, its decisions and ADRs) is a corpus source instead.
 
 ### 6.6 Circuit breaker
@@ -516,7 +517,7 @@ Daily salts need no deletion: they are derived from the date (section 3 "Securit
 | Retention | Nightly systemd timer → Django command | Section 6.11; deletes by date condition, so a repeat deletes nothing more | `log_event`; the next night catches up | planned |
 | Backup | Nightly systemd timer | `pg_dump` without the `langgraph` schema to the backup bucket; one file per date; lifecycle expiry after `BACKUP_RETENTION` | `log_event` + alert `backup_failed` | planned |
 | Restore test | Monthly systemd timer | Restores the latest dump into a temporary database, checks row counts and the active version, drops it | Alert `restore_failed` | planned |
-| Nightly eval | Nightly systemd timer → eval container | Subset on the real `:free` models (spec §11.3) into `eval_runs` | `log_event` + alert `eval_regression` | planned |
+| Nightly eval | Nightly systemd timer → eval container | Small subset on the real `:free` models, so it measures what visitors get, into `eval_runs` | `log_event` + alert `eval_regression` | planned |
 
 ## 8. Client
 
@@ -656,7 +657,7 @@ What replaces each production service is in the HLD ("Deployment and environment
 - **Alerter and tracing:** the alerter only logs; LangSmith is on only when a key is present.
 - **Tests:** a separate test database per session, with the Django migrations applied by a fixture; the fake
   OpenRouter server (`tests/fakes/`) answers scripted responses, 429s, hangs, malformed JSON and canary
-  leaks for the contract and fault tests (spec §16). Real model calls only in eval runs.
+  leaks for the contract and fault tests. Real model calls only in eval runs.
 
 ## 11. Decisions
 
@@ -672,13 +673,13 @@ Architecture decisions (0001–0011) are indexed in the HLD.
 ## 12. Open questions
 
 - [ ] Embedding model (e5 vs bge-m3), which sets `vector(N)`: decided by recall at M1.
-- [ ] L2 guard classifier: a small local model or a cheap LLM classifier (spec §18.3).
+- [ ] L2 guard classifier: a small local model or a cheap LLM classifier.
 - [ ] Chat model of the local profile (Ollama): quick eval.
-- [ ] Free models per stage (route, answer, judge): eval matrix at M3 (spec §18.4).
+- [ ] Free models per stage (route, answer, judge): eval matrix at M3.
 - [ ] `RELEVANCE_FLOOR` and `ASSESS_SKIP_SCORE`: calibrated at M3.
 - [ ] Which CloudFront header carries the viewer IP: checked at M1.
 - [ ] Nemotron rerank: request format, limits and Portuguese quality (M5).
 - [ ] Charts library for the dashboard.
-- [ ] Eval harness: dataset format, metrics per layer, noise-band rule (from spec §11): to detail.
+- [ ] Eval harness: dataset format, metrics per layer, noise-band rule: to detail.
 - [ ] Format of `data/manifest.json` and of the brain and corpus files: to detail (shared with the front's LLD).
 - [ ] Schema of `config/models.yaml` and `config/limits.yaml`: to detail.
