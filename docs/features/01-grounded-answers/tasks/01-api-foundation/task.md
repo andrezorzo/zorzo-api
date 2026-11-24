@@ -1,6 +1,6 @@
 # 01: API foundation
 
-**Status:** to do
+**Status:** in progress
 
 **What to build:** A developer can bring up the local environment and see the API report its health: the uv workspace with the shared core, the apps and the domain package; settings that stop the app at startup when something required is missing; Postgres with pgvector in the compose file; the Django schema owner with the tables F01 writes; the API reflecting them; and the test base (a test database per session with the migrations applied) running in CI with lint and type checks.
 
