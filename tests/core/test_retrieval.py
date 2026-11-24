@@ -2,7 +2,7 @@
 
 from rag_core.limits import Limits
 from rag_core.ports import SearchHit
-from rag_core.services.retrieval import retrieve
+from rag_core.services.retrieval import rerank, search
 
 LIMITS = Limits(
     max_question_chars=500,
@@ -38,22 +38,30 @@ class Store:
 
 
 class Reverse:
+    def warm(self) -> None:
+        pass
+
     def rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
         return [SearchHit(h.id, h.title, h.content, float(n)) for n, h in enumerate(reversed(hits))]
 
 
 class Broken:
+    def warm(self) -> None:
+        pass
+
     def rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
         raise RuntimeError("model missing")
 
 
 async def test_orders_hits_by_the_reranker() -> None:
     store = Store()
-    hits = await retrieve("q", 7, embedder=Embedder(), store=store, rerankers=[Reverse()], limits=LIMITS)
+    fused = await search("q", 7, embedder=Embedder(), store=store, limits=LIMITS)
+    hits = await rerank("q", fused, rerankers=[Reverse()], limits=LIMITS)
     assert [h.id for h in hits] == [5, 4, 3]
     assert store.calls == [("q", 20, 7)]
 
 
 async def test_falls_back_to_fused_order_when_the_reranker_fails() -> None:
-    hits = await retrieve("q", 7, embedder=Embedder(), store=Store(), rerankers=[Broken()], limits=LIMITS)
+    fused = await search("q", 7, embedder=Embedder(), store=Store(), limits=LIMITS)
+    hits = await rerank("q", fused, rerankers=[Broken()], limits=LIMITS)
     assert [h.id for h in hits] == [1, 2, 3]

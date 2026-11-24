@@ -7,7 +7,8 @@ import hashlib
 import math
 import re
 
-DIM = 1024
+from rag_core.ports import EMBEDDING_DIM as DIM
+
 WORD = re.compile(r"\w+", re.UNICODE)
 
 

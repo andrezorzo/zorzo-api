@@ -7,11 +7,11 @@ from uuid import UUID
 import structlog
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
-from rag_core.errors import ApiError, ErrorCode
 from rag_core.events import Done, StreamEvent
-from rag_core.ports import TraceSink
 from rag_core.services import corpus as corpus_service
+from rag_core.services.question import normalize
 from rag_core.services.search_only import run_search_only
+from rag_core.services.trace import FanOutSink
 from sse_starlette import EventSourceResponse, ServerSentEvent
 
 log = structlog.get_logger()
@@ -34,25 +34,14 @@ class QueueSink:
         self.queue.put_nowait(event)
 
 
-class FanOut:
-    def __init__(self, sinks: list[TraceSink]) -> None:
-        self.sinks = sinks
-
-    def record(self, event: StreamEvent) -> None:
-        for sink in self.sinks:
-            sink.record(event)
-
-
 @router.post("/api/v1/ask")
 async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
     state = request.app.state
-    question = body.q.strip()
-    if not question or len(question) > state.limits.max_question_chars:
-        raise ApiError(ErrorCode.INVALID_INPUT)
+    question = normalize(body.q, state.limits)
     corpus = await corpus_service.servable(state.vector_store, state.embedder.tag)
     trace_id: str = request.state.trace_id
     stream = QueueSink()
-    sink = FanOut([stream, *state.trace_sinks])
+    sink = FanOutSink([stream, *state.trace_sinks])
 
     async def run() -> None:
         # The stream outlives the middleware's log context, so the trace id is bound again here.

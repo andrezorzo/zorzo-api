@@ -5,7 +5,9 @@ Producers emit these models through the TraceSink; the SSE route writes each as 
 test fails when the committed file drifts.
 """
 
+import functools
 import json
+import operator
 import sys
 from typing import Annotated, Any, ClassVar, Literal, cast
 from uuid import UUID
@@ -157,7 +159,7 @@ def sse_schema() -> dict[str, Any]:
         )
         for cls in EVENTS
     ]
-    union: Any = Annotated[_union(wrappers), Field(discriminator="event")]
+    union: Any = Annotated[functools.reduce(operator.or_, wrappers), Field(discriminator="event")]
     schema: dict[str, Any] = TypeAdapter[Any](union).json_schema()
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -166,13 +168,6 @@ def sse_schema() -> dict[str, Any]:
         "description": ORDERING,
         **schema,
     }
-
-
-def _union(types: list[Any]) -> Any:
-    union: Any = types[0]
-    for t in types[1:]:
-        union = union | t
-    return union
 
 
 if __name__ == "__main__":

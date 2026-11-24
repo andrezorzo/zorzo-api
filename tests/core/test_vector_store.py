@@ -6,10 +6,11 @@ import psycopg
 import pytest
 from rag_core.adapters.pgvector_store import PgVectorStore, to_vector
 from rag_core.adapters.postgres import Database
+from rag_core.ports import EMBEDDING_DIM
 
 from tests.conftest import create_migrated_database, drop_database
 
-DIM = 1024
+DIM = EMBEDDING_DIM
 
 
 def unit(*weights: tuple[int, float]) -> list[float]:

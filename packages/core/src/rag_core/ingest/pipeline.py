@@ -1,6 +1,6 @@
 """Ingest run and activation (LLD "6.1 Corpus version")."""
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 from rag_core.ingest import gate
@@ -17,9 +17,6 @@ class Summary:
     chunks: int = 0
     embedded: int = 0
     copied: int = 0
-
-    def as_dict(self) -> dict[str, object]:
-        return asdict(self)
 
 
 class IngestRejected(Exception):
@@ -86,8 +83,8 @@ async def run_ingest(
     )
 
 
-async def activate(version: int, *, store: CorpusStore, local: bool) -> None:
-    """Production activates only with a passing eval run; local may activate without one."""
-    if not local and not await store.eval_passed(version):
+async def activate(version: int, *, store: CorpusStore, require_eval: bool) -> None:
+    """With `require_eval` (production), only a version with a passing eval run is activated."""
+    if require_eval and not await store.eval_passed(version):
         raise ActivationRefused(f"corpus version {version} has no passing eval run")
     await store.activate(version)

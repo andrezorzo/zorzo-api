@@ -7,6 +7,10 @@ from typing import Protocol
 
 from rag_core.events import StreamEvent
 
+# Every candidate embedding model has 1024 dimensions (LLD "Open questions"); the dashboard's models
+# declare the same size for the `vector` columns.
+EMBEDDING_DIM = 1024
+
 
 class HealthProbe(Protocol):
     """What the health check needs from the database."""
@@ -55,6 +59,9 @@ class Reranker(Protocol):
     """One rerank level; it may raise, and the retrieval service falls to the next level (ADR 0009)."""
 
     def rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]: ...
+
+    def warm(self) -> None:
+        """Load what the level needs, at startup; may raise."""
 
 
 @dataclass(frozen=True)
@@ -147,6 +154,7 @@ class SecretScanner(Protocol):
 
 
 __all__ = [
+    "EMBEDDING_DIM",
     "ActiveCorpus",
     "ChunkRow",
     "CorpusStore",

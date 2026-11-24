@@ -1,12 +1,9 @@
 """AC1, AC2, AC3, AC8: the ingest command, run as a subprocess against a fresh migrated database."""
 
 import json
-import os
 import secrets
 import shutil
 import string
-import subprocess
-import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,8 +12,9 @@ from typing import Any
 import psycopg
 import pytest
 import yaml
+from rag_core.ports import EMBEDDING_DIM
 
-from tests.conftest import ROOT, create_migrated_database, drop_database
+from tests.conftest import ROOT, create_migrated_database, drop_database, run_ingest
 
 FIXTURE_CORPUS = ROOT / "tests" / "fixtures" / "corpus"
 EXAMPLES = ROOT / "domains" / "zorzo" / "src" / "domain_zorzo" / "examples.yaml"
@@ -45,22 +43,7 @@ def source(tmp_path: Path) -> Path:
 
 
 def ingest(db: str, data_dir: Path, *args: str, app_env: str = "local") -> Run:
-    env = {
-        **os.environ,
-        "DATABASE_URL": db,
-        "APP_ENV": app_env,
-        "DOMAIN": "zorzo",
-        "EMBEDDER": "fake",
-        "DATA_DIR": str(data_dir),
-    }
-    result = subprocess.run(
-        [sys.executable, "-m", "rag_ingest", *args],
-        env=env,
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    result = run_ingest(db, data_dir, *args, app_env=app_env)
     lines = [line for line in result.stdout.splitlines() if line.startswith('{"summary"')]
     summary = json.loads(lines[-1])["summary"] if lines else {}
     return Run(result.returncode, result.stdout + result.stderr, summary)
@@ -142,7 +125,7 @@ def test_splits_by_headers_and_stores_embedded_chunks(db: str, source: Path, tmp
     paths = [c[0] for c in chunks]
     assert "FAQ > Cloud" in paths
     assert "Narrativa de carreira > Sistemas distribuídos" in paths
-    assert all(c[1] > 0 and c[2] == 1024 and c[3] > 0 for c in chunks)
+    assert all(c[1] > 0 and c[2] == EMBEDDING_DIM and c[3] > 0 for c in chunks)
     assert len({c[4] for c in chunks}) == len(chunks)
     assert run.summary["chunks"] == len(chunks)
     assert run.summary["embedded"] == len(chunks) and run.summary["copied"] == 0

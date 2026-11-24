@@ -4,11 +4,13 @@ Until the agent graph exists (F01-T06) every question takes this path; afterward
 """
 
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from uuid import UUID
 
 import structlog
 
+from rag_core.errors import DEFAULT_MESSAGE, ErrorCode
 from rag_core.events import Degraded, DegradedReason, Done, Error, Hit, Retrieval, Stage, StageName
 from rag_core.limits import Limits
 from rag_core.ports import ActiveCorpus, Embedder, Reranker, TraceSink, VectorStore
@@ -17,18 +19,13 @@ from rag_core.services import retrieval
 log = structlog.get_logger()
 
 
-class _Timed:
-    def __init__(self, sink: TraceSink, name: StageName) -> None:
-        self.sink, self.name = sink, name
-
-    def __enter__(self) -> None:
-        self.started = time.perf_counter()
-        self.sink.record(Stage(name=self.name, status="start", ms=None))
-
-    def __exit__(self, *exc: object) -> None:
-        if exc[0] is None:
-            ms = round((time.perf_counter() - self.started) * 1000)
-            self.sink.record(Stage(name=self.name, status="end", ms=ms))
+@contextmanager
+def _stage(sink: TraceSink, name: StageName) -> Iterator[None]:
+    """`stage` start, then end with its duration; a failure leaves the end out."""
+    started = time.perf_counter()
+    sink.record(Stage(name=name, status="start", ms=None))
+    yield
+    sink.record(Stage(name=name, status="end", ms=round((time.perf_counter() - started) * 1000)))
 
 
 async def run_search_only(
@@ -45,16 +42,17 @@ async def run_search_only(
 ) -> None:
     """Emits the whole stream, ending with `done`; a bug becomes `error` then `done`, never an exception."""
     try:
-        with _Timed(sink, "retrieve"):
+        with _stage(sink, "retrieve"):
             hits = await retrieval.search(
                 question, corpus.version, embedder=embedder, store=store, limits=limits
             )
-        with _Timed(sink, "rerank"):
+        with _stage(sink, "rerank"):
             hits = await retrieval.rerank(question, hits, rerankers=rerankers, limits=limits)
         sink.record(Degraded(reason=reason))
         shown = [Hit(id=h.id, title=h.title, score=h.score) for h in hits[: limits.degraded_max_passages]]
         sink.record(Retrieval(hits=shown, corpus_version=corpus.version))
     except Exception:
         log.exception("search_only_failed")
-        sink.record(Error(code="internal", message="Something went wrong on our side."))
+        code = ErrorCode.INTERNAL
+        sink.record(Error(code=code.value, message=DEFAULT_MESSAGE[code]))
     sink.record(Done(trace_id=trace_id, cached=False, abstained=False, suggestion=None))

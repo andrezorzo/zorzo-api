@@ -32,16 +32,3 @@ async def rerank(
         except Exception:
             log.warning("rerank_level_failed", level=type(level).__name__, exc_info=True)
     return hits[: limits.rerank_top_n]
-
-
-async def retrieve(
-    question: str,
-    version: int,
-    *,
-    embedder: Embedder,
-    store: VectorStore,
-    rerankers: Sequence[Reranker],
-    limits: Limits,
-) -> list[SearchHit]:
-    hits = await search(question, version, embedder=embedder, store=store, limits=limits)
-    return await rerank(question, hits, rerankers=rerankers, limits=limits)
