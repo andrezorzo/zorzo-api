@@ -714,7 +714,7 @@ endpoints and per-environment switches.
 | `PING_INTERVAL` | 10 s | SSE heartbeat | `limits.yaml` |
 | `REQUEST_DEADLINE` | 20 s | Whole request; the search-only path ends with `error` then `done` when it passes | `limits.yaml` |
 | `ANSWER_RESERVE` | 12 s | Time kept for `answer` (section 6.3) | `limits.yaml` |
-| `TIMEOUT_ROUTE` / `TIMEOUT_RERANK` / `TIMEOUT_ANSWER` / `TIMEOUT_JUDGE` | 3 s / 1 s / 12 s / 5 s | Model gateway per stage | `limits.yaml` |
+| `TIMEOUT_ROUTE` / `TIMEOUT_RERANK` / `TIMEOUT_ANSWER` / `TIMEOUT_JUDGE` | 3 s / 2.5 s / 12 s / 5 s | Model gateway per stage; the remote rerank of 20 candidates took 1.0 to 2.0 s when measured on 2026-11-25 | `limits.yaml` |
 | `TIMEOUT_SEARCH_CORPUS` / `TIMEOUT_GITHUB_ACTIVITY` | 1.5 s / 2 s | Tools | `limits.yaml` |
 | `TIMEOUT_TURNSTILE` | 3 s | Bot check (`siteverify`); Cloudflare sets no value | `limits.yaml` |
 | `MAX_LOOP_MODEL_CALLS` | 2 | Agent run | `limits.yaml` |
@@ -830,8 +830,9 @@ Architecture decisions (0001–0011) are indexed in the HLD.
 - [ ] Chat model of the local profile (Ollama): quick eval.
 - [ ] Free models per stage (route, answer, judge): eval matrix at M3.
 - [ ] `RELEVANCE_FLOOR` and `ASSESS_SKIP_SCORE`: calibrated at M3.
-- [ ] Nemotron rerank (`nvidia/nemotron-3.5-rerank-8b:free`): the request shape is assumed Cohere-style until a
-  live call confirms it; limits and Portuguese quality (M5).
+- [ ] Nemotron rerank (`nvidia/nemotron-3.5-rerank-8b:free`): limits and Portuguese quality (M5). The request
+  shape (Cohere-style `query`, `documents`, `top_n` → `results[{index, relevance_score}]`) was confirmed live on
+  2026-11-25; the response carries no rate-limit headers.
 - [ ] Charts library for the dashboard.
 - [ ] Eval harness: dataset format, metrics per layer, noise-band rule: to detail.
 - [ ] Production restart policy: the API fails fast when Postgres is not ready at boot (Database), so the production compose needs `restart: unless-stopped` and a start order; to settle with the deploy feature.
