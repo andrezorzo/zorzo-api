@@ -19,6 +19,7 @@ Status labels used below: **existing**, **planned**, **to detail** (named, behav
 | Model and rerank chains | `config/models.yaml`, `config/models.local.yaml` (planned) |
 | Commands and project practices | `README.md`, `AGENTS.md` |
 | Where each piece of code lives, and why | `docs/code-map.md` (planned; also a corpus source) |
+| Front rendering, the 3D brain and its data | `zorzo-site`'s `docs/lld.md` |
 | Vocabulary | [GLOSSARY.md](../GLOSSARY.md) |
 | Architecture and its reasons | [hld.md](hld.md) |
 | Decisions with their reasons | `docs/adr/`, indexed in section 11 here and in the HLD |
@@ -351,7 +352,8 @@ What the ingest job publishes on activation (DataPublisher), read by the front w
   rewritten in place.
 - `data/<hash>/corpus.json`: `{corpus_version, chunks: [{id, doc_key, title, kind, lang, heading, text,
   source_url, p}]}`; `id` is the chunk id the stream's `retrieval` and `claim` events use; `p` is `[x, y, z]`
-  from a 3D PCA of the chunk's embedding, scaled to [-1, 1]; the front maps it into the brain.
+  from a 3D PCA of the chunk's embedding, scaled to [-1, 1]; how the front maps it into the brain is in
+  `zorzo-site`'s LLD, section "Brain data".
 - `data/<hash>/examples.json`: `[{id, lang, text}]`, the domain's example questions; `done.suggestion` uses
   the same ids.
 - `<hash>` is the SHA-256 of both files, so a folder never changes and publishing again is a no-op.

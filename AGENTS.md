@@ -60,7 +60,8 @@ docs/features/<NN>-<title>/
 ```
 
 Numbers have two digits and titles are kebab-case (`01-grounded-answers`). Tasks are numbered from `01`
-within each feature, in dependency order.
+within each feature, in dependency order. A task added after the breakdown takes the next free number, and its
+dependents name it in "Blocked by": a task number never changes, since code comments and frozen plans cite it.
 
 A task folder holds, besides the task and the plan, only records of that task, such as a manual test
 script, a measurement result or the screenshots of a visual check, in Markdown or images with kebab-case
