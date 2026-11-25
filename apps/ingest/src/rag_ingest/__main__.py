@@ -89,9 +89,7 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
                     summary = replace(summary, status="active")
         _summary(summary)
         return 0
-    except IngestRejected as exc:
-        for problem in exc.problems:
-            log.error("ingest_rejected", file=problem.file, rule=problem.rule)
+    except IngestRejected as exc:  # the problems were logged by the pipeline
         _summary(exc.summary)
         return 1
     except ActivationRefused as exc:
@@ -107,6 +105,9 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
     except Exception:
         log.exception("ingest_failed")
         return 1
+    except BaseException:
+        log.warning("ingest_interrupted")
+        raise
     finally:
         await db.close()
 

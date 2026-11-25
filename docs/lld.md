@@ -392,7 +392,8 @@ States of a corpus version; arrows carry the event that causes the transition.
   right after another number; the candidate becomes `rejected`. The whole source is checked before
   anything is embedded or written, and the report names the file and the rule, never the match.
 - A run that stops for any other reason (a failed embedding, an interruption) also rejects its candidate, so
-  a half-written version can never be activated.
+  a half-written version isn't activated; if that reject fails, the run logs `reject_failed` and the
+  candidate is checked by hand.
 - The API refuses to serve a version whose `embed_model_tag` differs from the loaded embedding model: it
   starts as `unavailable` (503) instead of serving mismatched vectors.
 - A chunk's hash covers its `doc_key`, heading path and content. Unchanged chunks are copied by hash into

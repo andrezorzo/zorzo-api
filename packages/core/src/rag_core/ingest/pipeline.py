@@ -55,12 +55,16 @@ async def run_ingest(
 ) -> Summary:
     """Write a new candidate version from `source`; nothing is embedded or written unless the gate passes.
 
-    A run that stops for any reason rejects its candidate, so it can never be activated.
+    A run that stops for any reason tries to reject its candidate, so it can't be activated; a failed reject
+    is logged (`reject_failed`), and that candidate needs a manual check.
     """
     version = await store.create_candidate(embedder.tag)
     try:
         return await _fill_candidate(version, source, store, embedder, scanner, allowlist, limits)
-    except IngestRejected:
+    except IngestRejected as exc:
+        # Logged before the reject, so the owner learns what to fix even if the reject fails.
+        for problem in exc.problems:
+            log.error("ingest_rejected", file=problem.file, rule=problem.rule)
         await store.reject(version)  # if this fails, the error goes up and the run reports no summary
         raise
     except BaseException:  # failed or cancelled: the original error is what the caller sees
