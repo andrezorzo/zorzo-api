@@ -11,7 +11,7 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import ARRAY, DOUBLE_PRECISION, TEXT
 from sqlalchemy.exc import SQLAlchemyError
 
-from rag_core.adapters.postgres import PROBE_TIMEOUT_S, Database
+from rag_core.adapters.postgres import Database
 from rag_core.ports import Bucket, StoreUnavailable
 
 # The refilled level of a stored bucket at :now; `i` is the bucket's input row.
@@ -40,7 +40,8 @@ RETURNING b.key
 # A take touches a few rows: Postgres itself ends a statement that waits on a lock or runs long, so a lock
 # wait fails in seconds. A connection that stops answering altogether is bounded only by the caller's deadline
 # (cancelling a query on a dead socket waits on that socket).
-LOCK_TIMEOUT_S = PROBE_TIMEOUT_S  # Postgres's statement and lock timeout for a take
+# Postgres's statement and lock timeout for a take: a take touches four rows, so seconds mean it is stuck.
+LOCK_TIMEOUT_S = 2.0
 
 BOUNDS = text("SELECT set_config('statement_timeout', :ms, true), set_config('lock_timeout', :ms, true)")
 
