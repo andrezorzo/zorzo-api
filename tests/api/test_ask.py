@@ -7,22 +7,22 @@ from typing import Any
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
-from rag_api.main import create_app
 from rag_core.events import StreamEvent
 
-from tests.conftest import api_settings, create_migrated_database, drop_database
+from tests.conftest import api_settings, build_app, create_migrated_database, drop_database
 from tests.contract.sse import Stream, read
+from tests.fakes.turnstile import DUMMY_TOKEN
 
 QUESTION = {
     "q": "Which AWS services has he used?",
     "session": "7b9e5c1e-6f0a-4a43-9a51-2d1f1c3b8a10",
-    "turnstile": "t",
+    "turnstile": DUMMY_TOKEN,
 }
 
 
 @pytest.fixture
 def client(corpus_database: str) -> Iterator[TestClient]:
-    with TestClient(create_app(api_settings(corpus_database))) as c:
+    with TestClient(build_app(api_settings(corpus_database))) as c:
         yield c
 
 
@@ -143,7 +143,7 @@ def test_streams_an_error_then_done_on_a_bug(client: TestClient) -> None:
 def test_answers_unavailable_with_no_active_corpus() -> None:
     url = create_migrated_database()
     try:
-        with TestClient(create_app(api_settings(url))) as client:
+        with TestClient(build_app(api_settings(url))) as client:
             response = client.post("/api/v1/ask", json=QUESTION)
         assert response.status_code == 503
         assert response.json()["error"]["code"] == "unavailable"
@@ -153,7 +153,7 @@ def test_answers_unavailable_with_no_active_corpus() -> None:
 
 def test_answers_unavailable_when_the_embedding_model_differs(corpus_database: str) -> None:
     # The corpus was embedded by the fake embedder; an API with Ollama's tag must not serve it.
-    with TestClient(create_app(api_settings(corpus_database, embedder="ollama"))) as client:
+    with TestClient(build_app(api_settings(corpus_database, embedder="ollama"))) as client:
         response = client.post("/api/v1/ask", json=QUESTION)
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "unavailable"

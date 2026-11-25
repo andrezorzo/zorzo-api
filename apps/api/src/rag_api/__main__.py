@@ -19,7 +19,14 @@ def main() -> None:
     except (ValidationError, DomainError, ConfigError, OSError, yaml.YAMLError) as exc:
         print(f"rag-api: refusing to start: {exc}", file=sys.stderr)
         sys.exit(1)
-    uvicorn.run(app, host=settings.host, port=settings.port, log_level=settings.log_level.lower())
+    uvicorn.run(
+        app,
+        host=settings.host,
+        port=settings.port,
+        log_level=settings.log_level.lower(),
+        access_log=False,  # its line holds the raw socket address; the app logs its own request line
+        proxy_headers=False,  # X-Forwarded-For changes nothing: the viewer address is CloudFront's header
+    )
 
 
 if __name__ == "__main__":

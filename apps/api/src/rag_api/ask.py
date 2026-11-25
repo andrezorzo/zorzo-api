@@ -7,9 +7,11 @@ from uuid import UUID
 import structlog
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
+from rag_core.errors import ApiError, ErrorCode
 from rag_core.events import Done, StreamEvent
 from rag_core.services import corpus as corpus_service
-from rag_core.services.question import normalize
+from rag_core.services.client_ip import VIEWER_HEADER
+from rag_core.services.gate import Asker
 from rag_core.services.search_only import end_with_error, run_search_only
 from rag_core.services.trace import FanOutSink
 from sse_starlette import EventSourceResponse, ServerSentEvent
@@ -21,7 +23,7 @@ router = APIRouter()
 class AskRequest(BaseModel):
     q: str  # bounded by the body cap; max_question_chars applies after trimming
     session: UUID
-    turnstile: str = Field(min_length=1, max_length=2048)  # verified by the gate (F01-T04)
+    turnstile: str = Field(min_length=1, max_length=2048)  # Cloudflare's maximum token length
 
 
 class QueueSink:
@@ -37,12 +39,17 @@ class QueueSink:
 @router.post("/api/v1/ask")
 async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
     state = request.app.state
-    question = normalize(body.q, state.limits)
-    # One deadline for the whole request: the corpus check and the stream share it.
-    deadline_at = asyncio.get_running_loop().time() + state.limits.request_deadline
-    corpus = await corpus_service.servable(
-        state.vector_store, state.embedder.tag, state.limits.request_deadline
-    )
+    peer = request.client.host if request.client else None
+    asker = Asker(body.session, request.headers.get(VIEWER_HEADER), peer)
+    # One deadline for the whole request: the gate, the corpus check and the stream share it.
+    loop = asyncio.get_running_loop()
+    deadline_at = loop.time() + state.limits.request_deadline
+    question = await state.gate.check(body.q, body.turnstile, asker, deadline_at)
+    left = deadline_at - loop.time()
+    if left <= 0:  # the gate finished on the deadline: nothing left for the answer
+        log.warning("deadline_exceeded", stage="after_gate")
+        raise ApiError(ErrorCode.UNAVAILABLE)
+    corpus = await corpus_service.servable(state.vector_store, state.embedder.tag, left)
     trace_id: str = request.state.trace_id
     stream = QueueSink()
     sink = FanOutSink([stream, *state.trace_sinks])

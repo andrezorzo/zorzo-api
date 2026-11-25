@@ -1,6 +1,6 @@
 # HLD — zorzo.dev.br
 
-2026-11-24 · André de Castro Zorzo · Status: draft · LLD: [lld.md](lld.md) · Brief: [product-brief.md](product-brief.md)
+2026-11-25 · André de Castro Zorzo · Status: draft · LLD: [lld.md](lld.md) · Brief: [product-brief.md](product-brief.md)
 
 ## 1. Context and goals
 
@@ -484,6 +484,7 @@ CloudFront; LangSmith is optional. What local doesn't reproduce:
 | CloudFront Free plan terms change | WAF, DNS or CDN start to cost | Cloudflare free as the fallback |
 | Debt: no career graph in the MVP | Counting and time questions answered by RAG | Explicit career numbers in the FAQ; graph in Phase 2 |
 | Debt: the 15-day deadline may trigger the cut order | Defenses or evals pages missing at launch | Evals keep running in CI; pages follow after launch |
+| Debt: the API depends on Turnstile and CloudFront | A deployment of the generic core inside a company network (ADR 0011), with no public visitors, no CloudFront and its own interface instead of `zorzo-site`, still needs a Turnstile token and refuses every question in production for lack of the viewer header | API settings read at startup that select the bot check (Turnstile or none) and where the client IP comes from (the CloudFront header or the socket, or a header the company's proxy sets); planned in its own task (LLD "Security"). The interface is the deployment's own, so `zorzo-site` doesn't change |
 
 ## 12. Open questions
 

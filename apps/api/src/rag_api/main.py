@@ -9,8 +9,11 @@ from fastapi import FastAPI
 from rag_core.adapters.factory import build_embedder, build_rerankers
 from rag_core.adapters.pgvector_store import PgVectorStore
 from rag_core.adapters.postgres import Database
+from rag_core.adapters.rate_limit import PostgresRateLimiter
+from rag_core.adapters.turnstile import TurnstileBotCheck
 from rag_core.domain import load_domain
 from rag_core.limits import load_limits
+from rag_core.services.gate import Gate
 from rag_core.telemetry import configure_logging
 
 from rag_api import ask, errors, health
@@ -45,7 +48,10 @@ def create_app(settings: ApiSettings) -> FastAPI:
             await _warm_rerankers(app)
             yield
         finally:
-            await db.close()
+            try:
+                await app.state.gate.bot_check.close()
+            finally:
+                await db.close()
 
     app = FastAPI(title="rag-api", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.domain = domain
@@ -54,6 +60,13 @@ def create_app(settings: ApiSettings) -> FastAPI:
     app.state.embedder = build_embedder(settings)
     app.state.rerankers = build_rerankers(settings)
     app.state.vector_store = PgVectorStore(db, limits.rrf_k, limits.search_min_similarity)
+    app.state.gate = Gate(
+        TurnstileBotCheck(settings.turnstile_secret.get_secret_value(), limits.timeout_turnstile),
+        PostgresRateLimiter(db),
+        limits,
+        settings.salt_seed.get_secret_value().encode(),
+        settings.app_env,
+    )
     app.state.trace_sinks = []  # extra sinks next to the stream (stored trace, F01-T10)
     # Added before the error middleware, so it runs inside it and its refusal carries the trace id.
     app.add_middleware(BodyLimit, limit=lambda: app.state.limits.max_body_bytes)

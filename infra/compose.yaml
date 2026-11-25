@@ -71,6 +71,9 @@ services:
       DOMAIN: zorzo
       DATABASE_URL: postgresql://zorzo:${POSTGRES_PASSWORD}@postgres:5432/zorzo
       OLLAMA_URL: http://ollama:11434
+      # Turnstile's always-pass test secret (LLD "Development environment"); the real one is production-only.
+      TURNSTILE_SECRET: 1x0000000000000000000000000000000AA
+      SALT_SEED: ${SALT_SEED:?set SALT_SEED in infra/.env}
       # The API binds to 127.0.0.1 by default. To reach it from the host through the port below,
       # set HOST to 0.0.0.0 here (owner's decision).
     depends_on:

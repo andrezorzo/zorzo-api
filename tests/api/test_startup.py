@@ -1,6 +1,7 @@
 """AC2 and AC4: the API loads the domain chosen by DOMAIN and refuses to start on bad settings."""
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -8,9 +9,11 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 from rag_api.main import create_app
+from rag_api.settings import PUBLISHED_LOCAL_SEED
 from rag_core.domain import DomainError
 
 from tests.conftest import api_settings
+from tests.fakes.turnstile import PASS_SECRET
 
 
 def _start(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -19,7 +22,14 @@ def _start(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     }
     return subprocess.run(
         [sys.executable, "-m", "rag_api"],
-        env={**base, "PORT": "0", **env},
+        env={
+            **base,
+            "PORT": "0",
+            "APP_ENV": "local",
+            "TURNSTILE_SECRET": PASS_SECRET,
+            "SALT_SEED": "test-seed-" * 4,
+            **env,
+        },
         capture_output=True,
         text=True,
         timeout=30,
@@ -87,3 +97,26 @@ def test_refuses_an_unreadable_limits_file(database_url: str, tmp_path: Path) ->
     result = _start({"DOMAIN": "zorzo", "DATABASE_URL": database_url, "LIMITS_FILE": str(bad)})
     assert result.returncode == 1
     assert "refusing to start" in result.stderr
+
+
+def test_refuses_a_turnstile_test_secret_in_production(database_url: str) -> None:
+    with pytest.raises(ValidationError, match="test secret"):
+        api_settings(database_url, app_env="production")
+
+
+def test_refuses_the_published_salt_seed_in_production(database_url: str) -> None:
+    with pytest.raises(ValidationError, match="SALT_SEED"):
+        api_settings(
+            database_url,
+            app_env="production",
+            turnstile_secret="0x4AAAAAAAreal-looking-secret",
+            salt_seed="local-salt-seed-change-me-0123456789",
+        )
+
+
+def test_the_guarded_seed_is_the_published_example() -> None:
+    root = Path(__file__).resolve().parents[2]
+    assert f"SALT_SEED={PUBLISHED_LOCAL_SEED}\n" in (root / "infra/.env.example").read_text()
+    # Every seed AGENTS.md gives is the guarded one; a `<placeholder>` is not a seed.
+    seeds = re.findall(r"SALT_SEED=([^\s`|<]+)", (root / "apps/api/AGENTS.md").read_text())
+    assert seeds and set(seeds) == {PUBLISHED_LOCAL_SEED}

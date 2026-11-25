@@ -2,6 +2,7 @@
 
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -20,6 +21,46 @@ class HealthProbe(Protocol):
 
     async def degraded_today(self) -> bool:
         """Whether today's (UTC) budget row is in degraded mode."""
+
+
+class BotCheck(Protocol):
+    """Verifies the visitor's bot-check token (LLD "Security", bot check)."""
+
+    async def verify(self, token: str) -> bool:
+        """True only when the provider accepts the token; a provider error or timeout is False."""
+
+    async def close(self) -> None:
+        """Release the connection to the provider, at shutdown."""
+
+
+@dataclass(frozen=True)
+class Bucket:
+    """One token bucket of a question (LLD "6.7 Rate limit").
+
+    `refill_per_s` is 0 for a bucket that doesn't refill; it then ends at `resets_at` (a new key takes over).
+    """
+
+    key: str
+    kind: (
+        str  # what a log line may say about the bucket: `ip_burst`, `ip_day`, `session_burst`, `session_day`
+    )
+    capacity: int
+    refill_per_s: float
+    resets_at: datetime | None = None
+
+
+class StoreUnavailable(Exception):
+    """A store refused or failed the request (database down, a lock wait or long statement it ended)."""
+
+
+class RateLimiter(Protocol):
+    async def take(self, buckets: list[Bucket], now: datetime) -> list[tuple[Bucket, float]] | None:
+        """Take one token from every bucket, or from none.
+
+        None when every bucket had one; otherwise the empty buckets, each with the seconds until it holds one.
+        A store that fails raises `StoreUnavailable`, which the gate answers as `unavailable`. One that stops
+        answering may block: the caller bounds the call.
+        """
 
 
 class Embedder(Protocol):

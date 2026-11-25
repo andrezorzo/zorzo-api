@@ -10,3 +10,9 @@ degraded_max_passages: 6
 chunk_tokens: 400
 chunk_overlap: 0.15
 search_min_similarity: 0.5  # cosine; a vector hit below it doesn't count (calibrated at M3)
+rate_ip_burst: 10
+rate_ip_window: 600  # seconds; the burst window of both the IP and the session buckets
+rate_ip_daily: 40  # per UTC day
+rate_session_burst: 10
+rate_session_daily: 40  # per UTC day
+timeout_turnstile: 3  # seconds; Cloudflare sets no value
