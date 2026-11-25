@@ -484,7 +484,7 @@ CloudFront; LangSmith is optional. What local doesn't reproduce:
 | CloudFront Free plan terms change | WAF, DNS or CDN start to cost | Cloudflare free as the fallback |
 | Debt: no career graph in the MVP | Counting and time questions answered by RAG | Explicit career numbers in the FAQ; graph in Phase 2 |
 | Debt: the 15-day deadline may trigger the cut order | Defenses or evals pages missing at launch | Evals keep running in CI; pages follow after launch |
-| Debt: the bot check and the CloudFront viewer header can't be turned off | A deployment of the generic core inside a company network (ADR 0011), with no public visitors and no CloudFront, still needs Turnstile and refuses every question in production | A setting read at startup that selects the bot check (Turnstile or none) and where the client IP comes from (the CloudFront header or the socket), with the front skipping the widget; planned in its own task (LLD "Security") |
+| Debt: the API depends on Turnstile and CloudFront | A deployment of the generic core inside a company network (ADR 0011), with no public visitors, no CloudFront and its own interface instead of `zorzo-site`, still needs a Turnstile token and refuses every question in production for lack of the viewer header | API settings read at startup that select the bot check (Turnstile or none) and where the client IP comes from (the CloudFront header or the socket, or a header the company's proxy sets); planned in its own task (LLD "Security"). The interface is the deployment's own, so `zorzo-site` doesn't change |
 
 ## 12. Open questions
 
