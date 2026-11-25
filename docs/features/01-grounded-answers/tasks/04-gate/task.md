@@ -1,6 +1,6 @@
 # 04: Gate
 
-**Status:** to do
+**Status:** in progress
 
 **What to build:** A visitor who passes the bot check and stays within the limits gets an answer; one who doesn't gets a clear HTTP refusal before any model call, and the page explains it.
 

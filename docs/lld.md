@@ -1,6 +1,6 @@
 # LLD — zorzo.dev.br (zorzo-api)
 
-2026-11-24 · André de Castro Zorzo · Status: draft · HLD: [hld.md](hld.md)
+2026-11-25 · André de Castro Zorzo · Status: draft · HLD: [hld.md](hld.md)
 
 Scope: the `zorzo-api` repository. The front (`zorzo-site`) keeps its own LLD for rendering and the 3D brain;
 section 8 here covers only how the front behaves against the API, plus the dashboard pages.
@@ -153,12 +153,21 @@ domain pieces, not ports (section 6.5).
 
 - **Origin secret:** Caddy compares the custom header CloudFront sets with `ORIGIN_SECRET` and answers 403 when
   it doesn't match. Nothing behind Caddy repeats the check. Caddy also refuses `/dash/admin` from that path.
-- **Client IP:** read from the header CloudFront adds (`CloudFront-Viewer-Address` or the last
-  `X-Forwarded-For` hop; see open questions), turned into `HMAC(ip, daily_salt)` as soon as it enters the app,
-  where `daily_salt = HMAC(SALT_SEED, utc_date)`. The raw IP is never stored or logged.
-- **Bot check:** every question carries a fresh Turnstile token, verified server-side before anything else;
-  a provider error refuses the request.
-- **Input:** NFKC, control characters removed, length capped at `MAX_QUESTION_CHARS`; body capped at
+- **Client IP:** read from `CloudFront-Viewer-Address` (`ip:port`), which CloudFront sets; the origin
+  secret keeps anyone else from reaching the API with it. Without the header, the socket peer when
+  `APP_ENV=local`; in production the request is refused with `503 unavailable` and an `error` log, since
+  behind Caddy every visitor would share one bucket. An IPv6 address is reduced to its `/64` prefix (one
+  subscriber usually holds a whole `/64`); an IPv4 address is kept whole. The result is turned into
+  `HMAC-SHA256(daily_salt, ip)` as soon as it enters the app, where `daily_salt = HMAC-SHA256(SALT_SEED,
+  utc_date)`. The raw IP is never stored, logged or sent to Turnstile, and uvicorn's access log is off (its
+  line holds the socket address).
+- **Bot check:** every question carries a fresh Turnstile token, verified server-side with `siteverify`
+  before anything else (only the body's shape is checked first, to read the token). Only `success` is read.
+  A provider error, an answer that isn't JSON or no answer within `TIMEOUT_TURNSTILE` refuses the request,
+  with no retry.
+- **Input:** NFKC; characters of Unicode categories `Cc` and `Cf` removed (`Cf` holds the zero-width and
+  bidi controls that hide text from a reader but not from a model), with tab and line breaks turned into
+  spaces first; whitespace runs collapsed; trimmed; length capped at `MAX_QUESTION_CHARS` code points; body capped at
   `MAX_BODY_BYTES` in Caddy and again in the API, which counts the bytes as they arrive (a chunked body too)
   and answers `422 invalid_input`.
 - **CORS:** one origin; the allowlist holds `https://zorzo.dev.br`, plus localhost when `APP_ENV=local`.
@@ -170,8 +179,9 @@ domain pieces, not ports (section 6.5).
 
 ### Concurrency and idempotency
 
-- **Rate limit:** each token bucket is updated by one `INSERT … ON CONFLICT DO UPDATE`, so concurrent requests
-  from the same key can't both pass.
+- **Rate limit:** the buckets of a question are updated by one multi-row `INSERT … ON CONFLICT DO UPDATE`
+  that takes a token only where one is left, so concurrent requests from the same key can't both pass
+  (section 6.7).
 - **Budget, reserve then settle:** before a paid call, one conditional
   `UPDATE … WHERE cost_usd + estimate <= cap` reserves the estimate; after the call, the row is corrected by
   `actual − estimate`. Two concurrent requests can't both cross the cap. The estimate rule is in section 6.2.
@@ -524,7 +534,15 @@ States of one chain entry's breaker; it lives in the API process memory.
 
 - Token bucket per hashed IP: `RATE_IP_BURST` per `RATE_IP_WINDOW`, plus `RATE_IP_DAILY` per UTC day.
 - The same limits per session: `RATE_SESSION_BURST`, `RATE_SESSION_DAILY`.
-- Over the limit: 429 with `Retry-After`, before the stream opens and before any model call.
+- Four buckets per question, keyed `ip:<hmac>:burst`, `ip:<hmac>:<utc date>`, `session:<uuid>:burst` and
+  `session:<uuid>:<utc date>`. Burst buckets refill continuously (`BURST` tokens per `WINDOW`); day buckets
+  carry the date in the key and don't refill.
+- All or nothing: one transaction takes a token from each of the four buckets (section 3 "Concurrency and
+  idempotency"); if any is empty, it rolls back, so a refused question takes no token. Rows are written in a
+  fixed key order, so concurrent requests can't deadlock.
+- Over the limit: 429 with `Retry-After` in whole seconds, the longest wait among the empty buckets (until one
+  token refills, or until the next UTC midnight for a day bucket), before the stream opens and before any
+  model call.
 - A cache hit still counts against the limit.
 
 ### 6.8 Free quota
@@ -574,6 +592,7 @@ The nightly retention task deletes:
 - `public_traces` and their `trace_spans` after `RETENTION_PUBLIC_TRACES`;
 - `log_events` after `RETENTION_LOGS`;
 - `answer_cache` after `CACHE_TTL`;
+- `rate_buckets` rows not refilled for more than a day (their day or salt has passed);
 - `retired` and `rejected` versions, with their documents and chunks, after `RETENTION_RETIRED_VERSIONS`;
 - LangGraph threads idle longer than `SESSION_TTL`.
 
@@ -602,7 +621,9 @@ Behavior only; rendering and the 3D brain are in `zorzo-site`'s LLD.
 - **Session:** a UUID created on the first question and kept in `sessionStorage`, so it lasts while the tab is
   open and survives a reload. A "new conversation" button creates a new UUID; after `SESSION_TTL` idle, the
   next question creates a new UUID and shows a "new conversation" notice.
-- **Asking:** the invisible Turnstile widget produces a token; the front sends `POST /api/v1/ask` with `fetch`
+- **Asking:** the invisible Turnstile widget produces a token for each question; after a token is used the
+  widget is reset and the next one is fetched in the background, so a question rarely waits. The widget's
+  script loads on the first interaction with the question box, not on page load. The front sends `POST /api/v1/ask` with `fetch`
   and reads the SSE stream from the body (`EventSource` can't send a POST). A new question cancels the current
   stream (`AbortController`).
 - **Reactions:**
@@ -612,6 +633,7 @@ Behavior only; rendering and the 3D brain are in `zorzo-site`'s LLD.
   | `422 invalid_input` | Inline message under the input |
   | `403 bot_check_failed` | Runs Turnstile again once, then a message |
   | `429 rate_limited` | Shows when to try again, from `Retry-After` |
+  | No Turnstile token (script blocked, widget error or timeout) | The message of a second `403`; nothing is sent |
   | `502`, `503`, `504` or network failure | `offline` state (`503` comes from the API; `502` and `504` from CloudFront or Caddy when the API doesn't answer) |
   | Stream dropped before `done` | "Connection lost, ask again" (no resume) |
   | `blocked` | The defense layer and the reason in plain words, a link to `/dash/defenses`, and "this was a mistake?" linking to the contact options |
@@ -658,6 +680,7 @@ endpoints and per-environment switches.
 | `ANSWER_RESERVE` | 12 s | Time kept for `answer` (section 6.3) | `limits.yaml` |
 | `TIMEOUT_ROUTE` / `TIMEOUT_RERANK` / `TIMEOUT_ANSWER` / `TIMEOUT_JUDGE` | 3 s / 1 s / 12 s / 5 s | Model gateway per stage | `limits.yaml` |
 | `TIMEOUT_SEARCH_CORPUS` / `TIMEOUT_GITHUB_ACTIVITY` | 1.5 s / 2 s | Tools | `limits.yaml` |
+| `TIMEOUT_TURNSTILE` | 3 s | Bot check (`siteverify`); Cloudflare sets no value | `limits.yaml` |
 | `MAX_LOOP_MODEL_CALLS` | 2 | Agent run | `limits.yaml` |
 | `MAX_TOOL_CALLS` | 3 | Agent run | `limits.yaml` |
 | `MAX_REFORMULATE` / `MAX_REPAIR` | 1 / 1 | Agent run | `limits.yaml` |
@@ -768,7 +791,6 @@ Architecture decisions (0001–0011) are indexed in the HLD.
 - [ ] Chat model of the local profile (Ollama): quick eval.
 - [ ] Free models per stage (route, answer, judge): eval matrix at M3.
 - [ ] `RELEVANCE_FLOOR` and `ASSESS_SKIP_SCORE`: calibrated at M3.
-- [ ] Which CloudFront header carries the viewer IP: checked at M1.
 - [ ] Nemotron rerank: request format, limits and Portuguese quality (M5).
 - [ ] Charts library for the dashboard.
 - [ ] Eval harness: dataset format, metrics per layer, noise-band rule: to detail.
