@@ -4,6 +4,7 @@ In order: the bot check, the question's normalization, the rate limit (LLD "Secu
 Each failure is an `ApiError`, answered as a plain HTTP error; the budget joins in F01-T05.
 """
 
+import asyncio
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -54,7 +55,13 @@ class Gate:
         text = normalize(question, self.limits)
         now = self.clock()
         ip = hashed_ip(viewer_ip(asker.viewer_address, asker.peer, self.app_env), self.salt_seed, now.date())
-        refused = await self.limiter.take(self._buckets(ip, asker.session, now), now)
+        try:
+            # A hung database must not hold the request open; a database down is `unavailable` (LLD "Errors").
+            async with asyncio.timeout(self.limits.request_deadline):
+                refused = await self.limiter.take(self._buckets(ip, asker.session, now), now)
+        except Exception as exc:
+            log.warning("rate_limit_failed", error=type(exc).__name__)
+            raise ApiError(ErrorCode.UNAVAILABLE) from exc
         if refused is not None:
             wait = max((seconds for _, seconds in refused), default=0.0)
             log.warning("rate_limited", buckets=sorted(b.kind for b, _ in refused))

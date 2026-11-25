@@ -38,3 +38,9 @@ def test_ipv6_is_hashed_by_its_64_prefix() -> None:
     day = date(2026, 11, 25)
     assert hashed_ip("2001:db8:1:2::1", SEED, day) == hashed_ip("2001:db8:1:2:ffff::9", SEED, day)
     assert hashed_ip("2001:db8:1:2::1", SEED, day) != hashed_ip("2001:db8:1:3::1", SEED, day)
+
+
+def test_an_ipv4_mapped_address_is_hashed_as_ipv4() -> None:
+    day = date(2026, 11, 25)
+    assert hashed_ip("::ffff:203.0.113.7", SEED, day) == hashed_ip("203.0.113.7", SEED, day)
+    assert hashed_ip("::ffff:203.0.113.7", SEED, day) != hashed_ip("::ffff:203.0.113.8", SEED, day)

@@ -44,10 +44,12 @@ def hashed_ip(ip: str, seed: bytes, day: date) -> str:
     limit. A peer that isn't an address (a local test client) is hashed as it is.
     """
     try:
-        address = ipaddress.ip_address(ip)
+        address: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(ip)
     except ValueError:
         key = ip
     else:
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+            address = address.ipv4_mapped  # an IPv4 visitor in IPv6 form: its /64 would be everyone's
         prefix = 64 if address.version == 6 else 32
         key = str(ipaddress.ip_network(f"{address}/{prefix}", strict=False))
     salt = hmac.new(seed, day.isoformat().encode(), hashlib.sha256).digest()

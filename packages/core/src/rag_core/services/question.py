@@ -5,14 +5,15 @@ import unicodedata
 from rag_core.errors import ApiError, ErrorCode
 from rag_core.limits import Limits
 
-# Removed: control characters (Cc) and format characters (Cf). Cf holds the zero-width and bidi controls,
-# which hide text from a reader but not from a model. Whitespace (tab and line breaks too, though they are
+# Removed: control characters (Cc), format characters (Cf) and lone surrogates (Cs, which JSON lets through
+# and UTF-8 can't encode). Cf holds the zero-width and bidi controls, which hide text from a reader but not
+# from a model. Whitespace (tab and line breaks too, though they are
 # Cc) separates words, so it becomes a space instead.
-_REMOVED = {"Cc", "Cf"}
+_REMOVED = {"Cc", "Cf", "Cs"}
 
 
 def normalize(question: str, limits: Limits) -> str:
-    """NFKC, Cc and Cf removed, whitespace collapsed, trimmed; 1 to `max_question_chars` code points.
+    """NFKC, Cc, Cf and Cs removed, whitespace collapsed, trimmed; 1 to `max_question_chars` code points.
 
     Anything else is `invalid_input` before the stream opens. The cap counts the normalized text, since that
     is what the pipeline reads.

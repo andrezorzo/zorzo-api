@@ -48,8 +48,10 @@ def create_app(settings: ApiSettings) -> FastAPI:
             await _warm_rerankers(app)
             yield
         finally:
-            await app.state.gate.bot_check.close()
-            await db.close()
+            try:
+                await app.state.gate.bot_check.close()
+            finally:
+                await db.close()
 
     app = FastAPI(title="rag-api", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.domain = domain

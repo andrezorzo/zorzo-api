@@ -200,3 +200,15 @@ def test_refuses_without_a_viewer_address_in_production(make_api: Any) -> None:
     assert response.status_code == 503
     assert error_code(response) == "unavailable"
     assert any(line["event"] == "viewer_address_missing" and line["log_level"] == "error" for line in logs)
+
+
+def test_a_database_down_is_unavailable(make_api: Any) -> None:
+    api = make_api()
+
+    async def down(*_: object) -> None:
+        raise OSError("connection refused")
+
+    api.app.state.gate.limiter.take = down
+    response = api.ask(**asking())
+    assert response.status_code == 503
+    assert error_code(response) == "unavailable"

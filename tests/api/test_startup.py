@@ -20,7 +20,14 @@ def _start(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     }
     return subprocess.run(
         [sys.executable, "-m", "rag_api"],
-        env={**base, "PORT": "0", "TURNSTILE_SECRET": PASS_SECRET, "SALT_SEED": "test-seed-" * 4, **env},
+        env={
+            **base,
+            "PORT": "0",
+            "APP_ENV": "local",
+            "TURNSTILE_SECRET": PASS_SECRET,
+            "SALT_SEED": "test-seed-" * 4,
+            **env,
+        },
         capture_output=True,
         text=True,
         timeout=30,
@@ -88,3 +95,8 @@ def test_refuses_an_unreadable_limits_file(database_url: str, tmp_path: Path) ->
     result = _start({"DOMAIN": "zorzo", "DATABASE_URL": database_url, "LIMITS_FILE": str(bad)})
     assert result.returncode == 1
     assert "refusing to start" in result.stderr
+
+
+def test_refuses_a_turnstile_test_secret_in_production(database_url: str) -> None:
+    with pytest.raises(ValidationError, match="test secret"):
+        api_settings(database_url, app_env="production")
