@@ -5,13 +5,15 @@ bucket was empty, the transaction rolls back, so a refused question takes nothin
 two requests that share buckets lock them in the same order and can't deadlock.
 """
 
+import asyncio
 from datetime import datetime
 
 from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import ARRAY, DOUBLE_PRECISION, TEXT
+from sqlalchemy.exc import SQLAlchemyError
 
-from rag_core.adapters.postgres import Database
-from rag_core.ports import Bucket
+from rag_core.adapters.postgres import PROBE_TIMEOUT_S, Database
+from rag_core.ports import Bucket, StoreUnavailable
 
 # The refilled level of a stored bucket at :now; `i` is the bucket's input row.
 _LEVEL = """least(i.capacity, b.tokens
@@ -36,6 +38,10 @@ WHERE (SELECT {_LEVEL} FROM i WHERE i.key = b.key) >= 1
 RETURNING b.key
 """).bindparams(*_ARRAYS)
 
+# A take touches a few rows: Postgres itself ends one that waits on a lock or runs long, so a stuck statement
+# never outlives the client's timeout (cancelling from the client alone may wait on a dead socket).
+BOUNDS = text("SELECT set_config('statement_timeout', :ms, true), set_config('lock_timeout', :ms, true)")
+
 LEVELS = text(f"""
 {_INPUT}
 SELECT b.key, {_LEVEL} FROM rate_buckets b JOIN i ON i.key = b.key
@@ -47,19 +53,31 @@ class PostgresRateLimiter:
         self.db = db
 
     async def take(self, buckets: list[Bucket], now: datetime) -> list[tuple[Bucket, float]] | None:
+        """See `RateLimiter.take`; raises `StoreUnavailable` when the database can't answer in time."""
+        try:
+            async with asyncio.timeout(PROBE_TIMEOUT_S):
+                return await self._take(buckets, now)
+        except (TimeoutError, OSError, SQLAlchemyError) as exc:
+            raise StoreUnavailable(type(exc).__name__) from exc
+
+    async def _take(self, buckets: list[Bucket], now: datetime) -> list[tuple[Bucket, float]] | None:
         params = {
             "keys": [b.key for b in buckets],
             "capacities": [float(b.capacity) for b in buckets],
             "refills": [b.refill_per_s for b in buckets],
             "now": now,
         }
+        bounds = {"ms": str(int(PROBE_TIMEOUT_S * 1000))}
         async with self.db.engine.connect() as conn:
             async with conn.begin() as tx:
+                await conn.execute(BOUNDS, bounds)
                 taken = (await conn.execute(TAKE, params)).scalars().all()
                 if len(taken) == len(buckets):
                     return None
                 await tx.rollback()
-            levels = {key: level for key, level in (await conn.execute(LEVELS, params)).all()}
+            async with conn.begin():
+                await conn.execute(BOUNDS, bounds)
+                levels = {key: level for key, level in (await conn.execute(LEVELS, params)).all()}
         # A bucket refilled between the rollback and this read isn't listed; the list may then be empty.
         return [(b, _wait(b, levels[b.key], now)) for b in buckets if levels.get(b.key, 1) < 1]
 

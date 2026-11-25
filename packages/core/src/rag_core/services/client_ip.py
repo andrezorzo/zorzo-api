@@ -27,6 +27,7 @@ def viewer_ip(header: str | None, peer: str | None, app_env: str) -> str:
     """
     if header:
         address = header.rpartition(":")[0]  # IPv6 comes without brackets: the port is after the last colon
+        address = address.partition("%")[0]  # an IPv6 scope (`%eth0`) names a local interface, not a visitor
         try:
             return str(ipaddress.ip_address(address))
         except ValueError:

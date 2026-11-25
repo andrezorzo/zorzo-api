@@ -49,6 +49,10 @@ class Bucket:
     resets_at: datetime | None = None
 
 
+class StoreUnavailable(Exception):
+    """A store couldn't answer in time, or at all (database down, lock wait, timeout)."""
+
+
 class RateLimiter(Protocol):
     async def take(self, buckets: list[Bucket], now: datetime) -> list[tuple[Bucket, float]] | None:
         """Take one token from every bucket, or from none.

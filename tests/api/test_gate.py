@@ -6,6 +6,7 @@ Turnstile's `siteverify` is the stand-in in `tests/fakes/turnstile.py`, answerin
 Every test uses its own IPs and sessions, since the database (and its buckets) is shared by the session.
 """
 
+import time
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -202,13 +203,18 @@ def test_refuses_without_a_viewer_address_in_production(make_api: Any) -> None:
     assert any(line["event"] == "viewer_address_missing" and line["log_level"] == "error" for line in logs)
 
 
-def test_a_database_down_is_unavailable(make_api: Any) -> None:
-    api = make_api()
-
-    async def down(*_: object) -> None:
-        raise OSError("connection refused")
-
-    api.app.state.gate.limiter.take = down
-    response = api.ask(**asking())
+def test_a_stuck_database_is_unavailable_in_seconds(make_api: Any, corpus_database: str) -> None:
+    api, session = make_api(), uuid.uuid4()
+    # Another transaction holds this session's bucket row: the take waits on the lock until Postgres ends it.
+    with psycopg.connect(corpus_database) as conn:
+        conn.execute(
+            "INSERT INTO rate_buckets (key, tokens, refilled_at) VALUES (%s, 1, now())",
+            (f"session:{session}:burst",),
+        )
+        conn.execute("SELECT 1 FROM rate_buckets WHERE key = %s FOR UPDATE", (f"session:{session}:burst",))
+        started = time.monotonic()
+        response = api.ask(**asking(session=session))
+        elapsed = time.monotonic() - started
     assert response.status_code == 503
     assert error_code(response) == "unavailable"
+    assert elapsed < 5  # bounded by the limiter's own timeout, not the 20 s request deadline

@@ -15,6 +15,7 @@ def test_reads_the_cloudfront_viewer_address() -> None:
     assert viewer_ip("2001:db8:85a3::8a2e:370:7334:46532", "127.0.0.1", "production") == (
         "2001:db8:85a3::8a2e:370:7334"
     )
+    assert viewer_ip("fe80::1%eth0:46532", "127.0.0.1", "production") == "fe80::1"
 
 
 def test_falls_back_to_the_socket_only_locally() -> None:

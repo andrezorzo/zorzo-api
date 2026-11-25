@@ -40,11 +40,12 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
     state = request.app.state
     peer = request.client.host if request.client else None
     asker = Asker(body.session, request.headers.get(VIEWER_HEADER), peer)
+    # One deadline for the whole request: the gate, the corpus check and the stream share it.
+    loop = asyncio.get_running_loop()
+    deadline_at = loop.time() + state.limits.request_deadline
     question = await state.gate.check(body.q, body.turnstile, asker)
-    # One deadline for the whole request: the corpus check and the stream share it.
-    deadline_at = asyncio.get_running_loop().time() + state.limits.request_deadline
     corpus = await corpus_service.servable(
-        state.vector_store, state.embedder.tag, state.limits.request_deadline
+        state.vector_store, state.embedder.tag, max(0.0, deadline_at - loop.time())
     )
     trace_id: str = request.state.trace_id
     stream = QueueSink()
