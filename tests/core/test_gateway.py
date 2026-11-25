@@ -288,3 +288,10 @@ async def test_a_paid_answer_without_usage_keeps_its_estimate(rig: Rig) -> None:
     estimate = (prompt_tokens * 1.0 + 200 * 4.0) / 1e6
     assert result.cost_usd == pytest.approx(estimate)
     assert rig.spent_today() == pytest.approx(estimate, abs=1e-6)
+
+
+async def test_the_budget_alert_opens_at_the_paid_cutoff(rig: Rig) -> None:
+    rig.seed_budget(0.08, paid_disabled=True)
+    assert await rig.gateway.mode() is None  # the free entries still answer
+    await rig.gateway.drain()
+    assert [kind for kind, _ in rig.alerter.sent] == ["budget_exhausted"]

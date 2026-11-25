@@ -230,13 +230,20 @@ class ModelGateway:
         Raises `StoreUnavailable` when the budget row can't be read.
         """
         state = await self.budget.state(self.clock().date())
-        if state == "degraded":
-            message = (
-                f"today's budget of US${self.limits.daily_budget_usd} is spent; questions go search-only"
+        # The alert opens when the day's paid entries stop (the cutoff), since reservations keep the spend
+        # from reaching the cap itself; it closes on a new UTC day (LLD "6.10 Alerts").
+        if state == "normal":
+            self.alerts.clear_soon("budget_exhausted")
+        else:
+            cap = self.limits.daily_budget_usd
+            self.alerts.raise_soon(
+                "budget_exhausted",
+                f"today's paid budget (US${cap}) reached the cutoff; paid entries are off until 00:00 UTC"
+                if state == "paid_disabled"
+                else f"today's budget of US${cap} is spent; questions go search-only",
             )
-            self.alerts.raise_soon("budget_exhausted", message)
+        if state == "degraded":
             return "budget_exhausted"
-        self.alerts.clear_soon("budget_exhausted")  # a new UTC day
         answer = self.config.stage("answer").chain
         keys = [(e.provider, e.model) for e in answer]
         if any(self.breakers.closed(k) for k in keys):
