@@ -1,6 +1,6 @@
 # 03: Web foundation (zorzo-site)
 
-**Status:** to do
+**Status:** in progress
 
 **What to build:** A visitor opens the page, sees example questions in their interface language, asks a question and sees the matching passages in search-only mode; the page tells online, degraded and offline apart and works without 3D graphics. Lives in `zorzo-site`.
 
