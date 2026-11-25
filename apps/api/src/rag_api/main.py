@@ -47,7 +47,7 @@ def create_app(settings: ApiSettings) -> FastAPI:
         finally:
             await db.close()
 
-    app = FastAPI(title="zorzo-api", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title="rag-api", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.domain = domain
     app.state.db = db
     app.state.limits = limits

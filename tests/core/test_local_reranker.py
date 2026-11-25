@@ -7,7 +7,7 @@ import pytest
 from rag_core.adapters.local_reranker import LocalReranker, ModelIntegrityError, verify_model_files
 from rag_core.ports import SearchHit
 
-CACHE = Path(os.environ.get("RERANK_CACHE_DIR", Path.home() / ".cache" / "zorzo-rerank"))
+CACHE = Path(os.environ.get("RERANK_CACHE_DIR", Path.home() / ".cache" / "rag-rerank"))
 
 
 def test_reranks_with_the_local_cross_encoder() -> None:

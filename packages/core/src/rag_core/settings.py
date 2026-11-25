@@ -23,7 +23,7 @@ class AppSettings(BaseSettings):
     ollama_url: str = "http://localhost:11434"
     reranker: Literal["local", "fake"] = "local"
     # Resolved when settings are built, not at import, so an unusual HOME is a config error, not a crash.
-    rerank_cache_dir: Path = Field(default_factory=lambda: Path.home() / ".cache" / "zorzo-rerank")
+    rerank_cache_dir: Path = Field(default_factory=lambda: Path.home() / ".cache" / "rag-rerank")
 
     @field_validator("database_url")
     @classmethod

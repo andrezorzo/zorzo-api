@@ -51,7 +51,7 @@ jobs:
       - name: Cache the rerank model
         uses: actions/cache@v4
         with:
-          path: ~/.cache/zorzo-rerank
+          path: ~/.cache/rag-rerank
           key: rerank-mmarco-mMiniLMv2-L12-H384-v1-quint8
       - name: Lint
         run: uv run ruff check . && uv run ruff format --check .
