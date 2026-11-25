@@ -1,7 +1,6 @@
 """AC1, AC2, AC3, AC8: the ingest command, run as a subprocess against a fresh migrated database."""
 
 import json
-import os
 import secrets
 import shutil
 import string
@@ -122,7 +121,7 @@ def test_rejects_the_candidate_when_embedding_fails(db: str, source: Path, tmp_p
     assert run.code == 1
     versions = rows(db, "SELECT status FROM corpus_versions")
     assert versions == [("rejected",)]
-    assert run.summary["status"] == "rejected"  # callers still learn the version
+    assert run.summary == {}  # only a finished run or a gate rejection prints a summary
 
 
 def test_refuses_to_activate_a_version_that_is_not_a_candidate(db: str, source: Path, tmp_path: Path) -> None:
@@ -130,7 +129,7 @@ def test_refuses_to_activate_a_version_that_is_not_a_candidate(db: str, source: 
     again = ingest(db, tmp_path / "data", "--activate-version", str(active.summary["version"]))
     assert again.code == 1
     assert "activation_refused" in again.output
-    assert again.summary == {}  # the run changed nothing, so it reports nothing
+    assert again.summary == {}  # a refused activation prints no summary
     missing = ingest(db, tmp_path / "data", "--activate-version", "9999")
     assert missing.code == 1 and missing.summary == {}
 
@@ -151,20 +150,14 @@ def test_rejects_a_symlinked_document(db: str, source: Path, tmp_path: Path) -> 
     assert_rejected(db, ingest(db, tmp_path / "data", "--source", str(source)), "linked.md")
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the read-only folder that makes publishing fail")
-def test_a_failed_publish_reports_the_version_as_active(db: str, source: Path, tmp_path: Path) -> None:
+def test_a_failed_publish_leaves_the_version_active(db: str, source: Path, tmp_path: Path) -> None:
     data = tmp_path / "data"
-    data.mkdir()
-    data.chmod(0o500)  # read-only: publishing fails after the activation
-    try:
-        run = ingest(db, data, "--source", str(source), "--activate")
-    finally:
-        data.chmod(0o700)
+    data.write_text("")  # a file where the data folder should be: publishing fails, even as root
+    run = ingest(db, data, "--source", str(source), "--activate")
     assert run.code == 1
     assert "publish_failed" in run.output
-    assert run.summary["status"] == "active"
-    assert run.summary["chunks"] > 0
-    assert status(db, run.summary["version"]) == "active"
+    assert run.summary == {}
+    assert rows(db, "SELECT status FROM corpus_versions") == [("active",)]
 
 
 def test_lets_the_owners_listed_contact_through(db: str, source: Path, tmp_path: Path) -> None:

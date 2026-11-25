@@ -1,6 +1,5 @@
 """Ingest run and activation (LLD "6.1 Corpus version")."""
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,10 +18,11 @@ log = structlog.get_logger()
 class Summary:
     version: int
     status: str
-    documents: int = 0
-    chunks: int = 0
-    embedded: int = 0
-    copied: int = 0
+    # Counts of what the run wrote; None when it wrote no chunks (a rejection, an activation alone).
+    documents: int | None = None
+    chunks: int | None = None
+    embedded: int | None = None
+    copied: int | None = None
 
 
 class IngestRejected(Exception):
@@ -30,14 +30,6 @@ class IngestRejected(Exception):
         self.summary = summary
         self.problems = problems
         super().__init__(f"corpus version {summary.version} rejected: {len(problems)} problem(s)")
-
-
-class IngestFailed(Exception):
-    """A run that stopped for a reason other than the gate; carries the version it had created."""
-
-    def __init__(self, summary: Summary) -> None:
-        self.summary = summary
-        super().__init__(f"ingest of corpus version {summary.version} failed")
 
 
 class PublishFailed(Exception):
@@ -60,38 +52,23 @@ async def run_ingest(
     scanner: SecretScanner,
     allowlist: tuple[str, ...],
     limits: Limits,
-    on_created: Callable[[int], None] = lambda version: None,
 ) -> Summary:
     """Write a new candidate version from `source`; nothing is embedded or written unless the gate passes.
 
-    `on_created` hears the new version's number at once, so a caller interrupted mid-run can still report it.
+    A run that stops for any reason rejects its candidate, so it can never be activated.
     """
     version = await store.create_candidate(embedder.tag)
-    on_created(version)
     try:
         return await _fill_candidate(version, source, store, embedder, scanner, allowlist, limits)
-    except IngestRejected as exc:
-        exc.summary = Summary(version, await _reject_quietly(store, version))
+    except IngestRejected:
+        await store.reject(version)  # if this fails, the error goes up and the run reports no summary
         raise
-    except Exception as exc:
-        raise IngestFailed(Summary(version, await _reject_quietly(store, version))) from exc
-    except BaseException:  # cancelled: still never leave an activatable candidate
-        await _reject_quietly(store, version)
+    except BaseException:  # failed or cancelled: the original error is what the caller sees
+        try:
+            await store.reject(version)
+        except Exception:
+            log.exception("reject_failed", version=version)
         raise
-
-
-async def _reject_quietly(store: CorpusStore, version: int) -> str:
-    """Reject the version so it can't be activated; returns the status it is left in.
-
-    A failing reject never hides why the run stopped: it is logged, and the status is `unknown`, since the
-    reject may or may not have reached the database.
-    """
-    try:
-        await store.reject(version)
-    except Exception:
-        log.exception("reject_failed", version=version)
-        return "unknown"
-    return "rejected"
 
 
 async def _fill_candidate(
