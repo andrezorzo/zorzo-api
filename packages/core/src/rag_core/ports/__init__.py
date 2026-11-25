@@ -2,6 +2,7 @@
 
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -20,6 +21,34 @@ class HealthProbe(Protocol):
 
     async def degraded_today(self) -> bool:
         """Whether today's (UTC) budget row is in degraded mode."""
+
+
+class BotCheck(Protocol):
+    """Verifies the visitor's bot-check token (LLD "Security", bot check)."""
+
+    async def verify(self, token: str) -> bool:
+        """True only when the provider accepts the token; a provider error or timeout is False."""
+
+
+@dataclass(frozen=True)
+class Bucket:
+    """One token bucket of a question (LLD "6.7 Rate limit").
+
+    `refill_per_s` is 0 for a bucket that doesn't refill; it then ends at `resets_at` (a new key takes over).
+    """
+
+    key: str
+    capacity: int
+    refill_per_s: float
+    resets_at: datetime | None = None
+
+
+class RateLimiter(Protocol):
+    async def take(self, buckets: list[Bucket], now: datetime) -> list[tuple[Bucket, float]] | None:
+        """Take one token from every bucket, or from none.
+
+        None when every bucket had one; otherwise the empty buckets, each with the seconds until it holds one.
+        """
 
 
 class Embedder(Protocol):

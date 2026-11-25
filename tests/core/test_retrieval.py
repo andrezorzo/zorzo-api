@@ -1,21 +1,13 @@
 """AC4: the retrieval service orders hits by the reranker and falls back to the fused order."""
 
-from rag_core.limits import Limits
+from pathlib import Path
+
+from rag_core.limits import load_limits
 from rag_core.ports import SearchHit
 from rag_core.services.retrieval import rerank, search
 
-LIMITS = Limits(
-    max_question_chars=500,
-    max_body_bytes=8192,
-    ping_interval=10,
-    request_deadline=20,
-    retrieval_top_k=20,
-    rrf_k=60,
-    rerank_top_n=3,
-    degraded_max_passages=6,
-    chunk_tokens=400,
-    chunk_overlap=0.15,
-    search_min_similarity=0.5,
+LIMITS = load_limits(Path(__file__).resolve().parents[2] / "config/limits.yaml").model_copy(
+    update={"rerank_top_n": 3}
 )
 FUSED = [SearchHit(i, f"t{i}", f"c{i}", 1.0 / i) for i in range(1, 6)]
 

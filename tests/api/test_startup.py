@@ -11,6 +11,7 @@ from rag_api.main import create_app
 from rag_core.domain import DomainError
 
 from tests.conftest import api_settings
+from tests.fakes.turnstile import PASS_SECRET
 
 
 def _start(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -19,7 +20,7 @@ def _start(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     }
     return subprocess.run(
         [sys.executable, "-m", "rag_api"],
-        env={**base, "PORT": "0", **env},
+        env={**base, "PORT": "0", "TURNSTILE_SECRET": PASS_SECRET, "SALT_SEED": "test-seed-" * 4, **env},
         capture_output=True,
         text=True,
         timeout=30,

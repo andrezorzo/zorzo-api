@@ -20,6 +20,13 @@ class Limits(BaseModel):
     chunk_tokens: int = Field(gt=0)
     chunk_overlap: float = Field(ge=0, lt=1)
     search_min_similarity: float = Field(ge=-1, le=1)
+    # Rate limit (LLD "6.7 Rate limit"); the burst window is shared by the IP and session buckets.
+    rate_ip_burst: int = Field(ge=1)
+    rate_ip_window: float = Field(gt=0)
+    rate_ip_daily: int = Field(ge=1)
+    rate_session_burst: int = Field(ge=1)
+    rate_session_daily: int = Field(ge=1)
+    timeout_turnstile: float = Field(gt=0)
 
 
 def load_limits(path: Path) -> Limits:

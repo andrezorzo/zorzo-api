@@ -12,6 +12,8 @@ class ErrorCode(StrEnum):
     BOT_CHECK_FAILED = "bot_check_failed"
     RATE_LIMITED = "rate_limited"
     UNAVAILABLE = "unavailable"
+    NOT_FOUND = "not_found"
+    METHOD_NOT_ALLOWED = "method_not_allowed"
     INTERNAL = "internal"
 
 
@@ -20,6 +22,8 @@ STATUS: dict[ErrorCode, int] = {
     ErrorCode.BOT_CHECK_FAILED: 403,
     ErrorCode.RATE_LIMITED: 429,
     ErrorCode.UNAVAILABLE: 503,
+    ErrorCode.NOT_FOUND: 404,
+    ErrorCode.METHOD_NOT_ALLOWED: 405,
     ErrorCode.INTERNAL: 500,
 }
 
@@ -28,6 +32,8 @@ DEFAULT_MESSAGE: dict[ErrorCode, str] = {
     ErrorCode.BOT_CHECK_FAILED: "The bot check failed. Reload the page and try again.",
     ErrorCode.RATE_LIMITED: "Too many questions. Try again later.",
     ErrorCode.UNAVAILABLE: "The service is unavailable right now.",
+    ErrorCode.NOT_FOUND: "There is nothing at this path.",
+    ErrorCode.METHOD_NOT_ALLOWED: "This path doesn't accept that method.",
     ErrorCode.INTERNAL: "Something went wrong on our side.",
 }
 

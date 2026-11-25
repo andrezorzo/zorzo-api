@@ -1,4 +1,4 @@
-"""AC5: one error body and catalog (LLD "Errors"), reused by every route."""
+"""AC5 (F01-T01) and AC7 (F01-T04): one error body and catalog (LLD "Errors"), reused by every route."""
 
 from collections.abc import Iterator
 
@@ -7,12 +7,11 @@ import structlog
 from fastapi import APIRouter
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
-from rag_api.main import create_app
 from rag_core.errors import ApiError, ErrorCode
 from rag_core.telemetry import configure_logging
 from structlog.testing import capture_logs
 
-from tests.conftest import api_settings
+from tests.conftest import api_settings, build_app
 
 
 class Body(BaseModel):
@@ -39,7 +38,7 @@ async def unavailable() -> None:
 
 @pytest.fixture
 def client(database_url: str) -> Iterator[TestClient]:
-    app = create_app(api_settings(database_url))
+    app = build_app(api_settings(database_url))
     app.include_router(probe)
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
@@ -96,3 +95,16 @@ def test_production_logs_keep_the_traceback_of_an_unhandled_error(capsys: pytest
     assert "RuntimeError" in out
     assert "boom" in out
     assert "s3cret-local" not in out
+
+
+def test_unknown_path_is_not_found(client: TestClient) -> None:
+    response = client.get("/api/v2/nothing")
+    assert response.status_code == 404
+    _assert_error(response.json(), "not_found")
+
+
+def test_wrong_method_is_method_not_allowed(client: TestClient) -> None:
+    response = client.get("/api/v1/ask")
+    assert response.status_code == 405
+    _assert_error(response.json(), "method_not_allowed")
+    assert response.headers["allow"] == "POST"

@@ -13,8 +13,13 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from fastapi import FastAPI
+from rag_api.main import create_app
 from rag_api.settings import ApiSettings
+from rag_core.adapters.turnstile import TurnstileBotCheck
 from sqlalchemy import make_url
+
+from tests.fakes.turnstile import PASS_SECRET, FakeSiteverify
 
 ROOT = Path(__file__).resolve().parents[1]
 ADMIN_URL = os.environ.get("TEST_DATABASE_ADMIN_URL", "postgresql://zorzo:zorzo@localhost:5432/postgres")
@@ -117,5 +122,32 @@ def api_settings(url: str, domain: str = "zorzo", **overrides: object) -> ApiSet
         "log_level": "INFO",
         "embedder": "fake",
         "reranker": "fake",
+        "turnstile_secret": PASS_SECRET,
+        "salt_seed": "test-seed-" * 4,
     }
     return ApiSettings(**{**values, **overrides})  # type: ignore[arg-type]
+
+
+# Most tests ask many questions from one client: limits high enough that they never apply. The gate tests
+# pass their own, small ones.
+ROOMY_LIMITS = {
+    "rate_ip_burst": 10_000,
+    "rate_ip_daily": 10_000,
+    "rate_session_burst": 10_000,
+    "rate_session_daily": 10_000,
+}
+
+
+def build_app(
+    settings: ApiSettings, siteverify: FakeSiteverify | None = None, limits: dict[str, object] | None = None
+) -> FastAPI:
+    """The real app, with Turnstile's `siteverify` replaced by the stand-in (AC6) and the given limits."""
+    app = create_app(settings)
+    gate = app.state.gate
+    gate.limits = app.state.limits = app.state.limits.model_copy(update={**ROOMY_LIMITS, **(limits or {})})
+    gate.bot_check = TurnstileBotCheck(
+        settings.turnstile_secret.get_secret_value(),
+        gate.limits.timeout_turnstile,
+        transport=(siteverify or FakeSiteverify()).transport(),
+    )
+    return app

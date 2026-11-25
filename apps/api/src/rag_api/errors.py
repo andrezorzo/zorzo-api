@@ -6,9 +6,11 @@ from collections.abc import Awaitable, Callable
 
 import structlog
 from fastapi import FastAPI, Request, Response
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from rag_core.errors import DEFAULT_MESSAGE, STATUS, ApiError, ErrorCode, error_body
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 log = structlog.get_logger()
 
@@ -54,3 +56,14 @@ def install(app: FastAPI) -> None:
     async def invalid_input(request: Request, exc: RequestValidationError) -> JSONResponse:
         code = ErrorCode.INVALID_INPUT
         return _error_response(code, DEFAULT_MESSAGE[code], request.state.trace_id)
+
+    # Routing failures (no route, wrong method) answer with the catalog body too (LLD "Errors").
+    routing = {404: ErrorCode.NOT_FOUND, 405: ErrorCode.METHOD_NOT_ALLOWED}
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request: Request, exc: StarletteHTTPException) -> Response:
+        code = routing.get(exc.status_code)
+        if code is None:
+            return await http_exception_handler(request, exc)  # no route raises others today
+        headers = dict(exc.headers) if exc.headers else None  # 405 keeps `Allow`
+        return _error_response(code, DEFAULT_MESSAGE[code], request.state.trace_id, headers)

@@ -70,6 +70,9 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
+# `network` tests call real third-party endpoints: excluded by default, run in the full verification.
+markers = ["network: calls a real third-party endpoint"]
+addopts = "-m 'not network'"
 
 [tool.importlinter]
 root_packages = ["rag_core", "rag_api", "rag_ingest", "rag_dashboard", "data", "domain_zorzo"]
