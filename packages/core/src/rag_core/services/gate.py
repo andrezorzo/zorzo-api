@@ -57,7 +57,7 @@ class Gate:
         refused = await self.limiter.take(self._buckets(ip, asker.session, now), now)
         if refused is not None:
             wait = max((seconds for _, seconds in refused), default=0.0)
-            log.warning("rate_limited", buckets=sorted(_kind(b) for b, _ in refused))
+            log.warning("rate_limited", buckets=sorted(b.kind for b, _ in refused))
             # Whole seconds, at least one: a refill that is due now still needs a new request.
             raise ApiError(ErrorCode.RATE_LIMITED, headers={"Retry-After": str(max(1, math.ceil(wait)))})
         return text
@@ -69,14 +69,8 @@ class Gate:
         day = now.date()
         midnight = datetime.combine(day + timedelta(days=1), time(), UTC)
         return [
-            Bucket(f"ip:{ip}:burst", lim.rate_ip_burst, refill_ip),
-            Bucket(f"ip:{ip}:{day}", lim.rate_ip_daily, 0.0, midnight),
-            Bucket(f"session:{session}:burst", lim.rate_session_burst, refill_session),
-            Bucket(f"session:{session}:{day}", lim.rate_session_daily, 0.0, midnight),
+            Bucket(f"ip:{ip}:burst", "ip_burst", lim.rate_ip_burst, refill_ip),
+            Bucket(f"ip:{ip}:{day}", "ip_day", lim.rate_ip_daily, 0.0, midnight),
+            Bucket(f"session:{session}:burst", "session_burst", lim.rate_session_burst, refill_session),
+            Bucket(f"session:{session}:{day}", "session_day", lim.rate_session_daily, 0.0, midnight),
         ]
-
-
-def _kind(bucket: Bucket) -> str:
-    """`ip_burst`, `ip_day`, `session_burst` or `session_day`: what a log line may say about a bucket."""
-    owner = bucket.key.split(":", 1)[0]
-    return f"{owner}_{'burst' if bucket.refill_per_s > 0 else 'day'}"

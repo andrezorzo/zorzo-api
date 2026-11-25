@@ -17,10 +17,16 @@ from rag_core.ports import Bucket
 _LEVEL = """least(i.capacity, b.tokens
     + greatest(0, extract(epoch FROM CAST(:now AS timestamptz) - b.refilled_at)) * i.refill_per_s)"""
 
-TAKE = text(f"""
-WITH i AS (
-    SELECT * FROM unnest(:keys, :capacities, :refills) AS i(key, capacity, refill_per_s)
+# The buckets of one take as rows: key, capacity, refill per second.
+_INPUT = "WITH i AS (SELECT * FROM unnest(:keys, :capacities, :refills) AS i(key, capacity, refill_per_s))"
+_ARRAYS = (
+    bindparam("keys", type_=ARRAY(TEXT)),
+    bindparam("capacities", type_=ARRAY(DOUBLE_PRECISION)),
+    bindparam("refills", type_=ARRAY(DOUBLE_PRECISION)),
 )
+
+TAKE = text(f"""
+{_INPUT}
 INSERT INTO rate_buckets AS b (key, tokens, refilled_at)
 SELECT key, capacity - 1, :now FROM i ORDER BY key
 ON CONFLICT (key) DO UPDATE
@@ -28,22 +34,12 @@ SET tokens = (SELECT {_LEVEL} FROM i WHERE i.key = b.key) - 1,
     refilled_at = greatest(b.refilled_at, EXCLUDED.refilled_at)
 WHERE (SELECT {_LEVEL} FROM i WHERE i.key = b.key) >= 1
 RETURNING b.key
-""").bindparams(
-    bindparam("keys", type_=ARRAY(TEXT)),
-    bindparam("capacities", type_=ARRAY(DOUBLE_PRECISION)),
-    bindparam("refills", type_=ARRAY(DOUBLE_PRECISION)),
-)
+""").bindparams(*_ARRAYS)
 
 LEVELS = text(f"""
-WITH i AS (
-    SELECT * FROM unnest(:keys, :capacities, :refills) AS i(key, capacity, refill_per_s)
-)
+{_INPUT}
 SELECT b.key, {_LEVEL} FROM rate_buckets b JOIN i ON i.key = b.key
-""").bindparams(
-    bindparam("keys", type_=ARRAY(TEXT)),
-    bindparam("capacities", type_=ARRAY(DOUBLE_PRECISION)),
-    bindparam("refills", type_=ARRAY(DOUBLE_PRECISION)),
-)
+""").bindparams(*_ARRAYS)
 
 
 class PostgresRateLimiter:

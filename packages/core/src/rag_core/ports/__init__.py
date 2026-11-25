@@ -29,6 +29,9 @@ class BotCheck(Protocol):
     async def verify(self, token: str) -> bool:
         """True only when the provider accepts the token; a provider error or timeout is False."""
 
+    async def close(self) -> None:
+        """Release the connection to the provider, at shutdown."""
+
 
 @dataclass(frozen=True)
 class Bucket:
@@ -38,6 +41,9 @@ class Bucket:
     """
 
     key: str
+    kind: (
+        str  # what a log line may say about the bucket: `ip_burst`, `ip_day`, `session_burst`, `session_day`
+    )
     capacity: int
     refill_per_s: float
     resets_at: datetime | None = None

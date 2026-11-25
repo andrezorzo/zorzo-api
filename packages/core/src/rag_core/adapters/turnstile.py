@@ -41,8 +41,7 @@ class TurnstileBotCheck:
         if isinstance(body, dict) and body.get("success") is True:
             return True
         codes = body.get("error-codes") if isinstance(body, dict) else None
-        if not isinstance(codes, list):
-            codes = []
+        codes = codes if isinstance(codes, list) else []
         log.warning("bot_check_failed", codes=[str(c)[:40] for c in codes[:MAX_LOGGED_CODES]])
         return False
 

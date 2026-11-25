@@ -27,7 +27,7 @@ async def wait(limiter: PostgresRateLimiter, buckets: list[Bucket], now: datetim
 
 
 def burst(capacity: int = 3, window: float = 60.0) -> Bucket:
-    return Bucket(f"test:{uuid.uuid4()}", capacity, capacity / window)
+    return Bucket(f"test:{uuid.uuid4()}", "test", capacity, capacity / window)
 
 
 async def test_takes_until_empty_then_says_how_long_to_wait(limiter: PostgresRateLimiter) -> None:
@@ -40,7 +40,7 @@ async def test_takes_until_empty_then_says_how_long_to_wait(limiter: PostgresRat
 
 async def test_a_bucket_that_does_not_refill_waits_for_its_reset(limiter: PostgresRateLimiter) -> None:
     resets_at = NOW + timedelta(hours=12)
-    day = Bucket(f"test:{uuid.uuid4()}", 1, 0.0, resets_at)
+    day = Bucket(f"test:{uuid.uuid4()}", "test", 1, 0.0, resets_at)
     assert await wait(limiter, [day], NOW) is None
     assert await wait(limiter, [day], NOW + timedelta(hours=2)) == pytest.approx(10 * 3600)
 
