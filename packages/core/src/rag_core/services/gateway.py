@@ -362,7 +362,10 @@ class ModelGateway:
             if not isinstance(exc, asyncio.CancelledError):
                 self.quota.count(entry.provider, rate)
             return 0.0
-        cost = 0.0  # a failed call settles with actual 0 (LLD "6.2 Daily budget")
+        # A call the provider refused settles with actual 0 (LLD "6.2 Daily budget"). One that may have run on
+        # the provider's side (a timeout, or the visitor leaving mid-call) keeps its estimate: refunding it
+        # would let a visitor who disconnects spend past the cap unseen.
+        cost = 0.0 if isinstance(exc, ProviderError) else ticket.estimate
         if exc is None:
             assert entry.price is not None
             if usage is None or usage.tokens_in + usage.tokens_out == 0:

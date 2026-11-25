@@ -295,3 +295,14 @@ async def test_the_budget_alert_opens_at_the_paid_cutoff(rig: Rig) -> None:
     assert await rig.gateway.mode() is None  # the free entries still answer
     await rig.gateway.drain()
     assert [kind for kind, _ in rig.alerter.sent] == ["budget_exhausted"]
+
+
+async def test_a_paid_call_that_may_have_run_keeps_its_estimate(rig: Rig) -> None:
+    with_limits(rig, timeout_answer=0.2)
+    rig.fake.script(A, "error")
+    rig.fake.script(B, "error")
+    rig.fake.script(PAID, "hang")  # the provider may still bill a call it never answered
+    with pytest.raises(ModelsUnavailable):
+        await rig.complete()
+    prompt_tokens = -(-len(MESSAGES[0]["content"]) // 3)
+    assert rig.spent_today() == pytest.approx((prompt_tokens * 1.0 + 200 * 4.0) / 1e6, abs=1e-6)
