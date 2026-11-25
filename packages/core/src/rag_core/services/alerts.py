@@ -5,19 +5,24 @@ Nothing here raises: a store or an alerter that fails is logged, so an alert nev
 """
 
 import asyncio
+import time
 from collections import defaultdict
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any, get_args
+from typing import get_args
 
 import structlog
 
+from rag_core.background import BackgroundTasks
 from rag_core.limits import Limits
 from rag_core.ports import Alerter, AlertKind, AlertStore, StoreUnavailable
 
 log = structlog.get_logger()
 
 SEND_TIMEOUT_S = 5.0  # a slow alerter gives up instead of piling up tasks
+# `raise_soon` runs on every question: while an incident lasts, the store is asked at most this often per
+# kind. A reminder can then be late by up to this much.
+RAISE_CHECK_EVERY_S = 60.0
 
 
 class Alerts:
@@ -27,6 +32,7 @@ class Alerts:
         alerter: Alerter,
         limits: Limits,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.store = store
         self.alerter = alerter
@@ -35,7 +41,9 @@ class Alerts:
         # Kinds that may have an open row: all of them at start (a restart doesn't know), then what this
         # process opened. `clear` skips the database for the others, so it can run on every question.
         self._maybe_open: set[AlertKind] = set(get_args(AlertKind))
-        self._tasks: set[asyncio.Task[None]] = set()
+        self.monotonic = monotonic
+        self._background = BackgroundTasks()
+        self._raise_checked: dict[AlertKind, float] = {}  # when `raise_soon` last asked the store, per kind
         # One kind's raises and clears run in the order they were asked for (asyncio.Lock is first come,
         # first served), so a late clear can't close the incident a later raise opened.
         self._locks: dict[AlertKind, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -60,12 +68,18 @@ class Alerts:
 
     def raise_soon(self, kind: AlertKind, message: str) -> None:
         """`raise_` in the background: the caller never waits on the store or the alerter."""
-        self._spawn(self.raise_(kind, message))
+        now = self.monotonic()
+        last = self._raise_checked.get(kind)
+        if last is not None and now - last < RAISE_CHECK_EVERY_S:
+            return
+        self._raise_checked[kind] = now
+        self._background.spawn(self.raise_(kind, message))
 
     def clear_soon(self, kind: AlertKind) -> None:
         if kind in self._maybe_open:
             self._maybe_open.discard(kind)
-            self._spawn(self._clear(kind))
+            self._raise_checked.pop(kind, None)  # a new incident is raised at once
+            self._background.spawn(self._clear(kind))
 
     async def _clear(self, kind: AlertKind) -> None:
         async with self._locks[kind]:
@@ -80,13 +94,7 @@ class Alerts:
 
     async def drain(self) -> None:
         """Wait for the background work, at shutdown and in tests."""
-        while self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
-
-    def _spawn(self, work: Coroutine[Any, Any, None]) -> None:
-        task = asyncio.create_task(work)
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        await self._background.drain()
 
     async def _send(self, kind: AlertKind, message: str) -> None:
         try:

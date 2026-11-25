@@ -5,26 +5,21 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import psycopg
 import pytest
 from pydantic import BaseModel
-from rag_core.adapters.alerts import PostgresAlertStore
-from rag_core.adapters.budget import PostgresBudget
-from rag_core.adapters.event_log import PostgresEventLog
+from rag_core.adapters.factory import build_gateway
 from rag_core.adapters.openai_compat import OpenAICompatProvider
 from rag_core.adapters.postgres import Database
 from rag_core.limits import Limits, load_limits
 from rag_core.models_config import load_models
-from rag_core.ports import AlertKind
-from rag_core.services.alerts import Alerts
-from rag_core.services.breaker import Breakers
 from rag_core.services.gateway import Completion, ModelGateway, ModelsUnavailable, RequestSpend
-from rag_core.services.quota import Quota
 
+from tests.conftest import reset_tables, seed_budget
+from tests.fakes.alerter import RecordingAlerter
 from tests.fakes.openrouter import FakeOpenRouter, Reply
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -34,22 +29,11 @@ A, B, PAID = "test/answer-a:free", "test/answer-b:free", "test/answer-paid"
 MESSAGES = [{"role": "user", "content": "Which AWS services has he used?"}]
 
 
-class Alerter:
-    def __init__(self) -> None:
-        self.sent: list[tuple[str, str]] = []
-
-    async def send(self, kind: AlertKind, message: str) -> None:
-        self.sent.append((kind, message))
-
-    async def close(self) -> None:
-        pass
-
-
 @dataclass
 class Rig:
     gateway: ModelGateway
     fake: FakeOpenRouter
-    alerter: Alerter
+    alerter: RecordingAlerter
     db: Database
     url: str
 
@@ -73,39 +57,21 @@ class Rig:
         return float(row[0]) if row else 0.0
 
     def seed_budget(self, cost: float, paid_disabled: bool = False, degraded: bool = False) -> None:
-        with psycopg.connect(self.url) as conn:
-            conn.execute(
-                "INSERT INTO budget_daily (day, cost_usd, paid_disabled_at, degraded_at) "
-                "VALUES ((now() AT TIME ZONE 'UTC')::date, %s, %s, %s) ON CONFLICT (day) DO UPDATE SET "
-                "cost_usd = EXCLUDED.cost_usd, paid_disabled_at = EXCLUDED.paid_disabled_at, "
-                "degraded_at = EXCLUDED.degraded_at",
-                (cost, datetime.now(UTC) if paid_disabled else None, datetime.now(UTC) if degraded else None),
-            )
+        seed_budget(self.url, cost, paid_disabled, degraded)
 
 
 def make_gateway(
-    db: Database, fake: FakeOpenRouter, alerter: Alerter, limits: Limits = LIMITS
+    db: Database, fake: FakeOpenRouter, alerter: RecordingAlerter, limits: Limits = LIMITS
 ) -> ModelGateway:
     provider = OpenAICompatProvider("https://openrouter.test/api/v1", "test-key", transport=fake.transport())
-    return ModelGateway(
-        CONFIG,
-        {"openrouter": provider},
-        PostgresBudget(db),
-        Breakers(limits, PostgresEventLog(db)),
-        Quota(CONFIG, limits),
-        Alerts(PostgresAlertStore(db), alerter, limits),
-        limits,
-    )
+    return build_gateway(CONFIG, {"openrouter": provider}, db, alerter, limits)
 
 
 @pytest.fixture
 async def rig(database_url: str) -> AsyncIterator[Rig]:
-    with psycopg.connect(database_url) as conn:
-        conn.execute("DELETE FROM budget_daily")
-        conn.execute("DELETE FROM alert_states")
-        conn.execute("DELETE FROM log_events")
+    reset_tables(database_url, "budget_daily", "alert_states", "log_events")
     db = Database(database_url)
-    fake, alerter = FakeOpenRouter(), Alerter()
+    fake, alerter = FakeOpenRouter(), RecordingAlerter()
     yield Rig(make_gateway(db, fake, alerter), fake, alerter, db, database_url)
     await db.close()
 

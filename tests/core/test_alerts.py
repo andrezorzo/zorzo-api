@@ -6,6 +6,7 @@ import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import httpx
 import psycopg
@@ -13,9 +14,10 @@ import pytest
 from rag_core.adapters.alerts import PostgresAlertStore, TelegramAlerter
 from rag_core.adapters.postgres import Database
 from rag_core.limits import load_limits
-from rag_core.ports import AlertKind
 from rag_core.services.alerts import Alerts
 from rag_core.telemetry import configure_logging
+
+from tests.fakes.alerter import RecordingAlerter
 
 LIMITS = load_limits(Path(__file__).resolve().parents[2] / "config/limits.yaml")
 
@@ -28,20 +30,6 @@ class Clock:
         return self.now
 
 
-class Alerter:
-    def __init__(self, fail: bool = False) -> None:
-        self.sent: list[tuple[str, str]] = []
-        self.fail = fail
-
-    async def send(self, kind: AlertKind, message: str) -> None:
-        if self.fail:
-            raise RuntimeError("telegram is down")
-        self.sent.append((kind, message))
-
-    async def close(self) -> None:
-        pass
-
-
 @pytest.fixture
 async def db(database_url: str) -> AsyncIterator[Database]:
     with psycopg.connect(database_url) as conn:
@@ -52,14 +40,14 @@ async def db(database_url: str) -> AsyncIterator[Database]:
 
 
 async def test_opens_once_under_concurrency(db: Database) -> None:
-    alerter = Alerter()
+    alerter = RecordingAlerter()
     alerts = Alerts(PostgresAlertStore(db), alerter, LIMITS, Clock())
     await asyncio.gather(*(alerts.raise_("budget_exhausted", "spent") for _ in range(10)))
     assert alerter.sent == [("budget_exhausted", "spent")]
 
 
 async def test_reminds_after_the_repeat_interval(db: Database) -> None:
-    alerter, clock = Alerter(), Clock()
+    alerter, clock = RecordingAlerter(), Clock()
     alerts = Alerts(PostgresAlertStore(db), alerter, LIMITS, clock)
     await alerts.raise_("providers_down", "all open")
     clock.now += timedelta(seconds=LIMITS.alert_repeat_after - 1)
@@ -72,7 +60,7 @@ async def test_reminds_after_the_repeat_interval(db: Database) -> None:
 
 
 async def test_closes_when_the_condition_clears(db: Database, database_url: str) -> None:
-    alerter = Alerter()
+    alerter = RecordingAlerter()
     alerts = Alerts(PostgresAlertStore(db), alerter, LIMITS, Clock())
     await alerts.clear("budget_exhausted")  # nothing open: no message
     await alerts.raise_("budget_exhausted", "spent")
@@ -87,13 +75,13 @@ async def test_closes_when_the_condition_clears(db: Database, database_url: str)
 
 
 async def test_a_failing_alerter_is_logged_not_raised(db: Database) -> None:
-    alerts = Alerts(PostgresAlertStore(db), Alerter(fail=True), LIMITS, Clock())
+    alerts = Alerts(PostgresAlertStore(db), RecordingAlerter(fail=True), LIMITS, Clock())
     await alerts.raise_("budget_exhausted", "spent")  # no exception
 
 
 async def test_a_failing_store_is_logged_not_raised() -> None:
     db = Database("postgresql://nobody:x@127.0.0.1:9/none")
-    alerter = Alerter()
+    alerter = RecordingAlerter()
     await Alerts(PostgresAlertStore(db), alerter, LIMITS, Clock()).raise_("budget_exhausted", "spent")
     assert alerter.sent == []
     await db.close()
@@ -116,3 +104,25 @@ async def test_telegram_sends_and_logs_no_token(caplog: pytest.LogCaptureFixture
     assert json.loads(seen[0].content) == {"chat_id": "42", "text": "budget_exhausted: spent"}
     assert token not in caplog.text
     configure_logging("local", "INFO")
+
+
+async def test_raise_soon_asks_the_store_at_most_once_a_minute(db: Database) -> None:
+    store, opens = PostgresAlertStore(db), [0]
+    real_open = store.open
+
+    async def counted(*args: Any) -> Any:
+        opens[0] += 1
+        return await real_open(*args)
+
+    store.open = counted  # type: ignore[method-assign,assignment]
+    alerter = RecordingAlerter()
+    alerts = Alerts(store, alerter, LIMITS, Clock(), monotonic=lambda: 0.0)
+    for _ in range(5):  # one question after another during an incident
+        alerts.raise_soon("budget_exhausted", "spent")
+    await alerts.drain()
+    assert opens == [1]
+    assert alerter.sent == [("budget_exhausted", "spent")]
+    alerts.clear_soon("budget_exhausted")
+    alerts.raise_soon("budget_exhausted", "spent again")  # a new incident is raised at once
+    await alerts.drain()
+    assert [m for _, m in alerter.sent] == ["spent", "resolved: budget_exhausted", "spent again"]

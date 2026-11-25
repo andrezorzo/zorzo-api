@@ -5,15 +5,13 @@ corrects the row by `actual - estimate` and records the state changes. Amounts g
 the column's six places.
 """
 
-from collections.abc import Awaitable, Callable
 from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
 
-from rag_core.adapters.postgres import Database
-from rag_core.ports import BudgetState, StoreUnavailable
+from rag_core.adapters.postgres import Database, store_errors
+from rag_core.ports import BudgetState
 
 STATE = text("""
 SELECT CASE WHEN degraded_at IS NOT NULL THEN 'degraded'
@@ -50,38 +48,16 @@ class PostgresBudget:
         self.db = db
 
     async def state(self, day: date) -> BudgetState:
-        async def run() -> BudgetState:
-            async with self.db.engine.connect() as conn:
-                found = (await conn.execute(STATE, {"day": day})).scalar()
-            return found or "normal"
-
-        return await _guard(run)
+        async with store_errors(), self.db.engine.connect() as conn:
+            found = (await conn.execute(STATE, {"day": day})).scalar()
+        return found or "normal"
 
     async def reserve(self, day: date, estimate: float, cap: float) -> bool:
-        async def run() -> bool:
-            async with self.db.engine.begin() as conn:
-                params = {"day": day, "estimate": _usd(estimate), "cap": _usd(cap)}
-                return (await conn.execute(RESERVE, params)).first() is not None
-
-        return await _guard(run)
+        params = {"day": day, "estimate": _usd(estimate), "cap": _usd(cap)}
+        async with store_errors(), self.db.engine.begin() as conn:
+            return (await conn.execute(RESERVE, params)).first() is not None
 
     async def settle(self, day: date, delta: float, cutoff: float, cap: float, now: datetime) -> None:
-        async def run() -> None:
-            async with self.db.engine.begin() as conn:
-                params = {
-                    "day": day,
-                    "delta": _usd(delta),
-                    "cutoff": _usd(cutoff),
-                    "cap": _usd(cap),
-                    "now": now,
-                }
-                await conn.execute(SETTLE, params)
-
-        await _guard(run)
-
-
-async def _guard[T](run: Callable[[], Awaitable[T]]) -> T:
-    try:
-        return await run()
-    except (OSError, SQLAlchemyError) as exc:
-        raise StoreUnavailable(type(exc).__name__) from exc
+        params = {"day": day, "delta": _usd(delta), "cutoff": _usd(cutoff), "cap": _usd(cap), "now": now}
+        async with store_errors(), self.db.engine.begin() as conn:
+            await conn.execute(SETTLE, params)

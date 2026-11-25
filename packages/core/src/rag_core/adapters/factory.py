@@ -1,9 +1,13 @@
 """Builds the adapters chosen by settings; the apps call these at startup."""
 
 from collections.abc import Mapping
+from typing import get_args
 
-from rag_core.models_config import ModelsConfig
-from rag_core.ports import Embedder, ModelProvider, Reranker
+from rag_core.adapters.postgres import Database
+from rag_core.limits import Limits
+from rag_core.models_config import ModelsConfig, StageName
+from rag_core.ports import Alerter, Embedder, ModelProvider, Reranker
+from rag_core.services.gateway import ModelGateway
 from rag_core.settings import AppSettings
 
 
@@ -48,7 +52,7 @@ def build_providers(
     """One client per provider of the models config; in production a provider a chain uses needs its key."""
     from rag_core.adapters.openai_compat import OpenAICompatProvider
 
-    used = {e.provider for name in ("route", "rerank", "answer", "judge") for e in models.stage(name).chain}
+    used = {e.provider for name in get_args(StageName) for e in models.stage(name).chain}
     providers: dict[str, ModelProvider] = {}
     for name, provider in models.providers.items():
         key = None
@@ -60,3 +64,39 @@ def build_providers(
                 raise ConfigError(f"{provider.key_env} is required in production (provider {name})")
         providers[name] = OpenAICompatProvider(provider.base_url, key)
     return providers
+
+
+def build_gateway(
+    models: ModelsConfig,
+    providers: Mapping[str, ModelProvider],
+    db: Database,
+    alerter: Alerter,
+    limits: Limits,
+) -> ModelGateway:
+    """The model gateway over the Postgres stores (budget, breaker rows, alerts)."""
+    from rag_core.adapters.alerts import PostgresAlertStore
+    from rag_core.adapters.budget import PostgresBudget
+    from rag_core.adapters.event_log import PostgresEventLog
+    from rag_core.services.alerts import Alerts
+    from rag_core.services.breaker import Breakers
+    from rag_core.services.quota import Quota
+
+    return ModelGateway(
+        models,
+        providers,
+        PostgresBudget(db),
+        Breakers(limits, PostgresEventLog(db)),
+        Quota(models, limits),
+        Alerts(PostgresAlertStore(db), alerter, limits),
+        limits,
+    )
+
+
+def rerank_chain(gateway: ModelGateway, local: list[Reranker], limits: Limits) -> list[Reranker]:
+    """The remote level when the `rerank` stage has entries, then the local ones (ADR 0009)."""
+    from rag_core.services.gateway_reranker import GatewayReranker
+
+    remote: list[Reranker] = (
+        [GatewayReranker(gateway, limits.timeout_rerank)] if gateway.config.stage("rerank").chain else []
+    )
+    return [*remote, *local]

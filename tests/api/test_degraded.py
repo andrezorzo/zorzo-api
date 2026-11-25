@@ -5,38 +5,26 @@ import asyncio
 from collections.abc import Iterator
 from typing import Any
 
-import psycopg
 import pytest
 from fastapi.testclient import TestClient
 from rag_core.services.gateway import ModelsUnavailable, RequestSpend
 
 from tests.api.test_ask import QUESTION, ask
-from tests.conftest import api_settings, build_app
+from tests.conftest import api_settings, build_app, reset_tables, seed_budget
 
 ANSWER_MODELS = ("test/answer-a:free", "test/answer-b:free", "test/answer-paid")
 
 
-def reset(url: str) -> None:
-    with psycopg.connect(url) as conn:
-        conn.execute("DELETE FROM budget_daily")
-        conn.execute("DELETE FROM alert_states")
-
-
 @pytest.fixture
 def client(corpus_database: str) -> Iterator[TestClient]:
-    reset(corpus_database)
+    reset_tables(corpus_database, "budget_daily", "alert_states")
     with TestClient(build_app(api_settings(corpus_database))) as c:
         yield c
-    reset(corpus_database)
+    reset_tables(corpus_database, "budget_daily", "alert_states")
 
 
 def budget_at_the_cap(url: str) -> None:
-    with psycopg.connect(url) as conn:
-        conn.execute(
-            "INSERT INTO budget_daily (day, cost_usd, paid_disabled_at, degraded_at) "
-            "VALUES ((now() AT TIME ZONE 'UTC')::date, 0.10, now(), now()) ON CONFLICT (day) DO UPDATE SET "
-            "cost_usd = 0.10, paid_disabled_at = now(), degraded_at = now()"
-        )
+    seed_budget(url, 0.10, paid_disabled=True, degraded=True)
 
 
 def open_every_answer_entry(client: TestClient) -> None:

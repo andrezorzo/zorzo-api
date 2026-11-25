@@ -9,10 +9,9 @@ from datetime import datetime
 
 from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import ARRAY, DOUBLE_PRECISION, TEXT
-from sqlalchemy.exc import SQLAlchemyError
 
-from rag_core.adapters.postgres import Database
-from rag_core.ports import Bucket, StoreUnavailable
+from rag_core.adapters.postgres import Database, store_errors
+from rag_core.ports import Bucket
 
 # The refilled level of a stored bucket at :now; `i` is the bucket's input row.
 _LEVEL = """least(i.capacity, b.tokens
@@ -56,10 +55,8 @@ class PostgresRateLimiter:
 
     async def take(self, buckets: list[Bucket], now: datetime) -> list[tuple[Bucket, float]] | None:
         """See `RateLimiter.take`."""
-        try:
+        async with store_errors():
             return await self._take(buckets, now)
-        except (OSError, SQLAlchemyError) as exc:
-            raise StoreUnavailable(type(exc).__name__) from exc
 
     async def _take(self, buckets: list[Bucket], now: datetime) -> list[tuple[Bucket, float]] | None:
         params = {

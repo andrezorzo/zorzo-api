@@ -8,14 +8,14 @@ breaker is open (LLD "6.6 Circuit breaker"), when it is free and its provider pa
 
 import asyncio
 import math
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from typing import TypeVar
 
 import structlog
 from pydantic import BaseModel, ValidationError
 
+from rag_core.background import BackgroundTasks
 from rag_core.events import DegradedReason
 from rag_core.limits import Limits
 from rag_core.models_config import Entry, ModelsConfig, StageName
@@ -34,7 +34,6 @@ from rag_core.services.quota import Quota
 
 log = structlog.get_logger()
 
-T = TypeVar("T")
 CHARS_PER_TOKEN = 3  # conservative for English and Portuguese, no tokenizer (LLD "6.2 Daily budget")
 
 
@@ -69,10 +68,6 @@ class RequestSpend:
         return self.spent + estimate <= self.cap
 
 
-class _SchemaMiss(Exception):
-    """The output parsed as text but not as the requested schema: the model missed, the provider worked."""
-
-
 @dataclass
 class _Ticket:
     """One call let through: its entry, and the reservation to settle (0 for a free entry)."""
@@ -82,13 +77,6 @@ class _Ticket:
     estimate: float
     day: date | None
     spend: RequestSpend
-
-
-@dataclass(frozen=True)
-class _Outcome:
-    tokens_in: int
-    tokens_out: int
-    rate: RateInfo | None
 
 
 class ModelGateway:
@@ -111,7 +99,13 @@ class ModelGateway:
         self.alerts = alerts
         self.limits = limits
         self.clock = clock
-        self._tasks: set[asyncio.Task[None]] = set()
+        self._timeouts: dict[StageName, float] = {
+            "route": limits.timeout_route,
+            "rerank": limits.timeout_rerank,
+            "answer": limits.timeout_answer,
+            "judge": limits.timeout_judge,
+        }
+        self._background = BackgroundTasks()
 
     # -- operations ---------------------------------------------------------------------------------------
 
@@ -125,42 +119,33 @@ class ModelGateway:
         spend: RequestSpend,
     ) -> Completion:
         json_schema = schema.model_json_schema() if schema is not None else None
-        chars = sum(len(m.get("content", "")) for m in messages)
+        chars = _prompt_chars(messages)
+        max_tokens = self.config.stage(stage).max_tokens
         for entry in self.config.stage(stage).chain:
-            # A schema miss is retried once on the same entry, then falls through (LLD "6.6 Circuit breaker").
+            # A schema miss is retried once on the same entry, then falls through, and never counts toward
+            # the breaker: the provider worked, the model missed (LLD "6.6 Circuit breaker").
             for _ in range(2 if schema is not None else 1):
                 ticket = await self._take(stage, entry, chars, deadline_at, spend)
                 if ticket is None:
                     break
-                provider = self.providers[entry.provider]
-                max_tokens = self.config.stage(stage).max_tokens
                 try:
                     async with asyncio.timeout(self._time_for(stage, deadline_at)):
-                        result = await provider.chat(
+                        result = await self.providers[entry.provider].chat(
                             entry.model, messages, max_tokens=max_tokens, schema=json_schema
                         )
-                    parsed = schema.model_validate_json(result.text) if schema is not None else None
-                except ValidationError:
-                    await self._close(
-                        ticket, _SchemaMiss(), _Outcome(result.tokens_in, result.tokens_out, result.rate)
-                    )
-                    continue
                 except BaseException as exc:
                     await self._close(ticket, exc)
-                    if isinstance(exc, ProviderError | TimeoutError):
+                    if _failed(exc):
                         break
                     raise
-                cost = await self._close(
-                    ticket, None, _Outcome(result.tokens_in, result.tokens_out, result.rate)
-                )
-                return Completion(
-                    result.text,
-                    parsed,
-                    Usage(result.tokens_in, result.tokens_out),
-                    cost,
-                    entry.provider,
-                    entry.model,
-                )
+                usage = Usage(result.tokens_in, result.tokens_out)
+                cost = await self._close(ticket, None, usage, result.rate)
+                try:
+                    parsed = schema.model_validate_json(result.text) if schema is not None else None
+                except ValidationError:
+                    log.warning("model_schema_miss", stage=stage, model=entry.model)
+                    continue
+                return Completion(result.text, parsed, usage, cost, entry.provider, entry.model)
             if self._out_of_time(deadline_at):
                 break
         raise ModelsUnavailable(stage)
@@ -173,7 +158,7 @@ class ModelGateway:
         A failure before the first token falls to the next entry; after it, `ModelsUnavailable`, and the
         caller keeps the text it was given.
         """
-        chars = sum(len(m.get("content", "")) for m in messages)
+        chars = _prompt_chars(messages)
         max_tokens = self.config.stage(stage).max_tokens
         for entry in self.config.stage(stage).chain:
             ticket = await self._take(stage, entry, chars, deadline_at, spend)
@@ -195,15 +180,14 @@ class ModelGateway:
                             yield chunk.text
             except BaseException as exc:
                 await self._close(ticket, exc)
-                if isinstance(exc, ProviderError | TimeoutError):
+                if _failed(exc):
                     if parts:
                         raise ModelsUnavailable(f"{stage} failed after the first token") from exc
                     continue
                 raise
-            cost = await self._close(ticket, None, _Outcome(tokens_in, tokens_out, None))
-            yield Completion(
-                "".join(parts), None, Usage(tokens_in, tokens_out), cost, entry.provider, entry.model
-            )
+            usage = Usage(tokens_in, tokens_out)
+            cost = await self._close(ticket, None, usage)
+            yield Completion("".join(parts), None, usage, cost, entry.provider, entry.model)
             return
         raise ModelsUnavailable(stage)
 
@@ -220,10 +204,10 @@ class ModelGateway:
                     result = await self.providers[entry.provider].rerank(entry.model, query, documents)
             except BaseException as exc:
                 await self._close(ticket, exc)
-                if isinstance(exc, ProviderError | TimeoutError):
+                if _failed(exc):
                     continue
                 raise
-            await self._close(ticket, None, _Outcome(chars // CHARS_PER_TOKEN, 0, result.rate))
+            await self._close(ticket, None, Usage(math.ceil(chars / CHARS_PER_TOKEN), 0), result.rate)
             return result.scores
         raise ModelsUnavailable("rerank")
 
@@ -258,21 +242,21 @@ class ModelGateway:
 
     async def drain(self) -> None:
         """Wait for the background work (settles of cancelled calls, alerts, breaker rows)."""
-        while self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+        await self._background.drain()
         await self.alerts.drain()
         await self.breakers.event_log.drain()
 
     async def close(self) -> None:
+        """At shutdown: the background work, then every client the gateway owns (providers, alerter)."""
         await self.drain()
         for provider in self.providers.values():
             await provider.close()
+        await self.alerts.alerter.close()
 
     # -- one entry ----------------------------------------------------------------------------------------
 
     def _time_for(self, stage: StageName, deadline_at: float) -> float:
-        timeout: float = getattr(self.limits, f"timeout_{stage}")
-        return min(timeout, deadline_at - asyncio.get_running_loop().time())
+        return min(self._timeouts[stage], deadline_at - asyncio.get_running_loop().time())
 
     def _out_of_time(self, deadline_at: float) -> bool:
         return deadline_at - asyncio.get_running_loop().time() <= 0
@@ -324,15 +308,17 @@ class ModelGateway:
         return _Ticket(stage, entry, estimate, day, spend)
 
     async def _close(
-        self, ticket: _Ticket, exc: BaseException | None, outcome: _Outcome | None = None
+        self,
+        ticket: _Ticket,
+        exc: BaseException | None,
+        usage: Usage | None = None,
+        rate: RateInfo | None = None,
     ) -> float:
         """Record the verdict on the breaker and the quota, settle the reservation; returns the cost."""
         entry = ticket.entry
         key = (entry.provider, entry.model)
-        if exc is None or isinstance(exc, _SchemaMiss):
+        if exc is None:
             self.breakers.success(key)
-            if isinstance(exc, _SchemaMiss):
-                log.warning("model_schema_miss", stage=ticket.stage, model=entry.model)
         elif isinstance(exc, RateLimited):
             self.breakers.failure(key, rate_limited=True)
         elif isinstance(exc, ContextTooLong):
@@ -342,7 +328,7 @@ class ModelGateway:
             self.breakers.failure(key)
         else:  # cancelled, or a bug: no verdict on the provider
             self.breakers.release(key)
-        if isinstance(exc, ProviderError | TimeoutError):
+        if _failed(exc):
             log.warning(
                 "model_call_failed",
                 stage=ticket.stage,
@@ -351,17 +337,18 @@ class ModelGateway:
             )
         if not entry.paid:
             if not isinstance(exc, asyncio.CancelledError):
-                self.quota.count(entry.provider, outcome.rate if outcome else None)
+                self.quota.count(entry.provider, rate)
             return 0.0
         cost = 0.0
-        if outcome is not None:
+        if usage is not None:
             assert entry.price is not None
             cost = (
-                outcome.tokens_in * entry.price.input_per_mtok
-                + outcome.tokens_out * entry.price.output_per_mtok
+                usage.tokens_in * entry.price.input_per_mtok + usage.tokens_out * entry.price.output_per_mtok
             ) / 1e6
         if isinstance(exc, asyncio.CancelledError | GeneratorExit):
-            self._spawn(self._settle(ticket, cost))  # the caller is leaving: don't hold it on the database
+            self._background.spawn(
+                self._settle(ticket, cost)
+            )  # the caller is leaving: don't hold it on the database
         else:
             await self._settle(ticket, cost)
         return cost
@@ -382,10 +369,11 @@ class ModelGateway:
         except StoreUnavailable as exc:
             log.error("budget_settle_failed", error=str(exc))
 
-    def _spawn(self, work: Awaitable[None]) -> None:
-        async def run() -> None:
-            await work
 
-        task = asyncio.get_running_loop().create_task(run())
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+def _prompt_chars(messages: list[dict[str, str]]) -> int:
+    return sum(len(m.get("content", "")) for m in messages)
+
+
+def _failed(exc: BaseException | None) -> bool:
+    """A provider failure, which falls to the next entry; anything else (cancelled, a bug) propagates."""
+    return isinstance(exc, ProviderError | TimeoutError)

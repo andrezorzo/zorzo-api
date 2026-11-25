@@ -69,14 +69,11 @@ class Breakers:
             return True
         return b.state == "closed"
 
-    def success(self, key: Key) -> bool:
-        """Record a call that worked; True when it closed the breaker."""
-        b = self._get(key)
-        if b.state != "half_open":
-            return False
-        self._breakers[key] = _Breaker()
-        self._transition(key, "info", "breaker_closed")
-        return True
+    def success(self, key: Key) -> None:
+        """Record a call that worked; a half-open trial that works closes the breaker."""
+        if self._get(key).state == "half_open":
+            self._breakers[key] = _Breaker()
+            self._transition(key, "info", "breaker_closed")
 
     def failure(self, key: Key, rate_limited: bool = False) -> None:
         b = self._get(key)

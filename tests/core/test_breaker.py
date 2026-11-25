@@ -69,9 +69,10 @@ def test_half_open_trial_closes_or_reopens() -> None:
     assert not b.allow(KEY)  # reopened, a new cooldown
     clock.now += 31
     assert b.allow(KEY)
-    assert b.success(KEY) is True  # closed by the trial
+    b.success(KEY)  # the trial closes it
+    assert b.closed(KEY)
     assert b.allow(KEY) and b.allow(KEY)
-    assert b.success(KEY) is False  # already closed
+    b.success(KEY)  # already closed: no transition
     assert [row[2] for row in log.rows] == [
         "breaker_opened",
         "breaker_half_open",
