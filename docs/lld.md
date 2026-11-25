@@ -612,7 +612,7 @@ Behavior only; rendering and the 3D brain are in `zorzo-site`'s LLD.
   | `422 invalid_input` | Inline message under the input |
   | `403 bot_check_failed` | Runs Turnstile again once, then a message |
   | `429 rate_limited` | Shows when to try again, from `Retry-After` |
-  | `503` or network failure | `offline` state |
+  | `502`, `503`, `504` or network failure | `offline` state (`503` comes from the API; `502` and `504` from CloudFront or Caddy when the API doesn't answer) |
   | Stream dropped before `done` | "Connection lost, ask again" (no resume) |
   | `blocked` | The defense layer and the reason in plain words, a link to `/dash/defenses`, and "this was a mistake?" linking to the contact options |
   | `token` | Draft text, marked "checking against sources" |
