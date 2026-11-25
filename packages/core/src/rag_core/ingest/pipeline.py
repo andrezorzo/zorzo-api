@@ -56,7 +56,7 @@ async def run_ingest(
     """Write a new candidate version from `source`; nothing is embedded or written unless the gate passes.
 
     A run that stops for any reason tries to reject its candidate, so it can't be activated; a failed reject
-    is logged (`reject_failed`), and that candidate needs a manual check.
+    is logged, and that candidate needs a manual check.
     """
     version = await store.create_candidate(embedder.tag)
     try:
@@ -69,9 +69,10 @@ async def run_ingest(
         try:
             await store.reject(version)
         except Exception as reject_error:
-            log.exception("reject_failed", version=version)
             if isinstance(exc, IngestRejected):
-                raise reject_error from exc  # its summary would claim a status the database may not have
+                # Its summary would claim a status the database may not have; the caller logs this error.
+                raise reject_error from exc
+            log.exception("reject_failed", version=version)
         raise
 
 

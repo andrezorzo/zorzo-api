@@ -290,10 +290,15 @@ def test_sigterm_rejects_the_candidate(db: str, source: Path, tmp_path: Path) ->
             stderr=subprocess.STDOUT,
             text=True,
         )
-        connection, _ = server.accept()  # embedding has started
-        with connection:
-            process.send_signal(signal.SIGTERM)
-            output, _ = process.communicate(timeout=60)
-    assert process.returncode == 130, output
+        try:
+            connection, _ = server.accept()  # embedding has started
+            with connection:
+                process.send_signal(signal.SIGTERM)
+                output, _ = process.communicate(timeout=60)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                print(process.communicate()[0])
+    assert process.returncode == 143, output
     assert "ingest_interrupted" in output
     assert rows(db, "SELECT status FROM corpus_versions") == [("rejected",)]

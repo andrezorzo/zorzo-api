@@ -3,8 +3,8 @@
     python -m rag_ingest [--source DIR] [--activate]   write a new candidate version, optionally activate it
     python -m rag_ingest --activate-version N          activate an existing candidate
 
-Prints one JSON summary line on success or a gate rejection, and exits 1 on any failure: the contract is
-in apps/ingest/AGENTS.md ("Commands").
+Prints one JSON summary line on success or a gate rejection, exits 1 on any failure and 143 on SIGTERM: the
+contract is in apps/ingest/AGENTS.md ("Commands").
 """
 
 import argparse
@@ -115,15 +115,27 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
 
 
 async def _run(args: argparse.Namespace, settings: IngestSettings, config: _Config) -> int:
-    # SIGTERM (docker stop, a job timeout) cancels the run like Ctrl-C, so the candidate is still rejected.
+    # SIGTERM (docker stop, a job timeout) cancels the run like Ctrl-C, so the cleanup still runs.
+    loop = asyncio.get_running_loop()
     task = asyncio.current_task()
-    if task is not None:
-        with contextlib.suppress(NotImplementedError):  # no signal handlers on Windows event loops
-            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
+    terminated = False
+
+    def on_sigterm() -> None:
+        nonlocal terminated
+        terminated = True
+        # A second SIGTERM then kills at once instead of cancelling the cleanup halfway.
+        loop.remove_signal_handler(signal.SIGTERM)
+        if task is not None:
+            task.cancel()
+
+    with contextlib.suppress(NotImplementedError):  # no signal handlers on Windows event loops
+        loop.add_signal_handler(signal.SIGTERM, on_sigterm)
     try:
         return await _main(args, settings, config)
     except asyncio.CancelledError:
-        return 130
+        if terminated:
+            return 143  # 128 + SIGTERM
+        raise
 
 
 def main() -> None:
