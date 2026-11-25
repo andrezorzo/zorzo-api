@@ -1,7 +1,10 @@
-"""Ingest settings, validated at startup. The pipeline arrives with F01-T02."""
+"""Ingest settings, validated at startup (LLD "Configuration")."""
+
+from pathlib import Path
 
 from rag_core.settings import AppSettings
 
 
 class IngestSettings(AppSettings):
-    pass
+    data_dir: Path = Path("var/data")
+    gitleaks_binary: str = "gitleaks"

@@ -1,0 +1,12 @@
+# Rule values (LLD "Values and configuration"): a flat mapping, validated at startup. Each task adds its own.
+max_question_chars: 500
+max_body_bytes: 8192
+ping_interval: 10  # seconds
+request_deadline: 20  # seconds, whole request
+retrieval_top_k: 20
+rrf_k: 60
+rerank_top_n: 6
+degraded_max_passages: 6
+chunk_tokens: 400
+chunk_overlap: 0.15
+search_min_similarity: 0.5  # cosine; a vector hit below it doesn't count (calibrated at M3)

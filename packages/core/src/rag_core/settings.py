@@ -1,5 +1,6 @@
 """Settings every app shares, validated at startup (LLD "Configuration")."""
 
+from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -15,6 +16,14 @@ class AppSettings(BaseSettings):
     domain: str = Field(min_length=1, description="Name of the domain_<name> package to load (ADR 0011)")
     database_url: str = Field(min_length=1)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+    limits_file: Path = Path("config/limits.yaml")
+    # `fake` is deterministic and accepted only with APP_ENV=local (checked where adapters are built).
+    embedder: Literal["ollama", "fake"] = "ollama"
+    embed_model_tag: str = "bge-m3:567m"
+    ollama_url: str = "http://localhost:11434"
+    reranker: Literal["local", "fake"] = "local"
+    # Resolved when settings are built, not at import, so an unusual HOME is a config error, not a crash.
+    rerank_cache_dir: Path = Field(default_factory=lambda: Path.home() / ".cache" / "rag-rerank")
 
     @field_validator("database_url")
     @classmethod

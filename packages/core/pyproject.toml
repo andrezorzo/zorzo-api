@@ -10,6 +10,14 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.30",
     "psycopg[binary]>=3.2",
     "structlog>=24",
+    "numpy>=2.5.5",
+    "pgvector>=0.5.1",
+    "langchain-ollama>=1.2.0",
+    "langchain-text-splitters>=1.2.0",
+    "fastembed>=0.9.1",
+    "anyio>=4.16.0",
+    "phonenumbers>=9.0.42,<10",  # numbering plans change; uv.lock pins the vetted version
+    "huggingface-hub>=0.30",
 ]
 
 [build-system]

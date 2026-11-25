@@ -30,12 +30,29 @@ jobs:
       TEST_DATABASE_ADMIN_URL: postgresql://zorzo:zorzo@localhost:5432/postgres
       DATABASE_URL: postgresql://zorzo:zorzo@localhost:5432/zorzo
       APP_ENV: local
+      ORT_DISABLE_TELEMETRY: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.12.7"
       - run: uv sync --frozen
+      - name: Install gitleaks (ingest gate)
+        # Version and tarball hash come from infra/Dockerfile, their single owner.
+        run: |
+          V=$(sed -n 's/^ARG GITLEAKS_VERSION=//p' infra/Dockerfile)
+          SHA=$(sed -n 's/^ARG GITLEAKS_SHA256=//p' infra/Dockerfile)
+          test -n "$V" && test -n "$SHA"
+          cd /tmp
+          curl -fsSLO "https://github.com/gitleaks/gitleaks/releases/download/v${V}/gitleaks_${V}_linux_x64.tar.gz"
+          echo "${SHA}  gitleaks_${V}_linux_x64.tar.gz" | sha256sum -c -
+          tar -xzf "gitleaks_${V}_linux_x64.tar.gz" gitleaks
+          sudo mv gitleaks /usr/local/bin/
+      - name: Cache the rerank model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rag-rerank
+          key: rerank-mmarco-mMiniLMv2-L12-H384-v1-quint8
       - name: Lint
         run: uv run ruff check . && uv run ruff format --check .
       - name: Types

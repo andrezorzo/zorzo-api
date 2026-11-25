@@ -7,16 +7,39 @@ COPY pyproject.toml uv.lock ./
 COPY packages packages
 COPY apps apps
 COPY domains domains
+COPY config config
 RUN uv sync --frozen --no-dev
 ENV PATH="/app/.venv/bin:$PATH"
 # Run as an unprivileged user, so a bug in the app cannot act as root inside the container.
 RUN useradd --system --uid 10001 --no-create-home app
 ENV HOME=/tmp
-USER app
 
 FROM base AS dashboard
+USER app
 CMD ["python", "apps/dashboard/manage.py", "migrate", "--noinput"]
 
 FROM base AS api
+# The local rerank model is baked in and loaded offline (LLD "Libraries": local rerank).
+ENV RERANK_CACHE_DIR=/app/models/rerank ORT_DISABLE_TELEMETRY=1
+RUN python -c "from pathlib import Path; from rag_core.adapters.local_reranker import LocalReranker; \
+LocalReranker(Path('/app/models/rerank')).model()" \
+ && chown -R app /app/models
+ENV HF_HUB_OFFLINE=1
+USER app
 EXPOSE 8000
 CMD ["python", "-m", "rag_api"]
+
+FROM base AS ingest
+# gitleaks, pinned by version and by the tarball hash below (the owner of both values).
+ARG GITLEAKS_VERSION=8.30.1
+# The tarball's SHA-256, fixed here: a checksums file from the same release can't vouch for a tampered one.
+ARG GITLEAKS_SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+ && cd /tmp \
+ && curl -sSLO https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz \
+ && echo "${GITLEAKS_SHA256}  gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | sha256sum -c - \
+ && tar -xzf gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz -C /usr/local/bin gitleaks \
+ && rm -f gitleaks_* && apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* \
+ && mkdir /data && chown app /data
+USER app
+CMD ["python", "-m", "rag_ingest"]

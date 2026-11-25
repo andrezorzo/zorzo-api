@@ -35,6 +35,8 @@ dev = [
     "types-PyYAML",
     "import-linter>=2",
     "psycopg[binary]>=3.2",
+    "jsonschema>=4.26.0",
+    "types-jsonschema>=4.26.0.20261006",
 ]
 
 [tool.ruff]
@@ -57,7 +59,7 @@ explicit_package_bases = true
 exclude = ["apps/dashboard/data/migrations/"]
 
 [[tool.mypy.overrides]]
-module = ["dj_database_url.*"]
+module = ["dj_database_url.*", "onnxruntime.*"]
 ignore_missing_imports = true
 
 [tool.django-stubs]
@@ -89,11 +91,15 @@ forbidden_modules = ["rag_core"]
 name = "only core adapters use network clients"
 type = "forbidden"
 source_modules = ["rag_core", "rag_api", "rag_ingest", "domain_zorzo"]
-forbidden_modules = ["sqlalchemy", "psycopg", "httpx"]
+forbidden_modules = ["sqlalchemy", "psycopg", "httpx", "langchain_ollama", "fastembed", "pgvector", "huggingface_hub"]
 ignore_imports = [
     "rag_core.adapters.** -> sqlalchemy",
     "rag_core.adapters.** -> psycopg",
     "rag_core.adapters.** -> httpx",
+    "rag_core.adapters.** -> langchain_ollama",
+    "rag_core.adapters.** -> fastembed",
+    "rag_core.adapters.** -> pgvector",
+    "rag_core.adapters.** -> huggingface_hub",
 ]
 # Apps wire adapters at startup, so an app reaching a client through an adapter is allowed.
 allow_indirect_imports = true

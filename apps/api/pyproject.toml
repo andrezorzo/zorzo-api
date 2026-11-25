@@ -3,7 +3,12 @@ name = "rag-api"
 version = "0.1.0"
 description = "FastAPI app: HTTP routes, SSE, gate"
 requires-python = ">=3.13,<3.14"
-dependencies = ["rag-core", "fastapi>=0.115", "uvicorn[standard]>=0.30"]
+dependencies = [
+    "rag-core",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sse-starlette>=3.7.1",
+]
 
 [tool.uv.sources]
 rag-core = { workspace = true }

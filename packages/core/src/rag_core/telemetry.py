@@ -12,7 +12,12 @@ _TRACEBACKS = structlog.processors.ExceptionRenderer(
 
 def configure_logging(app_env: str, level: str = "INFO") -> None:
     renderer: structlog.typing.Processor = (
-        structlog.dev.ConsoleRenderer() if app_env == "local" else structlog.processors.JSONRenderer()
+        structlog.dev.ConsoleRenderer(
+            # Plain tracebacks never print frame locals, which can hold document text or a visitor's question.
+            exception_formatter=structlog.dev.plain_traceback
+        )
+        if app_env == "local"
+        else structlog.processors.JSONRenderer()
     )
     structlog.configure(
         processors=[

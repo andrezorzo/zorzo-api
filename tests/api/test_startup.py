@@ -79,3 +79,11 @@ def test_validates_the_database_url(url: str, accepted: bool) -> None:
         assert not accepted
     else:
         assert accepted
+
+
+def test_refuses_an_unreadable_limits_file(database_url: str, tmp_path: Path) -> None:
+    bad = tmp_path / "limits.yaml"
+    bad.write_text("ping_interval: [10\n")
+    result = _start({"DOMAIN": "zorzo", "DATABASE_URL": database_url, "LIMITS_FILE": str(bad)})
+    assert result.returncode == 1
+    assert "refusing to start" in result.stderr
