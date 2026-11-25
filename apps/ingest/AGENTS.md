@@ -42,9 +42,10 @@ in two cases only: a finished run (status `candidate` or `active`; the counts ar
 `--activate-version`) and a gate rejection (status `rejected`, counts null). It exits 1 on a rejection
 and on any other failure: a failed embedding, a refused activation, a failed publish, another run holding
 the lock. Those print no summary, only a log line, because what reached the database is uncertain; check
-`corpus_versions` (dashboard or psql). SIGTERM (`docker stop`) cancels the run like Ctrl-C and the
-command exits 143: before activation the candidate is rejected; during the publish the version stays
-active and unpublished, as after a failed publish, and running the ingest again recovers it.
+`corpus_versions` (dashboard or psql). SIGTERM (`docker stop`) cancels the run and exits 143; Ctrl-C
+does the same and exits 130. A stop while documents are checked or embedded rejects the candidate; a
+stop during activation or publishing leaves what the database had (a candidate, or an active version
+without published data, recovered by running the ingest again with `--activate`).
 
 ## Practices
 

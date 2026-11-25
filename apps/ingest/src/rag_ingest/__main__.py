@@ -3,8 +3,8 @@
     python -m rag_ingest [--source DIR] [--activate]   write a new candidate version, optionally activate it
     python -m rag_ingest --activate-version N          activate an existing candidate
 
-Prints one JSON summary line on success or a gate rejection, exits 1 on any failure and 143 on SIGTERM: the
-contract is in apps/ingest/AGENTS.md ("Commands").
+Prints one JSON summary line on success or a gate rejection; exits 1 on any failure, 143 on SIGTERM and 130
+on Ctrl-C. The contract is in apps/ingest/AGENTS.md ("Commands").
 """
 
 import argparse
@@ -89,6 +89,7 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
                 if args.activate:
                     await go_live(summary.version)
                     summary = replace(summary, status="active")
+        await db.close()  # before the summary: once it is printed, nothing is awaited that a signal could cut
         _summary(summary)
         return 0
     except IngestRejected as exc:  # the problems were logged by the pipeline
@@ -123,7 +124,7 @@ async def _run(args: argparse.Namespace, settings: IngestSettings, config: _Conf
     def on_sigterm() -> None:
         nonlocal terminated
         terminated = True
-        # A second SIGTERM then kills at once instead of cancelling the cleanup halfway.
+        # Handled once: a second SIGTERM can't cancel the cleanup halfway.
         loop.remove_signal_handler(signal.SIGTERM)
         if task is not None:
             task.cancel()
@@ -164,6 +165,8 @@ def main() -> None:
         sys.exit(1)
     try:
         sys.exit(asyncio.run(_run(args, settings, config)))
+    except KeyboardInterrupt:  # Ctrl-C: the cleanup ran and `ingest_interrupted` was logged
+        sys.exit(130)
     except ConfigError as exc:  # e.g. EMBEDDER=fake outside APP_ENV=local
         print(f"rag-ingest: refusing to run: {exc}", file=sys.stderr)
         sys.exit(1)

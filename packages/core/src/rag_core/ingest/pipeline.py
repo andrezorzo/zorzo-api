@@ -70,7 +70,8 @@ async def run_ingest(
             await store.reject(version)
         except Exception as reject_error:
             if isinstance(exc, IngestRejected):
-                # Its summary would claim a status the database may not have; the caller logs this error.
+                log.error("reject_failed", version=version)  # the traceback comes from the caller's log
+                # Its summary would claim a status the database may not have.
                 raise reject_error from exc
             log.exception("reject_failed", version=version)
         raise
