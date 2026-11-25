@@ -33,3 +33,6 @@ def configure_logging(app_env: str, level: str = "INFO") -> None:
     )
     # Library loggers (uvicorn, sqlalchemy, psycopg) follow the same level.
     logging.getLogger().setLevel(level)
+    # Except httpx's: at `info` it logs every request URL, and Telegram's URL holds the bot token.
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(max(logging.WARNING, logging.getLevelNamesMapping()[level]))

@@ -27,6 +27,19 @@ class Limits(BaseModel):
     rate_session_burst: int = Field(ge=1)
     rate_session_daily: int = Field(ge=1)
     timeout_turnstile: float = Field(gt=0)
+    # Model gateway (LLD "6.2 Daily budget", "6.6 Circuit breaker", "6.8 Free quota", "6.10 Alerts").
+    timeout_route: float = Field(gt=0)
+    timeout_rerank: float = Field(gt=0)
+    timeout_answer: float = Field(gt=0)
+    timeout_judge: float = Field(gt=0)
+    daily_budget_usd: float = Field(ge=0)
+    budget_paid_cutoff: float = Field(gt=0, le=1)
+    request_cost_cap_usd: float = Field(ge=0)
+    quota_warn: float = Field(gt=0, le=1)
+    breaker_failures: int = Field(ge=1)
+    breaker_window: float = Field(gt=0)
+    breaker_cooldown: float = Field(gt=0)
+    alert_repeat_after: float = Field(gt=0)
 
 
 def load_limits(path: Path) -> Limits:

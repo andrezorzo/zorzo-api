@@ -1,11 +1,13 @@
 """Health check (LLD "HTTP routes", `GET /api/healthz`)."""
 
+import asyncio
 from dataclasses import dataclass
 from typing import Literal
 
 import structlog
 
 from rag_core.ports import HealthProbe
+from rag_core.services.gateway import ModelGateway
 
 log = structlog.get_logger()
 
@@ -21,12 +23,18 @@ class HealthReport:
         return self.status == "ok"
 
 
-async def check(probe: HealthProbe) -> HealthReport:
+MODE_TIMEOUT_S = 2.0
+
+
+async def check(probe: HealthProbe, gateway: ModelGateway) -> HealthReport:
+    """`degraded` whenever a question would go search-only for a reason the gateway gives (budget at the cap,
+    every `answer` entry open, no `answer` entry within quota)."""
     try:
         await probe.ping()
-        degraded = await probe.degraded_today()
+        async with asyncio.timeout(MODE_TIMEOUT_S):
+            reason = await gateway.mode()
     except Exception:
         log.warning("health_check_failed", exc_info=True)
-        # The mode lives in the database: without it, it can't be known.
+        # The budget lives in the database: without it, the mode can't be known.
         return HealthReport(status="down", mode="unknown", db="down")
-    return HealthReport(status="ok", mode="degraded" if degraded else "normal", db="ok")
+    return HealthReport(status="ok", mode="normal" if reason is None else "degraded", db="ok")

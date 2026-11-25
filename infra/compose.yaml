@@ -74,6 +74,10 @@ services:
       # Turnstile's always-pass test secret (LLD "Development environment"); the real one is production-only.
       TURNSTILE_SECRET: 1x0000000000000000000000000000000AA
       SALT_SEED: ${SALT_SEED:?set SALT_SEED in infra/.env}
+      # The local models config (Ollama, no key); APP_ENV=local picks it too, this makes it explicit.
+      MODELS_FILE: config/models.local.yaml
+      # Only needed when MODELS_FILE points at a config with OpenRouter entries.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       # The API binds to 127.0.0.1 by default. To reach it from the host through the port below,
       # set HOST to 0.0.0.0 here (owner's decision).
     depends_on:

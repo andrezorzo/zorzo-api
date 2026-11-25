@@ -16,9 +16,17 @@ import pytest
 from fastapi import FastAPI
 from rag_api.main import create_app
 from rag_api.settings import ApiSettings
+from rag_core.adapters.gateway_reranker import GatewayReranker
+from rag_core.adapters.openai_compat import OpenAICompatProvider
 from rag_core.adapters.turnstile import TurnstileBotCheck
+from rag_core.ports import AlertKind
+from rag_core.services.alerts import Alerts
+from rag_core.services.breaker import Breakers
+from rag_core.services.gateway import ModelGateway
+from rag_core.services.quota import Quota
 from sqlalchemy import make_url
 
+from tests.fakes.openrouter import FakeOpenRouter
 from tests.fakes.turnstile import PASS_SECRET, FakeSiteverify
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -124,6 +132,8 @@ def api_settings(url: str, domain: str = "zorzo", **overrides: object) -> ApiSet
         "reranker": "fake",
         "turnstile_secret": PASS_SECRET,
         "salt_seed": "test-seed-" * 4,
+        "models_file": ROOT / "tests/fixtures/models.test.yaml",
+        "openrouter_api_key": "test-key",
     }
     return ApiSettings(**{**values, **overrides})  # type: ignore[arg-type]
 
@@ -138,10 +148,27 @@ ROOMY_LIMITS = {
 }
 
 
+class RecordingAlerter:
+    """Keeps the alerts the app sends, instead of a Telegram message or a log line."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str]] = []
+
+    async def send(self, kind: AlertKind, message: str) -> None:
+        self.sent.append((kind, message))
+
+    async def close(self) -> None:
+        pass
+
+
 def build_app(
-    settings: ApiSettings, siteverify: FakeSiteverify | None = None, limits: dict[str, object] | None = None
+    settings: ApiSettings,
+    siteverify: FakeSiteverify | None = None,
+    limits: dict[str, object] | None = None,
+    openrouter: FakeOpenRouter | None = None,
 ) -> FastAPI:
-    """The real app, with Turnstile's `siteverify` replaced by the stand-in (AC6) and the given limits."""
+    """The real app, with Turnstile's `siteverify` and OpenRouter replaced by stand-ins (AC6), alerts recorded
+    on `app.state.alerter` and the given limits."""
     app = create_app(settings)
     gate = app.state.gate
     gate.limits = app.state.limits = app.state.limits.model_copy(update={**ROOMY_LIMITS, **(limits or {})})
@@ -150,4 +177,20 @@ def build_app(
         gate.limits.timeout_turnstile,
         transport=(siteverify or FakeSiteverify()).transport(),
     )
+    # The gateway again, with the same stores, the stand-in's transport and the test limits.
+    old: ModelGateway = app.state.gateway
+    app.state.openrouter = fake = openrouter or FakeOpenRouter()
+    app.state.alerter = RecordingAlerter()
+    lim = gate.limits
+    base_url = old.config.providers["openrouter"].base_url
+    app.state.gateway = gateway = ModelGateway(
+        old.config,
+        {"openrouter": OpenAICompatProvider(base_url, "test-key", transport=fake.transport())},
+        old.budget,
+        Breakers(lim, old.breakers.event_log),
+        Quota(old.config, lim),
+        Alerts(old.alerts.store, app.state.alerter, lim),
+        lim,
+    )
+    app.state.rerankers = [GatewayReranker(gateway, lim), *app.state.local_rerankers]
     return app

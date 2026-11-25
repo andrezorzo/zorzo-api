@@ -7,5 +7,5 @@ class FakeReranker:
     def warm(self) -> None:
         pass
 
-    def rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
+    async def rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
         return list(hits)

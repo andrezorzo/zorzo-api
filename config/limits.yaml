@@ -16,3 +16,15 @@ rate_ip_daily: 40  # per UTC day
 rate_session_burst: 10
 rate_session_daily: 40  # per UTC day
 timeout_turnstile: 3  # seconds; Cloudflare sets no value
+timeout_route: 3  # seconds per model call of the stage; assess and reformulate use it too
+timeout_rerank: 2.5  # the remote rerank of 20 candidates took 1.0 to 2.0 s (measured 2026-11-25)
+timeout_answer: 12
+timeout_judge: 5
+daily_budget_usd: 0.10  # paid spend per UTC day
+budget_paid_cutoff: 0.8  # share of the day's budget at which paid entries stop
+request_cost_cap_usd: 0.01
+quota_warn: 0.8  # share of a provider's free daily requests at which the saving steps start
+breaker_failures: 5
+breaker_window: 60  # seconds
+breaker_cooldown: 60  # seconds
+alert_repeat_after: 43200  # seconds (12 h)

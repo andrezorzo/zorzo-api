@@ -1,0 +1,21 @@
+# Local profile (LLD "Development environment"): every chat stage on Ollama, no key; qwen3:1.7b is
+# provisional until the quick eval (F01-T06). The rerank chain is empty: only the local cross-encoder runs.
+providers:
+  ollama:
+    base_url: http://localhost:11434/v1
+stages:
+  route:
+    max_tokens: 200
+    chain:
+      - {provider: ollama, model: "qwen3:1.7b"}
+  rerank:
+    max_tokens: 1
+    chain: []
+  answer:
+    max_tokens: 700
+    chain:
+      - {provider: ollama, model: "qwen3:1.7b"}
+  judge:
+    max_tokens: 300
+    chain:
+      - {provider: ollama, model: "qwen3:1.7b"}

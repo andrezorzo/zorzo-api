@@ -11,6 +11,7 @@ from rag_core.events import StreamEvent
 
 from tests.conftest import api_settings, build_app, create_migrated_database, drop_database
 from tests.contract.sse import Stream, read
+from tests.fakes.openrouter import FakeOpenRouter
 from tests.fakes.turnstile import DUMMY_TOKEN
 
 QUESTION = {
@@ -221,3 +222,60 @@ def test_a_hung_search_ends_with_error_then_done(client: TestClient) -> None:
     finally:
         app.state.embedder = real
     assert stream.names()[-2:] == ["error", "done"]
+
+
+# AC5 (F01-T05): the remote rerank level leads, and falls to the local one.
+
+
+def hits(stream: Stream) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = stream.only("retrieval")[0].data["hits"]
+    return result
+
+
+def local_hits(client: TestClient) -> list[dict[str, Any]]:
+    """The hits with the local level only (the pass-through fake keeps the fused order)."""
+    app: Any = client.app
+    chain = app.state.rerankers
+    app.state.rerankers = app.state.local_rerankers
+    try:
+        return hits(ask(client))
+    finally:
+        app.state.rerankers = chain
+
+
+def test_remote_rerank_leads(client: TestClient) -> None:
+    app: Any = client.app
+    fake: FakeOpenRouter = app.state.openrouter
+    fake.rerank_scores = lambda docs: [float(i + 1) for i in range(len(docs))]  # the reverse of their order
+    local = local_hits(client)
+    remote = hits(ask(client))
+    [request] = fake.requests
+    assert request.path == "/rerank" and request.model == "test/rerank:free"
+    n = len(request.body["documents"])
+    assert n > 1
+    assert [h["score"] for h in remote] == [float(n - i) for i in range(min(n, 6))]
+    assert remote[0]["id"] != local[0]["id"]
+
+
+@pytest.mark.parametrize("failure", ["error", "hang", "malformed"])
+def test_falls_to_the_local_reranker_when_the_remote_one_fails(corpus_database: str, failure: str) -> None:
+    fake = FakeOpenRouter()
+    fake.script("test/rerank:free", failure)
+    app = build_app(api_settings(corpus_database), limits={"timeout_rerank": 0.2}, openrouter=fake)
+    with TestClient(app) as client:
+        local = local_hits(client)
+        stream = ask(client)
+    assert hits(stream) == local
+    assert stream.names()[-1] == "done"
+    assert len(fake.requests) == 1
+
+
+def test_rerank_goes_local_past_the_quota_warning(client: TestClient) -> None:
+    app: Any = client.app
+    fake: FakeOpenRouter = app.state.openrouter
+    for _ in range(8):  # 80% of the fixture's 10 free requests a day
+        ask(client)
+    assert len(fake.requests) == 8
+    stream = ask(client)
+    assert len(fake.requests) == 8
+    assert stream.names()[-1] == "done"

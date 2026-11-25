@@ -35,7 +35,7 @@ class Reverse:
     def warm(self) -> None:
         pass
 
-    def rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
+    async def rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
         return [SearchHit(h.id, h.title, h.content, float(n)) for n, h in enumerate(reversed(hits))]
 
 
@@ -43,7 +43,7 @@ class Broken:
     def warm(self) -> None:
         pass
 
-    def rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
+    async def rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
         raise RuntimeError("model missing")
 
 

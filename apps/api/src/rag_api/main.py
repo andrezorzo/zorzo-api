@@ -6,14 +6,24 @@ from contextlib import asynccontextmanager
 import anyio
 import structlog
 from fastapi import FastAPI
-from rag_core.adapters.factory import build_embedder, build_rerankers
+from rag_core.adapters.alerts import LogAlerter, PostgresAlertStore, TelegramAlerter
+from rag_core.adapters.budget import PostgresBudget
+from rag_core.adapters.event_log import PostgresEventLog
+from rag_core.adapters.factory import build_embedder, build_providers, build_rerankers
+from rag_core.adapters.gateway_reranker import GatewayReranker
 from rag_core.adapters.pgvector_store import PgVectorStore
 from rag_core.adapters.postgres import Database
 from rag_core.adapters.rate_limit import PostgresRateLimiter
 from rag_core.adapters.turnstile import TurnstileBotCheck
 from rag_core.domain import load_domain
-from rag_core.limits import load_limits
+from rag_core.limits import Limits, load_limits
+from rag_core.models_config import config_version, load_models
+from rag_core.ports import Alerter, Reranker
+from rag_core.services.alerts import Alerts
+from rag_core.services.breaker import Breakers
 from rag_core.services.gate import Gate
+from rag_core.services.gateway import ModelGateway
+from rag_core.services.quota import Quota
 from rag_core.telemetry import configure_logging
 
 from rag_api import ask, errors, health
@@ -33,6 +43,30 @@ async def _warm_rerankers(app: FastAPI) -> None:
             log.warning("rerank_warmup_failed", level=type(level).__name__, exc_info=True)
 
 
+def _alerter(settings: ApiSettings) -> Alerter:
+    # Settings require both Telegram values in production; locally the alert is a log line.
+    if settings.app_env == "production" and settings.telegram_bot_token and settings.telegram_chat_id:
+        return TelegramAlerter(
+            settings.telegram_bot_token.get_secret_value(), settings.telegram_chat_id.get_secret_value()
+        )
+    return LogAlerter()
+
+
+def _gateway(settings: ApiSettings, limits: Limits, db: Database) -> tuple[ModelGateway, str]:
+    """The model gateway and the `model_config_version` of what it loaded (LLD "Configuration")."""
+    models = load_models(settings.models_path)
+    gateway = ModelGateway(
+        models,
+        build_providers(models, settings.provider_keys(), settings.app_env),
+        PostgresBudget(db),
+        Breakers(limits, PostgresEventLog(db)),
+        Quota(models, limits),
+        Alerts(PostgresAlertStore(db), _alerter(settings), limits),
+        limits,
+    )
+    return gateway, config_version(models, limits)
+
+
 def create_app(settings: ApiSettings) -> FastAPI:
     configure_logging(settings.app_env, settings.log_level)
     # The domain package (domain_<name>, ADR 0011) holds what makes the generic core about one
@@ -50,6 +84,8 @@ def create_app(settings: ApiSettings) -> FastAPI:
         finally:
             try:
                 await app.state.gate.bot_check.close()
+                await app.state.gateway.close()
+                await app.state.gateway.alerts.alerter.close()
             finally:
                 await db.close()
 
@@ -58,7 +94,14 @@ def create_app(settings: ApiSettings) -> FastAPI:
     app.state.db = db
     app.state.limits = limits
     app.state.embedder = build_embedder(settings)
-    app.state.rerankers = build_rerankers(settings)
+    app.state.gateway, app.state.model_config_version = _gateway(settings, limits, db)
+    # The rerank chain (ADR 0009): the remote level when the `rerank` stage has entries, then the local one.
+    # Degraded questions use the local levels only, so they make no model call.
+    app.state.local_rerankers = build_rerankers(settings)
+    remote: list[Reranker] = (
+        [GatewayReranker(app.state.gateway, limits)] if app.state.gateway.config.stage("rerank").chain else []
+    )
+    app.state.rerankers = [*remote, *app.state.local_rerankers]
     app.state.vector_store = PgVectorStore(db, limits.rrf_k, limits.search_min_similarity)
     app.state.gate = Gate(
         TurnstileBotCheck(settings.turnstile_secret.get_secret_value(), limits.timeout_turnstile),
