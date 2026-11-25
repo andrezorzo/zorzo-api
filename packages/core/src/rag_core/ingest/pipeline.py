@@ -61,17 +61,17 @@ async def run_ingest(
     version = await store.create_candidate(embedder.tag)
     try:
         return await _fill_candidate(version, source, store, embedder, scanner, allowlist, limits)
-    except IngestRejected as exc:
-        # Logged before the reject, so the owner learns what to fix even if the reject fails.
-        for problem in exc.problems:
-            log.error("ingest_rejected", file=problem.file, rule=problem.rule)
-        await store.reject(version)  # if this fails, the error goes up and the run reports no summary
-        raise
-    except BaseException:  # failed or cancelled: the original error is what the caller sees
+    except BaseException as exc:  # rejected, failed or cancelled: the original error is what the caller sees
+        if isinstance(exc, IngestRejected):
+            # Logged before the reject, so the owner learns what to fix even if the reject fails.
+            for problem in exc.problems:
+                log.error("ingest_rejected", file=problem.file, rule=problem.rule)
         try:
             await store.reject(version)
-        except Exception:
+        except Exception as reject_error:
             log.exception("reject_failed", version=version)
+            if isinstance(exc, IngestRejected):
+                raise reject_error from exc  # its summary would claim a status the database may not have
         raise
 
 

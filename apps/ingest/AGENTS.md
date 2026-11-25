@@ -42,7 +42,8 @@ in two cases only: a finished run (status `candidate` or `active`; the counts ar
 `--activate-version`) and a gate rejection (status `rejected`, counts null). It exits 1 on a rejection
 and on any other failure: a failed embedding, a refused activation, a failed publish, another run holding
 the lock. Those print no summary, only a log line, because what reached the database is uncertain; check
-`corpus_versions` (dashboard or psql).
+`corpus_versions` (dashboard or psql). SIGTERM (`docker stop`) cancels the run like Ctrl-C: the candidate
+is rejected and the command exits 130.
 
 ## Practices
 

@@ -9,7 +9,9 @@ in apps/ingest/AGENTS.md ("Commands").
 
 import argparse
 import asyncio
+import contextlib
 import json
+import signal
 import sys
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -112,6 +114,18 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
         await db.close()
 
 
+async def _run(args: argparse.Namespace, settings: IngestSettings, config: _Config) -> int:
+    # SIGTERM (docker stop, a job timeout) cancels the run like Ctrl-C, so the candidate is still rejected.
+    task = asyncio.current_task()
+    if task is not None:
+        with contextlib.suppress(NotImplementedError):  # no signal handlers on Windows event loops
+            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
+    try:
+        return await _main(args, settings, config)
+    except asyncio.CancelledError:
+        return 130
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="rag_ingest", description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -137,7 +151,7 @@ def main() -> None:
         print(f"rag-ingest: refusing to start: {exc}", file=sys.stderr)
         sys.exit(1)
     try:
-        sys.exit(asyncio.run(_main(args, settings, config)))
+        sys.exit(asyncio.run(_run(args, settings, config)))
     except ConfigError as exc:  # e.g. EMBEDDER=fake outside APP_ENV=local
         print(f"rag-ingest: refusing to run: {exc}", file=sys.stderr)
         sys.exit(1)

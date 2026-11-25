@@ -1,9 +1,14 @@
 """AC1, AC2, AC3, AC8: the ingest command, run as a subprocess against a fresh migrated database."""
 
 import json
+import os
 import secrets
 import shutil
+import signal
+import socket
 import string
+import subprocess
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -262,3 +267,33 @@ def test_publishes_corpus_and_example_data_on_activation(db: str, source: Path, 
         {"id": e["id"], "lang": e["lang"], "text": e["text"]} for e in yaml.safe_load(EXAMPLES.read_text())
     ]
     assert examples == expected
+
+
+def test_sigterm_rejects_the_candidate(db: str, source: Path, tmp_path: Path) -> None:
+    # An "Ollama" that accepts the connection and never answers: the run waits inside embedding.
+    with socket.create_server(("127.0.0.1", 0)) as server:
+        server.settimeout(60)
+        port = server.getsockname()[1]
+        process = subprocess.Popen(
+            [sys.executable, "-m", "rag_ingest", "--source", str(source)],
+            cwd=ROOT,
+            env={
+                **os.environ,
+                "DATABASE_URL": db,
+                "APP_ENV": "local",
+                "DOMAIN": "zorzo",
+                "EMBEDDER": "ollama",
+                "OLLAMA_URL": f"http://127.0.0.1:{port}",
+                "DATA_DIR": str(tmp_path / "data"),
+            },
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        connection, _ = server.accept()  # embedding has started
+        with connection:
+            process.send_signal(signal.SIGTERM)
+            output, _ = process.communicate(timeout=60)
+    assert process.returncode == 130, output
+    assert "ingest_interrupted" in output
+    assert rows(db, "SELECT status FROM corpus_versions") == [("rejected",)]
