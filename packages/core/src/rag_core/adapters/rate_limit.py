@@ -40,6 +40,8 @@ RETURNING b.key
 # A take touches a few rows: Postgres itself ends a statement that waits on a lock or runs long, so a lock
 # wait fails in seconds. A connection that stops answering altogether is bounded only by the caller's deadline
 # (cancelling a query on a dead socket waits on that socket).
+LOCK_TIMEOUT_S = PROBE_TIMEOUT_S  # Postgres's statement and lock timeout for a take
+
 BOUNDS = text("SELECT set_config('statement_timeout', :ms, true), set_config('lock_timeout', :ms, true)")
 
 LEVELS = text(f"""
@@ -66,7 +68,7 @@ class PostgresRateLimiter:
             "refills": [b.refill_per_s for b in buckets],
             "now": now,
         }
-        bounds = {"ms": str(int(PROBE_TIMEOUT_S * 1000))}
+        bounds = {"ms": str(int(LOCK_TIMEOUT_S * 1000))}
         async with self.db.engine.connect() as conn:
             async with conn.begin() as tx:
                 await conn.execute(BOUNDS, bounds)
