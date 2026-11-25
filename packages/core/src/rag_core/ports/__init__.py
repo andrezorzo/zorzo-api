@@ -50,7 +50,7 @@ class Bucket:
 
 
 class StoreUnavailable(Exception):
-    """A store refused or failed the request (database down, a lock wait it ended)."""
+    """A store refused or failed the request (database down, a lock wait or long statement it ended)."""
 
 
 class RateLimiter(Protocol):
