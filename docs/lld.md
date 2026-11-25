@@ -175,7 +175,8 @@ domain pieces, not ports (section 6.5).
   read-only, except the "remove from public view" action on traces, which sets `removed_at` and writes a
   `trace_removals` row.
 - **Secrets:** read once at startup from settings; never logged, never in a trace. The canary lives in the
-  environment.
+  environment. With `APP_ENV=production` the API refuses to start on Turnstile's test secrets or on the
+  published local `SALT_SEED` (`infra/.env.example`), with which anyone could reverse the hashed IPs.
 
 ### Concurrency and idempotency
 
@@ -543,6 +544,10 @@ States of one chain entry's breaker; it lives in the API process memory.
 - Over the limit: 429 with `Retry-After` in whole seconds, the longest wait among the empty buckets (until one
   token refills, or until the next UTC midnight for a day bucket), before the stream opens and before any
   model call.
+- A database that fails is `503 unavailable`. Postgres ends a take's statement that waits on a lock or runs
+  past 2 s (`LOCK_TIMEOUT_S` in the rate-limit adapter), so a stuck row fails in seconds; the whole gate
+  runs within `REQUEST_DEADLINE`, which bounds the rest. A question the gate passes keeps what is left of
+  that deadline for the answer.
 - A cache hit still counts against the limit.
 
 ### 6.8 Free quota
@@ -765,7 +770,8 @@ What replaces each production service is in the HLD ("Deployment and environment
   from the host use `localhost`. Both come from settings.
 - **Edge pieces that don't exist locally:** a local Caddyfile without the origin-secret check; the client IP
   comes from the socket when the CloudFront header is absent; Turnstile uses Cloudflare's test keys (always
-  pass, always fail), which the tests also use.
+  pass, always fail), which the tests also use. The always-pass test secret accepts any token, not only the
+  dummy one the test site keys produce.
 - **DataPublisher:** the local adapter writes the brain data to a folder the local Caddy serves.
 - **Alerter and tracing:** the alerter only logs; LangSmith is on only when a key is present.
 - **Tests:** a separate test database per session, with the Django migrations applied by a fixture; the fake
