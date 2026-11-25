@@ -44,8 +44,9 @@ and on any other failure: a failed embedding, a refused activation, a failed pub
 the lock. Those print no summary, only a log line, because what reached the database is uncertain; check
 `corpus_versions` (dashboard or psql). SIGTERM (`docker stop`) cancels the run and exits 143; Ctrl-C
 does the same and exits 130. A stop while documents are checked or embedded rejects the candidate; a
-stop during activation or publishing leaves what the database had (a candidate, or an active version
-without published data, recovered by running the ingest again with `--activate`).
+stop during activation or publishing leaves what the database had: a candidate, activated later with
+`--activate-version N`, or an active version without published data, recovered by a new ingest, its
+eval run and `--activate-version` (locally, `--activate` in one run).
 
 ## Practices
 

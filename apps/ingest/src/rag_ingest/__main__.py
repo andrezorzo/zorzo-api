@@ -99,8 +99,8 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
         log.error("activation_refused", reason=str(exc))
         return 1
     except PublishFailed as exc:
-        # Live but unpublished. Recovery: run the ingest again; it publishes a new version (unchanged chunks
-        # are copied, not embedded again).
+        # Live but unpublished. Recovery: a new ingest (unchanged chunks are copied, not embedded again), its
+        # eval run, then --activate-version; locally, --activate does it in one run.
         log.exception("publish_failed", version=exc.version)
         return 1
     except ConfigError:
@@ -124,7 +124,7 @@ async def _run(args: argparse.Namespace, settings: IngestSettings, config: _Conf
     def on_sigterm() -> None:
         nonlocal terminated
         terminated = True
-        # Handled once: a second SIGTERM can't cancel the cleanup halfway.
+        # Handled once: a second SIGTERM gets the default action and kills the process, cleanup or not.
         loop.remove_signal_handler(signal.SIGTERM)
         if task is not None:
             task.cancel()
