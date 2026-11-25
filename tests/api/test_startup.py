@@ -114,5 +114,6 @@ def test_refuses_the_published_salt_seed_in_production(database_url: str) -> Non
 
 
 def test_the_guarded_seed_is_the_published_example() -> None:
-    example = (Path(__file__).resolve().parents[2] / "infra/.env.example").read_text()
-    assert f"SALT_SEED={PUBLISHED_LOCAL_SEED}\n" in example
+    root = Path(__file__).resolve().parents[2]
+    assert f"SALT_SEED={PUBLISHED_LOCAL_SEED}\n" in (root / "infra/.env.example").read_text()
+    assert f"SALT_SEED={PUBLISHED_LOCAL_SEED} " in (root / "apps/api/AGENTS.md").read_text()

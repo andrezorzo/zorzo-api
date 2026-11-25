@@ -47,7 +47,7 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
     question = await state.gate.check(body.q, body.turnstile, asker, deadline_at)
     left = deadline_at - loop.time()
     if left <= 0:  # the gate finished on the deadline: nothing left for the answer
-        log.warning("deadline_exceeded", stage="gate")
+        log.warning("deadline_exceeded", stage="after_gate")
         raise ApiError(ErrorCode.UNAVAILABLE)
     corpus = await corpus_service.servable(state.vector_store, state.embedder.tag, left)
     trace_id: str = request.state.trace_id

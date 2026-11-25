@@ -49,24 +49,30 @@ class Gate:
         self.app_env = app_env
 
     async def check(self, question: str, token: str, asker: Asker, deadline_at: float) -> str:
-        """The normalized question, or `ApiError` (403, 422, 429, or 503 without a viewer address).
+        """The normalized question, or `ApiError`: 403, 422, 429, or 503 (no viewer address in production, the
+        database down, or the deadline reached).
 
         `deadline_at` is the request's deadline on the event loop's clock; the gate never outlives it.
         """
+        step = ["bot_check"]  # the step running, for the log line when the deadline cuts it
         try:
-            async with asyncio.timeout_at(deadline_at):
-                return await self._check(question, token, asker)
-        except TimeoutError as exc:  # a slow provider or database used the request's time
-            log.warning("deadline_exceeded", stage="gate")
+            async with asyncio.timeout_at(deadline_at) as scope:
+                return await self._check(question, token, asker, step)
+        except TimeoutError as exc:
+            if not scope.expired():
+                raise  # a timeout of some step's own, not the request's deadline
+            # A stuck database is an outage; a slow provider is only slow.
+            (log.error if step[0] == "rate_limit" else log.warning)("deadline_exceeded", stage=step[0])
             raise ApiError(ErrorCode.UNAVAILABLE) from exc
 
-    async def _check(self, question: str, token: str, asker: Asker) -> str:
+    async def _check(self, question: str, token: str, asker: Asker, step: list[str]) -> str:
         if not await self.bot_check.verify(token):
             raise ApiError(ErrorCode.BOT_CHECK_FAILED)
         text = normalize(question, self.limits)
         now = self.clock()
         ip = hashed_ip(viewer_ip(asker.viewer_address, asker.peer, self.app_env), self.salt_seed, now.date())
         buckets = self._buckets(ip, asker.session, now)
+        step[0] = "rate_limit"
         try:
             refused = await self.limiter.take(buckets, now)
         except StoreUnavailable as exc:  # a database down is `unavailable` (LLD "Errors")

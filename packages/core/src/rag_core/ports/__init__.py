@@ -50,7 +50,7 @@ class Bucket:
 
 
 class StoreUnavailable(Exception):
-    """A store couldn't answer in time, or at all (database down, lock wait, timeout)."""
+    """A store refused or failed the request (database down, a lock wait it ended)."""
 
 
 class RateLimiter(Protocol):
@@ -58,7 +58,8 @@ class RateLimiter(Protocol):
         """Take one token from every bucket, or from none.
 
         None when every bucket had one; otherwise the empty buckets, each with the seconds until it holds one.
-        A store that can't answer raises `StoreUnavailable`, which the gate answers as `unavailable`.
+        A store that fails raises `StoreUnavailable`, which the gate answers as `unavailable`. One that stops
+        answering may block: the caller bounds the call.
         """
 
 

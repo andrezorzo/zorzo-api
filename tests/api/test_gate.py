@@ -230,3 +230,18 @@ def test_the_gate_never_outlives_the_request_deadline(make_api: Any, corpus_data
     assert error_code(response) == "unavailable"
     assert any(line["event"] == "deadline_exceeded" for line in logs)
     assert bucket_keys(corpus_database, str(session)) == []
+
+
+def test_a_take_cut_by_the_deadline_takes_nothing(make_api: Any, corpus_database: str) -> None:
+    api, session = make_api(limits={"request_deadline": 0.5}), uuid.uuid4()
+    key = f"session:{session}:burst"
+    with psycopg.connect(corpus_database) as conn:  # holds the row past the deadline, below the lock timeout
+        conn.execute("INSERT INTO rate_buckets (key, tokens, refilled_at) VALUES (%s, 5, now())", (key,))
+        conn.execute("SELECT 1 FROM rate_buckets WHERE key = %s FOR UPDATE", (key,))
+        with capture_logs() as logs:
+            response = api.ask(**asking(session=session))
+        conn.rollback()
+    assert response.status_code == 503
+    assert any(line["event"] == "deadline_exceeded" and line["stage"] == "rate_limit" for line in logs)
+    assert bucket_keys(corpus_database, str(session)) == []  # the held insert rolled back; nothing taken
+    assert api.ask(**asking(session=session)).status_code == 200  # the pool still serves the next question
