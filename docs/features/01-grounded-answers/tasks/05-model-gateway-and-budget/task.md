@@ -1,6 +1,6 @@
 # 05: Model gateway and budget
 
-**Status:** to do
+**Status:** in progress
 
 **What to build:** The system calls models through per-stage chains across providers and never spends past the budget cap: when the budget runs out or every provider is down, questions are answered in degraded mode and André is alerted.
 
