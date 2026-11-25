@@ -218,3 +218,15 @@ def test_a_stuck_database_is_unavailable_in_seconds(make_api: Any, corpus_databa
     assert response.status_code == 503
     assert error_code(response) == "unavailable"
     assert elapsed < 5  # bounded by the limiter's own timeout, not the 20 s request deadline
+
+
+def test_the_gate_never_outlives_the_request_deadline(make_api: Any, corpus_database: str) -> None:
+    # The bot check passes after the request's deadline: the rate limit is never tried, and no token is taken.
+    api, session = make_api(limits={"request_deadline": 0.2}), uuid.uuid4()
+    api.siteverify.mode = "slow"
+    with capture_logs() as logs:
+        response = api.ask(**asking(session=session))
+    assert response.status_code == 503
+    assert error_code(response) == "unavailable"
+    assert any(line["event"] == "rate_limit_failed" for line in logs)
+    assert bucket_keys(corpus_database, str(session)) == []

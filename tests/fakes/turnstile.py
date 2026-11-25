@@ -16,7 +16,8 @@ DUMMY_TOKEN = "XXXX.DUMMY.TOKEN.XXXX"  # what the test site keys produce
 
 
 class FakeSiteverify:
-    """Answers like Cloudflare; `mode` makes it fail: "error" (HTTP 500), "hang" or "garbage" (not JSON)."""
+    """Answers like Cloudflare; `mode` makes it fail: "error" (HTTP 500), "hang" or "garbage" (not JSON), or
+    answer 0.3 s late ("slow")."""
 
     def __init__(self) -> None:
         self.mode = "ok"
@@ -28,6 +29,8 @@ class FakeSiteverify:
             return httpx.Response(500, json={"success": False, "error-codes": ["internal-error"]})
         if self.mode == "hang":
             await asyncio.sleep(60)
+        if self.mode == "slow":  # answers, but late
+            await asyncio.sleep(0.3)
         if self.mode == "garbage":
             return httpx.Response(200, text="<html>")
         form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}

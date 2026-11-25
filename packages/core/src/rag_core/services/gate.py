@@ -48,8 +48,12 @@ class Gate:
         self.salt_seed = salt_seed
         self.app_env = app_env
 
-    async def check(self, question: str, token: str, asker: Asker) -> str:
-        """The normalized question, or `ApiError` (403, 422, 429, or 503 without a viewer address)."""
+    async def check(self, question: str, token: str, asker: Asker, deadline_at: float) -> str:
+        """The normalized question, or `ApiError` (403, 422, 429, or 503 without a viewer address).
+
+        `deadline_at` is the request's deadline on the event loop's clock: the gate never outlives it, so a
+        question it charged a token for always gets the rest of the request.
+        """
         if not await self.bot_check.verify(token):
             raise ApiError(ErrorCode.BOT_CHECK_FAILED)
         text = normalize(question, self.limits)
@@ -57,8 +61,8 @@ class Gate:
         ip = hashed_ip(viewer_ip(asker.viewer_address, asker.peer, self.app_env), self.salt_seed, now.date())
         buckets = self._buckets(ip, asker.session, now)
         try:
-            # The store ends a stuck statement itself; this bounds the rest (a wait for a free connection).
-            async with asyncio.timeout(self.limits.request_deadline):
+            # The store bounds its statements; this bounds the rest (a wait for a free connection).
+            async with asyncio.timeout_at(deadline_at):
                 refused = await self.limiter.take(buckets, now)
         except (StoreUnavailable, TimeoutError) as exc:  # a database down is `unavailable` (LLD "Errors")
             log.error("rate_limit_failed", error=str(exc) or type(exc).__name__)

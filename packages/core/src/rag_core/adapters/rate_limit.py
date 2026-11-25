@@ -5,6 +5,7 @@ bucket was empty, the transaction rolls back, so a refused question takes nothin
 two requests that share buckets lock them in the same order and can't deadlock.
 """
 
+import asyncio
 from datetime import datetime
 
 from sqlalchemy import bindparam, text
@@ -37,8 +38,9 @@ WHERE (SELECT {_LEVEL} FROM i WHERE i.key = b.key) >= 1
 RETURNING b.key
 """).bindparams(*_ARRAYS)
 
-# A take touches a few rows: Postgres itself ends a statement that waits on a lock or runs long, so a stuck
-# take fails in seconds without depending on a cancel from the client. The caller bounds the whole call.
+# A take touches a few rows: Postgres itself ends a statement that waits on a lock or runs long, and the
+# client gives the statements twice that (a socket that stops answering before these settings apply). The
+# wait for a pooled connection is the caller's to bound.
 BOUNDS = text("SELECT set_config('statement_timeout', :ms, true), set_config('lock_timeout', :ms, true)")
 
 LEVELS = text(f"""
@@ -55,7 +57,7 @@ class PostgresRateLimiter:
         """See `RateLimiter.take`."""
         try:
             return await self._take(buckets, now)
-        except (OSError, SQLAlchemyError) as exc:
+        except (OSError, SQLAlchemyError) as exc:  # TimeoutError is an OSError
             raise StoreUnavailable(type(exc).__name__) from exc
 
     async def _take(self, buckets: list[Bucket], now: datetime) -> list[tuple[Bucket, float]] | None:
@@ -66,7 +68,7 @@ class PostgresRateLimiter:
             "now": now,
         }
         bounds = {"ms": str(int(PROBE_TIMEOUT_S * 1000))}
-        async with self.db.engine.connect() as conn:
+        async with self.db.engine.connect() as conn, asyncio.timeout(2 * PROBE_TIMEOUT_S):
             async with conn.begin() as tx:
                 await conn.execute(BOUNDS, bounds)
                 taken = (await conn.execute(TAKE, params)).scalars().all()

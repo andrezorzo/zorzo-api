@@ -100,3 +100,13 @@ def test_refuses_an_unreadable_limits_file(database_url: str, tmp_path: Path) ->
 def test_refuses_a_turnstile_test_secret_in_production(database_url: str) -> None:
     with pytest.raises(ValidationError, match="test secret"):
         api_settings(database_url, app_env="production")
+
+
+def test_refuses_the_published_salt_seed_in_production(database_url: str) -> None:
+    with pytest.raises(ValidationError, match="SALT_SEED"):
+        api_settings(
+            database_url,
+            app_env="production",
+            turnstile_secret="0x4AAAAAAAreal-looking-secret",
+            salt_seed="local-salt-seed-change-me-0123456789",
+        )
