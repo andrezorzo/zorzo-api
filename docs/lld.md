@@ -16,7 +16,7 @@ Status labels used below: **existing**, **planned**, **to detail** (named, behav
 | Database schema | Django migrations in `apps/dashboard/data/migrations/` |
 | Environment variables (type, required, default) | Each app's settings class: `AppSettings` in core and its subclasses in the API and ingest; the dashboard's Django settings |
 | Rule values | `config/limits.yaml`; values decided in section 9 of this document |
-| Model and rerank chains | `config/models.yaml`, `config/models.local.yaml` (planned) |
+| Model and rerank chains | `config/models.yaml`, `config/models.local.yaml` (planned); schema in section 3 "Configuration" |
 | Commands and project practices | `README.md`, `AGENTS.md` |
 | Where each piece of code lives, and why | `docs/code-map.md` (planned; also a corpus source) |
 | Front rendering, the 3D brain and its data | `zorzo-site`'s `docs/lld.md` |
@@ -135,12 +135,15 @@ connection; the domain is chosen by `DOMAIN` and loaded by the apps, never by `c
 | VectorStore | `search` | Query vector, query text, k, filters, corpus version | Hits with ids and scores | Hybrid in one query (vector + full-text + RRF); reads only the given version; a vector hit counts only at `SEARCH_MIN_SIMILARITY` or above; full text matches any term of the question (OR), in English and Portuguese |
 | VectorStore | `upsert` | Chunks, candidate version | Written count | Idempotent by content hash |
 | VectorStore | `activate` | Version | — | Atomic; exactly one active version (section 6.1) |
-| ModelGateway | `complete` / `stream` | Stage, messages, optional output schema, deadline | Result, usage, cost, provider | Tries the stage's chain in order; respects deadline and remaining budget; skips open breakers; records cost; raises "unavailable" when the chain is exhausted |
+| ModelGateway | `complete` / `stream` | Stage, messages, optional output schema, deadline, the request's spend | Result, usage, cost, provider | Tries the stage's chain in order; respects deadline, the day's budget and `REQUEST_COST_CAP_USD`; skips open breakers and entries past the quota warning; records cost; raises "unavailable" when the chain is exhausted; `stream` falls back only before the first token |
+| ModelGateway | `rerank` | Query, documents, deadline | Scores per document | The `rerank` stage's chain under the same rules; raises "unavailable" so the Reranker falls to the local level |
+| ModelGateway | `mode` | — | Normal, or the degraded reason | `budget_exhausted`, `models_unavailable` (every `answer` entry open) or `quota_exhausted` (no `answer` entry within quota and budget); the route checks it after the gate |
 | Embedder | `embed` | Texts | Vectors + model tag | Always the pinned tag |
-| Reranker | `rerank` | Query, candidates, k | Ordered candidates + level used | Never raises: falls to the next level (ADR 0009) |
+| Reranker | `rerank` (async) | Query, candidates, k | Ordered candidates + level used | A level may raise; the retrieval service falls to the next level, then to the fused order (ADR 0009) |
 | BotCheck | `verify` | Token | Pass or fail | Fails closed when the provider errors |
 | TraceSink | `record` | Step event | — | Feeds the SSE stream, the public trace and LangSmith; LangSmith is asynchronous and never blocks |
-| Alerter | `send` | Alert kind, message | — | Deduplicated per incident (section 6.10) |
+| Alerter | `send` | Alert kind, message | — | Delivers one message; the alerts service decides when to send (section 6.10) |
+| EventLog | `write` | Level, component, event, fields | — | One `log_events` row, written in the background; never blocks the caller |
 | DataPublisher | `publish` | Brain and corpus data for a version | Manifest | S3 adapter writes `data/<hash>/` and invalidates only the manifest; local adapter writes a folder the local Caddy serves |
 
 Core modules: Retrieval and Ingest pipeline **existing**; Gate, Guard, Agent graph, Verification, Model gateway,
@@ -230,7 +233,10 @@ domain pieces, not ports (section 6.5).
 - Structured JSON on stdout through structlog, collected by Docker and journald. Every line carries
   `trace_id`, level and an event name.
 - Edge and infrastructure events from the closed catalog (fallback, breaker transition, rate limit, deploy,
-  ingest, snapshot failure) also go to `log_events` through the TraceSink.
+  ingest, snapshot failure) also go to `log_events`: per-request ones through the TraceSink, the others
+  (breaker transitions) through the EventLog port.
+- The `httpx` and `httpcore` loggers run at `warning`: at `info` they log every request URL, and Telegram's
+  URL holds the bot token.
 - Levels: `info` for one summary line per request; `warning` for fallback, breaker opened, retry; `error` for
   bugs (recursion limit, "context too long", parse failure after the retry).
 - Never logged: secrets, raw IP, the question before scrubbing, Turnstile tokens, full prompts (those exist
@@ -242,7 +248,16 @@ domain pieces, not ports (section 6.5).
   before it serves (fail fast).
 - `config/limits.yaml`, `config/models*.yaml` and the domain files are loaded into Pydantic models at
   startup; an invalid file stops the app.
-- `model_config_version` is a hash of `models.yaml`, `limits.yaml` and the prompts, recorded with every answer.
+- `model_config_version` is the SHA-256 of the canonical JSON of the loaded models config, limits and
+  prompts, recorded with every answer; formatting and comments don't change it, so they don't invalidate the
+  answer cache. The models file is `MODELS_FILE`, by default `config/models.yaml`, or `config/models.local.yaml`
+  with `APP_ENV=local`.
+- **Models config:** `providers` (each with `base_url`, optional `key_env` and optional `daily_requests`, the
+  free-request limit per UTC day) and `stages`, exactly `route`, `rerank`, `answer` and `judge`, each with
+  `max_tokens` and an ordered `chain` of `{provider, model}` entries; a paid entry has `paid: true` and
+  `price` (`input_per_mtok`, `output_per_mtok`, US$ per million tokens). Only `rerank` may have an empty
+  chain. In production every provider a chain uses needs its key, or the app doesn't start. Other model
+  calls of the graph map onto these stages (`assess` and `reformulate` to `route`, `repair` to `answer`).
 
 ## 4. Data
 
@@ -317,7 +332,7 @@ Conventions:
 | Method and path | Status | Input | Output | Behavior |
 | --- | --- | --- | --- | --- |
 | `POST /api/v1/ask` | existing (search-only until the agent graph) | `q` (1 to `MAX_QUESTION_CHARS` characters after trimming), `session` (UUID), `turnstile` (non-empty; verified by the gate) | `200 text/event-stream`; errors per section 3, with `503 unavailable` also when there is no active corpus version or its `embed_model_tag` differs from the API's embedder | The gate runs before the stream opens; after it passes, the events below |
-| `GET /api/healthz` | existing | — | `200 {status: ok, mode: normal \| degraded, db: ok}`; `503 {status: down, mode: unknown, db: down}` when the database can't be reached | Never cached (`Cache-Control: no-store`; CloudFront caches no error responses for `/api/*`), no gate. Used by the front, the deploy smoke test and UptimeRobot |
+| `GET /api/healthz` | existing | — | `200 {status: ok, mode: normal \| degraded, db: ok}`, with `degraded` when the gateway's mode is a degraded reason (section 2, ModelGateway `mode`); `503 {status: down, mode: unknown, db: down}` when the database can't be reached | Never cached (`Cache-Control: no-store`; CloudFront caches no error responses for `/api/*`), no gate. Used by the front, the deploy smoke test and UptimeRobot |
 
 JSON read routes for traces, evals, defenses, status and sources are not part of the API: the dashboard
 serves those pages from the database (section 8, ADR 0015).
@@ -432,9 +447,12 @@ States of the day's budget row; the day is UTC, so every visitor sees the same "
 
 - In `paid_disabled` the chain stops before its paid entries; free entries still run.
 - In `degraded` every question is answered in search-only mode; the `degraded` event gives the reason.
-- Reserve, then settle (section 3). The estimate is `prompt_tokens × input_price + max_tokens × output_price`.
-  If it doesn't fit in what is left, the call doesn't happen and the next chain entry, or search-only, takes
-  over.
+- Reserve, then settle (section 3). The estimate is `prompt_tokens × input_price + max_tokens × output_price`,
+  with `prompt_tokens` counted as `ceil(characters / 3)` (conservative for English and Portuguese, no
+  tokenizer). If it doesn't fit in what is left, the call doesn't happen and the next chain entry, or
+  search-only, takes over. A failed call settles with actual 0, releasing its reservation.
+- The state moves on settle: when the settled spend crosses the cutoff, `paid_disabled_at` is set; at the cap,
+  `degraded_at`. A reservation needs `paid_disabled_at` empty. `requests` counts paid calls.
 - Per-request ceiling `REQUEST_COST_CAP_USD`: before each model call, if the estimate doesn't fit in what the
   request has left, the agent answers with what it has.
 - Free calls cost 0 in this table; their limit is the quota (section 6.8).
@@ -528,6 +546,12 @@ stateDiagram-v2
 States of one chain entry's breaker; it lives in the API process memory.
 
 - An open breaker skips its chain entry without waiting for a timeout.
+- Failures: a timeout, a transport error, a 5xx or a malformed body counts toward `BREAKER_FAILURES`; a 429
+  opens the breaker at once. Each falls to the next entry; there is no same-entry retry (the next entry is
+  the retry). Output that parses but fails the requested schema is retried once on the same entry, then
+  falls through, and never counts: the provider works, the model missed.
+- Half-open lets exactly one trial call through; other calls skip the entry until it ends.
+- Each entry gets `min(TIMEOUT_<STAGE>, time left)`; an entry with no time left is not tried.
 - Every transition is written to `log_events`; `/dash/` shows the latest state per provider.
 - In-memory state is correct because the API runs as one process (section 6.3, "Process model").
 
@@ -552,10 +576,12 @@ States of one chain entry's breaker; it lives in the API process memory.
 
 ### 6.8 Free quota
 
-- OpenRouter's daily count comes from its key endpoint; other providers' counts come from response headers
-  or a local counter.
+- Each provider's count for the UTC day comes from its response headers (`x-ratelimit-remaining-requests`,
+  `x-ratelimit-limit-requests`) when present, otherwise from a local counter against `daily_requests` in the
+  models config. Counts live in process memory: a restart forgets them, and the provider's 429 then opens
+  the breaker, so the cost is one failed call. OpenRouter's key endpoint is not polled.
 - Above `QUOTA_WARN` of the day's limit, in order: rerank goes local; answers move to the paid entries (if the
-  budget allows); then search-only.
+  budget allows); then search-only, with reason `quota_exhausted`.
 
 ### 6.9 Answer cache
 
@@ -588,6 +614,11 @@ Kinds: `site_down`, `budget_exhausted`, `providers_down`, `backup_failed`, `rest
   API, so it arrives when the VPS is down; it has no row in `alert_states`.
   `budget_exhausted` and `providers_down` are detected by the API during requests. The other three come from
   the background tasks (section 7).
+- `budget_exhausted` opens when the gateway sees the day `degraded` and closes on the first check of a new UTC
+  day; `providers_down` opens when every `answer` entry's breaker is open and closes when one closes.
+- An alerts service in core owns these rules over `alert_states`; the Alerter only delivers (Telegram in
+  production, a log line locally). Sending runs in the background with a short timeout and never fails a
+  request; messages carry the kind and counts, never visitor data.
 
 ### 6.11 Retention
 
@@ -741,6 +772,7 @@ endpoints and per-environment switches.
 | `OLLAMA_URL`, `EMBED_MODEL_TAG` | api, ingest | Embedding endpoint and pinned tag | env file |
 | `EMBEDDER`, `RERANKER` | api, ingest | `ollama` / `local`, or `fake` (deterministic, accepted only with `APP_ENV=local`) | env file |
 | `LIMITS_FILE` | api, ingest | Path of `limits.yaml` | env file |
+| `MODELS_FILE` | api | Path of the models config; default per `APP_ENV` (section 3 "Configuration") | env file |
 | `RERANK_CACHE_DIR` | api | Where the rerank model is baked in the image | env file |
 | `ORT_DISABLE_TELEMETRY` | api | `1`: onnxruntime sends no usage telemetry to Microsoft (also set in code) | image |
 | `DATA_DIR` | ingest | Folder the local DataPublisher writes | env file |
@@ -749,7 +781,7 @@ endpoints and per-environment switches.
 | `TURNSTILE_SECRET` | api | Bot check (the public site key is in the front) | secret |
 | `ORIGIN_SECRET` | caddy | CloudFront origin header | secret |
 | `CANARY`, `SALT_SEED` | api | Prompt-leak canary; seed of the daily IP salt | secret |
-| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | api, dashboard, timers | Alerts | secret |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | api, dashboard, timers | Alerts; required by the API in production | secret |
 | `UPTIMEROBOT_API_KEY` | dashboard | Uptime pull | secret |
 | `AWS_DATA_WRITER_*`, `S3_BUCKET`, `CLOUDFRONT_DISTRIBUTION_ID` | ingest | Writes `data/` and invalidates the manifest | secret / env file |
 | `AWS_BACKUP_WRITER_*`, `BACKUP_BUCKET` | backup timer | Writes dumps | secret / env file |
@@ -764,8 +796,9 @@ Type, required flag and default belong to each app's settings class.
 
 What replaces each production service is in the HLD ("Deployment and environments"). What changes in code:
 
-- **Profile:** `APP_ENV=local` selects `config/models.local.yaml`, where every stage points at Ollama with a
-  small chat model (TBD); no key is needed.
+- **Profile:** `APP_ENV=local` selects `config/models.local.yaml`, where every chat stage points at Ollama with
+  `qwen3:1.7b` (provisional until the quick eval) and the `rerank` chain is empty, so only the local
+  cross-encoder runs; no key is needed.
 - **Addresses:** services reach each other by compose name (`http://ollama:11434`, `postgres:5432`); tools run
   from the host use `localhost`. Both come from settings.
 - **Edge pieces that don't exist locally:** a local Caddyfile without the origin-secret check; the client IP
@@ -775,8 +808,8 @@ What replaces each production service is in the HLD ("Deployment and environment
 - **DataPublisher:** the local adapter writes the brain data to a folder the local Caddy serves.
 - **Alerter and tracing:** the alerter only logs; LangSmith is on only when a key is present.
 - **Tests:** a separate test database per session, with the Django migrations applied by a fixture; the fake
-  OpenRouter server (`tests/fakes/`) answers scripted responses, 429s, hangs, malformed JSON and canary
-  leaks for the contract and fault tests. Real model calls only in eval runs.
+  OpenRouter server (`tests/fakes/`, an httpx `MockTransport`) answers scripted responses, 429s, hangs, malformed
+  JSON and canary leaks for the contract and fault tests. Real model calls only in eval runs.
 
 ## 11. Decisions
 
@@ -797,8 +830,8 @@ Architecture decisions (0001–0011) are indexed in the HLD.
 - [ ] Chat model of the local profile (Ollama): quick eval.
 - [ ] Free models per stage (route, answer, judge): eval matrix at M3.
 - [ ] `RELEVANCE_FLOOR` and `ASSESS_SKIP_SCORE`: calibrated at M3.
-- [ ] Nemotron rerank: request format, limits and Portuguese quality (M5).
+- [ ] Nemotron rerank (`nvidia/nemotron-3.5-rerank-8b:free`): the request shape is assumed Cohere-style until a
+  live call confirms it; limits and Portuguese quality (M5).
 - [ ] Charts library for the dashboard.
 - [ ] Eval harness: dataset format, metrics per layer, noise-band rule: to detail.
-- [ ] Schema of `config/models.yaml`: F01-T05.
 - [ ] Production restart policy: the API fails fast when Postgres is not ready at boot (Database), so the production compose needs `restart: unless-stopped` and a start order; to settle with the deploy feature.
