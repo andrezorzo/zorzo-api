@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from rag_core.adapters.postgres import Database
 from rag_core.adapters.rate_limit import PostgresRateLimiter
-from rag_core.ports import Bucket
+from rag_core.ports import Bucket, StoreUnavailable
 
 NOW = datetime(2026, 11, 25, 12, 0, tzinfo=UTC)
 
@@ -58,3 +58,12 @@ async def test_concurrent_takes_never_pass_more_than_the_bucket_holds(limiter: P
     shared, other = burst(capacity=5, window=3600), burst(capacity=50, window=3600)
     results = await asyncio.gather(*(limiter.take([other, shared], NOW) for _ in range(20)))
     assert sum(r is None for r in results) == 5
+
+
+async def test_a_database_that_refuses_connections_is_unavailable() -> None:
+    db = Database("postgresql://zorzo:zorzo@127.0.0.1:9/nothing")  # nothing listens on port 9
+    try:
+        with pytest.raises(StoreUnavailable):
+            await PostgresRateLimiter(db).take([burst()], NOW)
+    finally:
+        await db.close()

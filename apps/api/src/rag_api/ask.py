@@ -7,6 +7,7 @@ from uuid import UUID
 import structlog
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
+from rag_core.errors import ApiError, ErrorCode
 from rag_core.events import Done, StreamEvent
 from rag_core.services import corpus as corpus_service
 from rag_core.services.client_ip import VIEWER_HEADER
@@ -44,9 +45,11 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
     loop = asyncio.get_running_loop()
     deadline_at = loop.time() + state.limits.request_deadline
     question = await state.gate.check(body.q, body.turnstile, asker)
-    corpus = await corpus_service.servable(
-        state.vector_store, state.embedder.tag, max(0.0, deadline_at - loop.time())
-    )
+    left = deadline_at - loop.time()
+    if left <= 0:  # the gate used the whole deadline (a slow provider or database)
+        log.warning("deadline_exceeded", stage="gate")
+        raise ApiError(ErrorCode.UNAVAILABLE)
+    corpus = await corpus_service.servable(state.vector_store, state.embedder.tag, left)
     trace_id: str = request.state.trace_id
     stream = QueueSink()
     sink = FanOutSink([stream, *state.trace_sinks])

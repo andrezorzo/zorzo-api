@@ -5,7 +5,6 @@ bucket was empty, the transaction rolls back, so a refused question takes nothin
 two requests that share buckets lock them in the same order and can't deadlock.
 """
 
-import asyncio
 from datetime import datetime
 
 from sqlalchemy import bindparam, text
@@ -38,8 +37,8 @@ WHERE (SELECT {_LEVEL} FROM i WHERE i.key = b.key) >= 1
 RETURNING b.key
 """).bindparams(*_ARRAYS)
 
-# A take touches a few rows: Postgres itself ends one that waits on a lock or runs long, so a stuck statement
-# never outlives the client's timeout (cancelling from the client alone may wait on a dead socket).
+# A take touches a few rows: Postgres itself ends a statement that waits on a lock or runs long, so a stuck
+# take fails in seconds without depending on a cancel from the client. The caller bounds the whole call.
 BOUNDS = text("SELECT set_config('statement_timeout', :ms, true), set_config('lock_timeout', :ms, true)")
 
 LEVELS = text(f"""
@@ -53,11 +52,10 @@ class PostgresRateLimiter:
         self.db = db
 
     async def take(self, buckets: list[Bucket], now: datetime) -> list[tuple[Bucket, float]] | None:
-        """See `RateLimiter.take`; raises `StoreUnavailable` when the database can't answer in time."""
+        """See `RateLimiter.take`."""
         try:
-            async with asyncio.timeout(PROBE_TIMEOUT_S):
-                return await self._take(buckets, now)
-        except (TimeoutError, OSError, SQLAlchemyError) as exc:
+            return await self._take(buckets, now)
+        except (OSError, SQLAlchemyError) as exc:
             raise StoreUnavailable(type(exc).__name__) from exc
 
     async def _take(self, buckets: list[Bucket], now: datetime) -> list[tuple[Bucket, float]] | None:

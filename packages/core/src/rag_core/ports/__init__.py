@@ -58,6 +58,7 @@ class RateLimiter(Protocol):
         """Take one token from every bucket, or from none.
 
         None when every bucket had one; otherwise the empty buckets, each with the seconds until it holds one.
+        A store that can't answer raises `StoreUnavailable`, which the gate answers as `unavailable`.
         """
 
 
