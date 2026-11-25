@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 from rag_api.main import create_app
+from rag_api.settings import PUBLISHED_LOCAL_SEED
 from rag_core.domain import DomainError
 
 from tests.conftest import api_settings
@@ -110,3 +111,8 @@ def test_refuses_the_published_salt_seed_in_production(database_url: str) -> Non
             turnstile_secret="0x4AAAAAAAreal-looking-secret",
             salt_seed="local-salt-seed-change-me-0123456789",
         )
+
+
+def test_the_guarded_seed_is_the_published_example() -> None:
+    example = (Path(__file__).resolve().parents[2] / "infra/.env.example").read_text()
+    assert f"SALT_SEED={PUBLISHED_LOCAL_SEED}\n" in example

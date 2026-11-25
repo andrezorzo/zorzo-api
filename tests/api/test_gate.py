@@ -228,5 +228,5 @@ def test_the_gate_never_outlives_the_request_deadline(make_api: Any, corpus_data
         response = api.ask(**asking(session=session))
     assert response.status_code == 503
     assert error_code(response) == "unavailable"
-    assert any(line["event"] == "rate_limit_failed" for line in logs)
+    assert any(line["event"] == "deadline_exceeded" for line in logs)
     assert bucket_keys(corpus_database, str(session)) == []

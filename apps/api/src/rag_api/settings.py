@@ -22,6 +22,6 @@ class ApiSettings(AppSettings):
         if self.turnstile_secret.get_secret_value().endswith("0000000000000000000000000000000AA"):
             raise ValueError("TURNSTILE_SECRET is a Cloudflare test secret; production needs the real one")
         # The published local seed would let anyone with the repository reverse the hashed IPs.
-        if self.salt_seed.get_secret_value() == PUBLISHED_LOCAL_SEED:
+        if self.salt_seed.get_secret_value().strip() == PUBLISHED_LOCAL_SEED:
             raise ValueError("SALT_SEED is the published local example; production needs its own secret")
         return self

@@ -6,7 +6,7 @@ no business rules (LLD "Components and dependencies").
 ## Commands
 
 Run from the repository root, with Postgres up (`docker compose -f infra/compose.yaml up -d postgres --wait`; first copy
-`infra/.env.example` to `infra/.env`).
+`infra/.env.example` to `infra/.env`; an older `infra/.env` needs the `SALT_SEED` line added, since compose refuses to start without it).
 
 | What | Command |
 | --- | --- |

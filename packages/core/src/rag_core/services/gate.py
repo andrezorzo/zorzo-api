@@ -51,9 +51,16 @@ class Gate:
     async def check(self, question: str, token: str, asker: Asker, deadline_at: float) -> str:
         """The normalized question, or `ApiError` (403, 422, 429, or 503 without a viewer address).
 
-        `deadline_at` is the request's deadline on the event loop's clock: the gate never outlives it, so a
-        question it charged a token for always gets the rest of the request.
+        `deadline_at` is the request's deadline on the event loop's clock; the gate never outlives it.
         """
+        try:
+            async with asyncio.timeout_at(deadline_at):
+                return await self._check(question, token, asker)
+        except TimeoutError as exc:  # a slow provider or database used the request's time
+            log.warning("deadline_exceeded", stage="gate")
+            raise ApiError(ErrorCode.UNAVAILABLE) from exc
+
+    async def _check(self, question: str, token: str, asker: Asker) -> str:
         if not await self.bot_check.verify(token):
             raise ApiError(ErrorCode.BOT_CHECK_FAILED)
         text = normalize(question, self.limits)
@@ -61,11 +68,9 @@ class Gate:
         ip = hashed_ip(viewer_ip(asker.viewer_address, asker.peer, self.app_env), self.salt_seed, now.date())
         buckets = self._buckets(ip, asker.session, now)
         try:
-            # The store bounds its statements; this bounds the rest (a wait for a free connection).
-            async with asyncio.timeout_at(deadline_at):
-                refused = await self.limiter.take(buckets, now)
-        except (StoreUnavailable, TimeoutError) as exc:  # a database down is `unavailable` (LLD "Errors")
-            log.error("rate_limit_failed", error=str(exc) or type(exc).__name__)
+            refused = await self.limiter.take(buckets, now)
+        except StoreUnavailable as exc:  # a database down is `unavailable` (LLD "Errors")
+            log.error("rate_limit_failed", error=str(exc))
             raise ApiError(ErrorCode.UNAVAILABLE) from exc
         if refused is not None:
             wait = max((seconds for _, seconds in refused), default=0.0)
