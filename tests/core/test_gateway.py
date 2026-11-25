@@ -259,3 +259,32 @@ async def test_mode_follows_the_budget_and_the_breakers(rig: Rig) -> None:
     assert await rig.gateway.mode() == "budget_exhausted"
     await rig.gateway.drain()
     assert sorted(kind for kind, _ in rig.alerter.sent) == ["budget_exhausted", "providers_down"]
+
+
+async def test_a_slow_consumer_ends_the_stream_with_unavailable_not_a_cancel(rig: Rig) -> None:
+    with_limits(rig, timeout_answer=0.2)
+    rig.fake.script(A, Reply(text="one two three"))
+    with pytest.raises(ModelsUnavailable):
+        async for _ in rig.gateway.stream(
+            "answer", MESSAGES, deadline_at=rig.deadline(), spend=RequestSpend(0)
+        ):
+            await asyncio.sleep(0.3)  # the visitor's connection is slow
+
+
+async def test_the_request_deadline_never_counts_toward_the_breaker(rig: Rig) -> None:
+    for _ in range(LIMITS.breaker_failures + 1):
+        rig.fake.script(A, "hang")
+        with pytest.raises(ModelsUnavailable):
+            await rig.complete(deadline_at=rig.deadline(0.05))
+    assert rig.gateway.breakers.closed(("openrouter", A))
+
+
+async def test_a_paid_answer_without_usage_keeps_its_estimate(rig: Rig) -> None:
+    rig.fake.script(A, "error")
+    rig.fake.script(B, "error")
+    rig.fake.script(PAID, Reply(tokens_in=0, tokens_out=0))
+    result = await rig.complete()
+    prompt_tokens = -(-len(MESSAGES[0]["content"]) // 3)
+    estimate = (prompt_tokens * 1.0 + 200 * 4.0) / 1e6
+    assert result.cost_usd == pytest.approx(estimate)
+    assert rig.spent_today() == pytest.approx(estimate, abs=1e-6)

@@ -46,19 +46,22 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
     loop = asyncio.get_running_loop()
     deadline_at = loop.time() + state.limits.request_deadline
     question = await state.gate.check(body.q, body.turnstile, asker, deadline_at)
+    if deadline_at - loop.time() <= 0:  # the gate finished on the deadline: nothing left for the answer
+        log.warning("deadline_exceeded", stage="after_gate")
+        raise ApiError(ErrorCode.UNAVAILABLE)
     # Whether the models can answer now (LLD "6.2 Daily budget", "6.6 Circuit breaker", "6.8 Free quota").
     try:
         async with asyncio.timeout_at(deadline_at):
             reason = await state.gateway.mode()
-    except (StoreUnavailable, TimeoutError) as exc:
+    except StoreUnavailable as exc:
         log.error("mode_check_failed", error=type(exc).__name__)
+        raise ApiError(ErrorCode.UNAVAILABLE) from exc
+    except TimeoutError as exc:
+        log.warning("deadline_exceeded", stage="mode")
         raise ApiError(ErrorCode.UNAVAILABLE) from exc
     # In a degraded mode the question makes no model call: the rerank chain is the local level only.
     rerankers = state.rerankers if reason is None else state.local_rerankers
     left = deadline_at - loop.time()
-    if left <= 0:  # the gate finished on the deadline: nothing left for the answer
-        log.warning("deadline_exceeded", stage="after_gate")
-        raise ApiError(ErrorCode.UNAVAILABLE)
     corpus = await corpus_service.servable(state.vector_store, state.embedder.tag, left)
     trace_id: str = request.state.trace_id
     stream = QueueSink()

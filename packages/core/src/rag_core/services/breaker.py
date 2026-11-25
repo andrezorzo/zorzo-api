@@ -69,17 +69,22 @@ class Breakers:
             return True
         return b.state == "closed"
 
-    def success(self, key: Key) -> None:
-        """Record a call that worked; a half-open trial that works closes the breaker."""
-        if self._get(key).state == "half_open":
+    def success(self, key: Key, trial: bool = True) -> None:
+        """Record a call that worked; the half-open trial that works closes the breaker.
+
+        `trial` is False for a call let through before the breaker opened: while half-open, only the trial's
+        verdict counts.
+        """
+        if self._get(key).state == "half_open" and trial:
             self._breakers[key] = _Breaker()
             self._transition(key, "info", "breaker_closed")
 
-    def failure(self, key: Key, rate_limited: bool = False) -> None:
+    def failure(self, key: Key, rate_limited: bool = False, trial: bool = True) -> None:
         b = self._get(key)
         now = self.clock()
         if b.state == "half_open":
-            self._open(key, b, now, rate_limited)
+            if trial:
+                self._open(key, b, now, rate_limited)
             return
         if b.state == "open":
             return
@@ -89,10 +94,10 @@ class Breakers:
         if rate_limited or len(b.failures) >= self.limits.breaker_failures:
             self._open(key, b, now, rate_limited)
 
-    def release(self, key: Key) -> None:
+    def release(self, key: Key, trial: bool = True) -> None:
         """A call let through ended without a verdict (its caller was cancelled): the next call may try."""
         b = self._get(key)
-        if b.state == "half_open":
+        if b.state == "half_open" and trial:
             b.trial = False
 
     def _open(self, key: Key, b: _Breaker, now: float, rate_limited: bool) -> None:

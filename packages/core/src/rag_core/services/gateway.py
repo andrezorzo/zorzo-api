@@ -7,8 +7,9 @@ breaker is open (LLD "6.6 Circuit breaker"), when it is free and its provider pa
 """
 
 import asyncio
+import contextlib
 import math
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 
@@ -77,6 +78,8 @@ class _Ticket:
     estimate: float
     day: date | None
     spend: RequestSpend
+    deadline_at: float  # the request's, to tell its end from the stage timeout
+    trial: bool = False  # the breaker's half-open trial call
 
 
 class ModelGateway:
@@ -168,17 +171,27 @@ class ModelGateway:
                 continue
             parts: list[str] = []
             tokens_in = tokens_out = 0
+            ends_at = asyncio.get_running_loop().time() + self._time_for(stage, deadline_at)
+            chunks = aiter(
+                self.providers[entry.provider].chat_stream(entry.model, messages, max_tokens=max_tokens)
+            )
             try:
-                async with asyncio.timeout(self._time_for(stage, deadline_at)):
-                    async for chunk in self.providers[entry.provider].chat_stream(
-                        entry.model, messages, max_tokens=max_tokens
-                    ):
-                        if chunk.tokens_in is not None:
-                            tokens_in, tokens_out = chunk.tokens_in, chunk.tokens_out or 0
-                        if chunk.text:
-                            parts.append(chunk.text)
-                            yield chunk.text
+                while True:
+                    # Each read is bounded on its own, never across a `yield`: the consumer's time between
+                    # chunks counts toward the end, but a timeout can't fire inside the consumer.
+                    if asyncio.get_running_loop().time() >= ends_at:
+                        raise TimeoutError  # even when the next chunk is already buffered
+                    async with asyncio.timeout_at(ends_at):
+                        chunk = await anext(chunks, None)
+                    if chunk is None:
+                        break
+                    if chunk.tokens_in is not None:
+                        tokens_in, tokens_out = chunk.tokens_in, chunk.tokens_out or 0
+                    if chunk.text:
+                        parts.append(chunk.text)
+                        yield chunk.text
             except BaseException as exc:
+                await _aclose(chunks)  # the provider's response, not left to the garbage collector
                 await self._close(ticket, exc)
                 if _failed(exc):
                     if parts:
@@ -268,24 +281,21 @@ class ModelGateway:
         key = (entry.provider, entry.model)
         if self._out_of_time(deadline_at) or not self.breakers.callable(key):
             return None
-        ticket: _Ticket | None
-        if not entry.paid:
-            if self.quota.over_warn(entry.provider):
-                log.info("model_entry_skipped", stage=stage, model=entry.model, why="quota")
-                return None
-            ticket = _Ticket(stage, entry, 0.0, None, spend)
-        else:
-            ticket = await self._reserve(stage, entry, chars, spend)
-            if ticket is None:
-                return None
+        if not entry.paid and self.quota.over_warn(entry.provider):
+            log.info("model_entry_skipped", stage=stage, model=entry.model, why="quota")
+            return None
         if not self.breakers.allow(key):  # another call took the half-open trial meanwhile
-            await self._settle(ticket, 0.0)
+            return None
+        trial = not self.breakers.closed(key)
+        ticket = _Ticket(stage, entry, 0.0, None, spend, deadline_at, trial)
+        if entry.paid and not await self._reserve(ticket, chars):
+            self.breakers.release(key, trial)
             return None
         return ticket
 
-    async def _reserve(
-        self, stage: StageName, entry: Entry, chars: int, spend: RequestSpend
-    ) -> _Ticket | None:
+    async def _reserve(self, ticket: _Ticket, chars: int) -> bool:
+        """Reserve the paid entry's estimate against the request and the day; False skips the entry."""
+        stage, entry, spend = ticket.stage, ticket.entry, ticket.spend
         assert entry.price is not None  # the config requires a price on a paid entry
         prompt_tokens = math.ceil(chars / CHARS_PER_TOKEN)
         max_tokens = self.config.stage(stage).max_tokens
@@ -294,18 +304,19 @@ class ModelGateway:
         ) / 1e6
         if not spend.fits(estimate):
             log.info("model_entry_skipped", stage=stage, model=entry.model, why="request_cap")
-            return None
+            return False
         day = self.clock().date()
         try:
             reserved = await self.budget.reserve(day, estimate, self.limits.daily_budget_usd)
         except StoreUnavailable as exc:  # no reservation, no paid call
             log.error("budget_reserve_failed", error=str(exc))
-            return None
+            return False
         if not reserved:
             log.info("model_entry_skipped", stage=stage, model=entry.model, why="budget")
-            return None
+            return False
         spend.spent += estimate
-        return _Ticket(stage, entry, estimate, day, spend)
+        ticket.estimate, ticket.day = estimate, day
+        return True
 
     async def _close(
         self,
@@ -316,18 +327,23 @@ class ModelGateway:
     ) -> float:
         """Record the verdict on the breaker and the quota, settle the reservation; returns the cost."""
         entry = ticket.entry
-        key = (entry.provider, entry.model)
+        key, trial = (entry.provider, entry.model), ticket.trial
+        # A timeout at the request's own deadline says nothing about the provider: the stage had less time
+        # than its timeout (LLD "6.6 Circuit breaker").
+        cut_by_deadline = (
+            isinstance(exc, TimeoutError) and asyncio.get_running_loop().time() >= ticket.deadline_at
+        )
         if exc is None:
-            self.breakers.success(key)
+            self.breakers.success(key, trial)
         elif isinstance(exc, RateLimited):
-            self.breakers.failure(key, rate_limited=True)
+            self.breakers.failure(key, rate_limited=True, trial=trial)
         elif isinstance(exc, ContextTooLong):
             log.error("context_too_long", stage=ticket.stage, model=entry.model)
-            self.breakers.release(key)
-        elif isinstance(exc, ProviderError | TimeoutError):
-            self.breakers.failure(key)
-        else:  # cancelled, or a bug: no verdict on the provider
-            self.breakers.release(key)
+            self.breakers.release(key, trial)
+        elif _failed(exc) and not cut_by_deadline:
+            self.breakers.failure(key, trial=trial)
+        else:  # cut by the deadline, cancelled, or a bug: no verdict on the provider
+            self.breakers.release(key, trial)
         if _failed(exc):
             log.warning(
                 "model_call_failed",
@@ -339,16 +355,19 @@ class ModelGateway:
             if not isinstance(exc, asyncio.CancelledError):
                 self.quota.count(entry.provider, rate)
             return 0.0
-        cost = 0.0
-        if usage is not None:
+        cost = 0.0  # a failed call settles with actual 0 (LLD "6.2 Daily budget")
+        if exc is None:
             assert entry.price is not None
-            cost = (
-                usage.tokens_in * entry.price.input_per_mtok + usage.tokens_out * entry.price.output_per_mtok
-            ) / 1e6
+            if usage is None or usage.tokens_in + usage.tokens_out == 0:
+                cost = ticket.estimate  # billed, but the provider sent no usage: keep the estimate
+            else:
+                cost = (
+                    usage.tokens_in * entry.price.input_per_mtok
+                    + usage.tokens_out * entry.price.output_per_mtok
+                ) / 1e6
         if isinstance(exc, asyncio.CancelledError | GeneratorExit):
-            self._background.spawn(
-                self._settle(ticket, cost)
-            )  # the caller is leaving: don't hold it on the database
+            # The caller is leaving: don't hold it on the database.
+            self._background.spawn(self._settle(ticket, cost))
         else:
             await self._settle(ticket, cost)
         return cost
@@ -368,6 +387,12 @@ class ModelGateway:
             )
         except StoreUnavailable as exc:
             log.error("budget_settle_failed", error=str(exc))
+
+
+async def _aclose(chunks: AsyncIterator[object]) -> None:
+    if isinstance(chunks, AsyncGenerator):
+        with contextlib.suppress(Exception):
+            await chunks.aclose()
 
 
 def _prompt_chars(messages: list[dict[str, str]]) -> int:

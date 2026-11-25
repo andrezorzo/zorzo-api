@@ -74,11 +74,15 @@ def create_app(settings: ApiSettings) -> FastAPI:
             await _warm_rerankers(app)
             yield
         finally:
+            # Each close runs even when an earlier one raises; the database closes last, after the
+            # gateway's pending budget settles and alerts.
             try:
                 await app.state.gate.bot_check.close()
-                await app.state.gateway.close()
             finally:
-                await db.close()
+                try:
+                    await app.state.gateway.close()
+                finally:
+                    await db.close()
 
     app = FastAPI(title="rag-api", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.domain = domain

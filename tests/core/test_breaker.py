@@ -95,3 +95,15 @@ def test_entries_are_independent() -> None:
     b, _, _ = breakers()
     b.failure(KEY, rate_limited=True)
     assert b.allow(("openrouter", "other/model:free"))
+
+
+def test_a_call_from_before_the_opening_doesnt_decide_the_trial() -> None:
+    b, clock, _ = breakers()
+    b.failure(KEY, rate_limited=True)
+    clock.now += 31
+    assert b.allow(KEY)  # the trial
+    b.success(KEY, trial=False)  # a slow call let through while closed
+    b.failure(KEY, trial=False)
+    assert not b.closed(KEY) and not b.allow(KEY)  # still waiting on the trial
+    b.success(KEY)
+    assert b.closed(KEY)
