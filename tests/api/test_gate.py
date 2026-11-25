@@ -16,6 +16,7 @@ import psycopg
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from rag_core.adapters.postgres import PROBE_TIMEOUT_S
 from structlog.testing import capture_logs
 
 from tests.conftest import api_settings, build_app
@@ -238,7 +239,8 @@ def test_the_gate_never_outlives_the_request_deadline(make_api: Any, corpus_data
 
 
 def test_a_take_cut_by_the_deadline_takes_nothing(make_api: Any, corpus_database: str) -> None:
-    api, session = make_api(limits={"request_deadline": 1.0}), uuid.uuid4()  # below the 2 s lock timeout
+    # The deadline must cut the take before Postgres ends the lock wait itself.
+    api, session = make_api(limits={"request_deadline": PROBE_TIMEOUT_S / 2}), uuid.uuid4()
     key = f"session:{session}:burst"
     with psycopg.connect(corpus_database) as conn:  # holds the row past the deadline, below the lock timeout
         conn.execute("INSERT INTO rate_buckets (key, tokens, refilled_at) VALUES (%s, 5, now())", (key,))
