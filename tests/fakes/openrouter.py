@@ -5,7 +5,8 @@ normally. It records every request (path, model, body), so a test can assert whi
 
 - chat completions, as JSON or SSE (`stream: true`), with usage;
 - `/rerank`, scoring the documents in their given order unless `rerank_scores` says otherwise;
-- failures: "rate_limited" (429 with `Retry-After`), "error" (500), "hang", "malformed" (a 200 that isn't
+- failures: "rate_limited" (429 with `Retry-After`), "error" (500), "bad_gateway" (502), "unavailable"
+  (503), "bad_request" (400), "hang", "malformed" (a 200 that isn't
   the expected JSON), "context_too_long" (400), "break_after_first_token" (a stream that dies mid-way);
 - `Reply(...)` for a given text, token counts or rate-limit headers.
 """
@@ -20,6 +21,8 @@ from typing import Any
 import httpx
 
 DEFAULT_TEXT = "Hello from the fake model"
+# Failures answered with an error status: 500 and 502 may come after the model ran, 503 and 400 before.
+STATUS = {"error": 500, "bad_gateway": 502, "unavailable": 503, "bad_request": 400}
 
 
 @dataclass(frozen=True)
@@ -67,8 +70,8 @@ class FakeOpenRouter:
         behavior: Behavior = queue.popleft() if queue else Reply()
         if behavior == "rate_limited":
             return httpx.Response(429, headers={"Retry-After": "30"}, json={"error": {"code": 429}})
-        if behavior == "error":
-            return httpx.Response(500, json={"error": {"code": 500, "message": "upstream"}})
+        if isinstance(behavior, str) and behavior in STATUS:
+            return httpx.Response(STATUS[behavior], json={"error": {"code": STATUS[behavior]}})
         if behavior == "hang":
             await asyncio.sleep(60)
         if behavior == "malformed":

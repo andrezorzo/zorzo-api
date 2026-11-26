@@ -44,15 +44,18 @@ class Alerts:
         self.monotonic = monotonic
         self._background = BackgroundTasks()
         self._raise_checked: dict[AlertKind, float] = {}  # when `raise_soon` last asked the store, per kind
+        # The severity last asked for per kind, while its incident may be open: a worse state is told at once.
+        self._severity: dict[AlertKind, int] = {}
         # One kind's raises and clears run in the order they were asked for (asyncio.Lock is first come,
         # first served), so a late clear can't close the incident a later raise opened.
         self._locks: dict[AlertKind, asyncio.Lock] = defaultdict(asyncio.Lock)
 
-    async def raise_(self, kind: AlertKind, message: str) -> None:
+    async def raise_(self, kind: AlertKind, message: str, worse: bool = False) -> None:
+        """Open the incident, or remind; `worse` (the incident got worse) sends the message now."""
         self._maybe_open.add(kind)
         async with self._locks[kind]:
             now = self.clock()
-            remind_before = now - timedelta(seconds=self.limits.alert_repeat_after)
+            remind_before = now if worse else now - timedelta(seconds=self.limits.alert_repeat_after)
             try:
                 outcome = await self.store.open(kind, now, remind_before)
             except StoreUnavailable as exc:  # `raise_soon` asks again after its interval
@@ -63,27 +66,38 @@ class Alerts:
                 await self._send(kind, message if outcome == "opened" else f"still open: {message}")
 
     async def clear(self, kind: AlertKind) -> None:
-        if kind in self._maybe_open:
-            self._maybe_open.discard(kind)
+        if self._claim_clear(kind):
             await self._clear(kind)
 
-    def raise_soon(self, kind: AlertKind, message: str) -> None:
-        """`raise_` in the background: the caller never waits on the store or the alerter."""
+    def raise_soon(self, kind: AlertKind, message: str, severity: int = 0) -> None:
+        """`raise_` in the background: the caller never waits on the store or the alerter.
+
+        While an incident lasts the store is asked once per `RAISE_CHECK_EVERY_S` (after a store failure too),
+        except when `severity` is higher than last asked for, which is told at once.
+        """
         now = self.monotonic()
         last = self._raise_checked.get(kind)
-        if last is not None and now - last < RAISE_CHECK_EVERY_S:
+        worse = severity > self._severity.get(kind, 0)
+        if last is not None and now - last < RAISE_CHECK_EVERY_S and not worse:
             return
         self._raise_checked[kind] = now
-        self._background.spawn(self.raise_(kind, message))
+        self._severity[kind] = max(severity, self._severity.get(kind, 0))
+        self._background.spawn(self.raise_(kind, message, worse))
 
     def clear_soon(self, kind: AlertKind) -> None:
-        if kind in self._maybe_open:
-            self._maybe_open.discard(kind)
-            self._raise_checked.pop(kind, None)  # a new incident is raised at once
+        if self._claim_clear(kind):
             self._background.spawn(self._clear(kind))
 
-    async def _clear(self, kind: AlertKind) -> None:
+    def _claim_clear(self, kind: AlertKind) -> bool:
+        """Whether a clear must ask the store; a new incident is then raised at once, at any severity."""
+        if kind not in self._maybe_open:
+            return False
+        self._maybe_open.discard(kind)
         self._raise_checked.pop(kind, None)
+        self._severity.pop(kind, None)
+        return True
+
+    async def _clear(self, kind: AlertKind) -> None:
         async with self._locks[kind]:
             try:
                 closed = await self.store.close(kind, self.clock())

@@ -38,7 +38,6 @@ from rag_core.services.quota import Quota
 log = structlog.get_logger()
 
 CHARS_PER_TOKEN = 3  # conservative for English and Portuguese, no tokenizer (LLD "6.2 Daily budget")
-BLAME_SLACK_S = 0.05
 
 
 class ModelsUnavailable(Exception):
@@ -81,12 +80,12 @@ class _Ticket:
     estimate: float
     day: date | None
     spend: RequestSpend
-    deadline_at: float  # the request's (inf when the caller bounds the call itself)
+    deadline_at: float  # the caller's (inf when the caller bounds the call itself)
+    chain_ends_at: float = math.inf  # a limit the gateway sets on the whole chain (rerank)
     trial: bool = False  # the breaker's half-open trial call
-    # False when the call's time ran out for a reason that says nothing about the provider: the request's
-    # deadline came before the stage timeout, or a slow consumer of the stream held the time.
+    # False when the call's time ran out for a reason that says nothing about the provider: the caller's
+    # deadline came before the gateway's own limits, or a slow consumer of the stream held the time.
     blame_timeout: bool = True
-    streamed: bool = False  # a stream already gave text: the provider ran, whatever happens next
 
 
 class ModelGateway:
@@ -197,7 +196,6 @@ class ModelGateway:
                     if chunk.tokens_in is not None:
                         tokens_in, tokens_out = chunk.tokens_in, chunk.tokens_out or 0
                     if chunk.text:
-                        ticket.streamed = True
                         parts.append(chunk.text)
                         yield chunk.text
             except BaseException as exc:
@@ -220,11 +218,11 @@ class ModelGateway:
 
         The whole chain gets one `TIMEOUT_RERANK`: the local level must still have time after it.
         """
-        deadline_at = min(deadline_at, asyncio.get_running_loop().time() + self._timeouts["rerank"])
+        chain_ends_at = asyncio.get_running_loop().time() + self._timeouts["rerank"]
         chars = len(query) + sum(len(d) for d in documents)
         spend = RequestSpend(self.limits.request_cost_cap_usd)
         for entry in self.config.stage("rerank").chain:
-            ticket = await self._take("rerank", entry, chars, deadline_at, spend)
+            ticket = await self._take("rerank", entry, chars, deadline_at, spend, chain_ends_at)
             if ticket is None:
                 continue
             try:
@@ -256,6 +254,7 @@ class ModelGateway:
                 f"today's paid budget (US${cap}) reached the cutoff; paid entries are off until 00:00 UTC"
                 if state == "paid_disabled"
                 else f"today's budget of US${cap} is spent; questions go search-only",
+                severity=0 if state == "paid_disabled" else 1,  # search-only is told at once
             )
         if state == "degraded":
             return "budget_exhausted"
@@ -294,23 +293,31 @@ class ModelGateway:
     # -- one entry ----------------------------------------------------------------------------------------
 
     def _time_for(self, ticket: _Ticket) -> float:
-        """`min(TIMEOUT_<STAGE>, time left)`; notes on the ticket which of the two binds."""
-        left = ticket.deadline_at - asyncio.get_running_loop().time()
-        timeout = self._timeouts[ticket.stage]
-        # The slack covers the moments between taking the deadline and this call, so the first entry of a
-        # chain whose deadline is its stage timeout (rerank) still blames the provider.
-        ticket.blame_timeout = timeout <= left + BLAME_SLACK_S
-        return min(timeout, left)
+        """`min(TIMEOUT_<STAGE>, time left)`; notes on the ticket whether the caller's deadline binds.
+
+        The gateway's own limits (the stage timeout, the rerank chain's) blame the provider when they end the
+        call; the caller's deadline doesn't.
+        """
+        now = asyncio.get_running_loop().time()
+        own_end = min(now + self._timeouts[ticket.stage], ticket.chain_ends_at)
+        ticket.blame_timeout = own_end < ticket.deadline_at
+        return min(own_end, ticket.deadline_at) - now
 
     def _out_of_time(self, deadline_at: float) -> bool:
         return deadline_at - asyncio.get_running_loop().time() <= 0
 
     async def _take(
-        self, stage: StageName, entry: Entry, chars: int, deadline_at: float, spend: RequestSpend
+        self,
+        stage: StageName,
+        entry: Entry,
+        chars: int,
+        deadline_at: float,
+        spend: RequestSpend,
+        chain_ends_at: float = math.inf,
     ) -> _Ticket | None:
         """A ticket to call the entry now, or None to skip it (no time, open breaker, quota, budget)."""
         key = (entry.provider, entry.model)
-        if self._out_of_time(deadline_at) or not self.breakers.callable(key):
+        if self._out_of_time(min(deadline_at, chain_ends_at)) or not self.breakers.callable(key):
             return None
         if not entry.paid and self.quota.over_warn(entry.provider):
             log.info("model_entry_skipped", stage=stage, model=entry.model, why="quota")
@@ -318,7 +325,7 @@ class ModelGateway:
         if not self.breakers.allow(key):  # another call took the half-open trial meanwhile
             return None
         trial = not self.breakers.closed(key)
-        ticket = _Ticket(stage, entry, 0.0, None, spend, deadline_at, trial)
+        ticket = _Ticket(stage, entry, 0.0, None, spend, deadline_at, chain_ends_at, trial)
         try:
             reserved = not entry.paid or await self._reserve(ticket, chars)
         except BaseException:
@@ -390,8 +397,8 @@ class ModelGateway:
         # A call the provider refused settles with actual 0 (LLD "6.2 Daily budget"). One that may have run on
         # the provider's side (a timeout, or the visitor leaving mid-call) keeps its estimate: refunding it
         # would let a visitor who disconnects spend past the cap unseen.
-        refused = isinstance(exc, ProviderError) and exc.refused and not ticket.streamed
-        cost = 0.0 if refused else ticket.estimate
+        # A refusal comes with the status, before any text, so a stream that gave text is never refused.
+        cost = 0.0 if isinstance(exc, ProviderError) and exc.refused else ticket.estimate
         if exc is None:
             assert entry.price is not None
             if usage is None or usage.tokens_in + usage.tokens_out == 0:

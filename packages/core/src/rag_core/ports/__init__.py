@@ -107,8 +107,8 @@ class ProviderError(Exception):
     """A model provider failed the call: transport error, 5xx, an unexpected status or a malformed body.
 
     The message names the kind of failure, never the request or the response body. `refused` is True when
-    the provider answered with an error status, so it ran (and billed) nothing; a dropped connection or a
-    malformed answer may have run.
+    the provider turned the call down before running it (a 4xx, a 503); a 502 or 504, a dropped connection
+    or a malformed answer may have run, and billed.
     """
 
     def __init__(self, kind: str, refused: bool = False) -> None:

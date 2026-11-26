@@ -15,7 +15,7 @@ from rag_core.adapters.factory import build_gateway
 from rag_core.adapters.openai_compat import OpenAICompatProvider
 from rag_core.adapters.postgres import Database
 from rag_core.limits import Limits, load_limits
-from rag_core.models_config import load_models
+from rag_core.models_config import Entry, load_models
 from rag_core.services.gateway import Completion, ModelGateway, ModelsUnavailable, RequestSpend
 
 from tests.conftest import reset_tables, seed_budget
@@ -130,13 +130,19 @@ async def test_skips_a_paid_entry_the_budget_cant_cover(rig: Rig) -> None:
     assert PAID not in rig.fake.models_called()
 
 
-async def test_a_failed_paid_call_releases_its_reservation(rig: Rig) -> None:
+@pytest.mark.parametrize(
+    ("failure", "refunded"),
+    [("unavailable", True), ("bad_request", True), ("bad_gateway", False), ("error", False)],
+)
+async def test_only_a_refused_paid_call_releases_its_reservation(
+    rig: Rig, failure: str, refunded: bool
+) -> None:
     rig.fake.script(A, "error")
     rig.fake.script(B, "error")
-    rig.fake.script(PAID, "error")
+    rig.fake.script(PAID, failure)
     with pytest.raises(ModelsUnavailable):
         await rig.complete()
-    assert rig.spent_today() == 0.0
+    assert (rig.spent_today() == 0.0) is refunded  # a 502 or 500 may come after the model ran
 
 
 async def test_stops_at_the_deadline(rig: Rig) -> None:
@@ -336,21 +342,25 @@ async def test_a_hanging_remote_rerank_opens_its_breaker(rig: Rig) -> None:
     assert not rig.gateway.breakers.callable(("openrouter", "test/rerank:free"))
 
 
-async def test_a_worse_budget_state_keeps_one_open_incident(rig: Rig) -> None:
+async def test_the_alert_says_at_once_when_the_cutoff_becomes_search_only(rig: Rig) -> None:
     rig.seed_budget(0.08, paid_disabled=True)
     await rig.gateway.mode()
     await rig.gateway.drain()
     rig.seed_budget(0.10, paid_disabled=True, degraded=True)
     await rig.gateway.mode()
     await rig.gateway.drain()
+    await rig.gateway.mode()  # still search-only: nothing new to tell
+    await rig.gateway.drain()
     messages = [m for _, m in rig.alerter.sent]
-    assert len(messages) == 1  # the open incident's next reminder carries the new message
+    assert len(messages) == 2
+    assert "cutoff" in messages[0]
+    assert messages[1].startswith("still open: ") and "search-only" in messages[1]  # told at once
 
 
 async def test_a_paid_stream_that_breaks_after_text_keeps_its_estimate(rig: Rig) -> None:
     rig.fake.script(A, "error")
     rig.fake.script(B, "error")
-    rig.fake.script(PAID, "break_after_first_token")
+    rig.fake.script(PAID, "break_after_first_token")  # a dropped connection: not a refusal
     with pytest.raises(ModelsUnavailable):
         async for _ in rig.gateway.stream(
             "answer", MESSAGES, deadline_at=rig.deadline(), spend=RequestSpend(0.01)
@@ -360,9 +370,17 @@ async def test_a_paid_stream_that_breaks_after_text_keeps_its_estimate(rig: Rig)
 
 
 async def test_the_remote_rerank_chain_gets_one_timeout(rig: Rig) -> None:
-    rig = with_limits(rig, timeout_rerank=0.2)
-    rig.fake.always("test/rerank:free", "hang")
+    rig = with_limits(rig, timeout_rerank=0.3, breaker_failures=1)
+    second = Entry(provider="openrouter", model="test/rerank-b:free")
+    stage = CONFIG.stage("rerank").model_copy(update={"chain": [*CONFIG.stage("rerank").chain, second]})
+    rig.gateway.config = CONFIG.model_copy(
+        update={"stages": CONFIG.stages.model_copy(update={"rerank": stage})}
+    )
+    rig.fake.script("test/rerank:free", "hang")
+    rig.fake.script("test/rerank-b:free", "hang")
     started = time.monotonic()
     with pytest.raises(ModelsUnavailable):
         await rig.gateway.rerank("q", ["a"])
-    assert time.monotonic() - started < 0.5
+    assert time.monotonic() - started < 0.5  # both entries within one TIMEOUT_RERANK
+    # The first hang ran out its stage timeout: the provider's fault, so its breaker opened.
+    assert not rig.gateway.breakers.callable(("openrouter", "test/rerank:free"))
