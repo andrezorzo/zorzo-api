@@ -24,6 +24,7 @@ from tests.conftest import ROOT, create_migrated_database, drop_database, run_in
 FIXTURE_CORPUS = ROOT / "tests" / "fixtures" / "corpus"
 EXAMPLES = ROOT / "domains" / "zorzo" / "src" / "domain_zorzo" / "examples.yaml"
 FAKE_TAG = "fake-hash-v1"
+DOCUMENTED_SIGTERM_EXIT = 143  # apps/ingest/AGENTS.md: SIGTERM cancels the run and exits 143
 
 
 @dataclass
@@ -299,6 +300,6 @@ def test_sigterm_rejects_the_candidate(db: str, source: Path, tmp_path: Path) ->
             if process.poll() is None:
                 process.kill()
                 print(process.communicate()[0])
-    assert process.returncode == 143, output  # the exit code apps/ingest/AGENTS.md documents
+    assert process.returncode == DOCUMENTED_SIGTERM_EXIT, output
     assert "ingest_interrupted" in output
     assert rows(db, "SELECT status FROM corpus_versions") == [("rejected",)]
