@@ -1,6 +1,6 @@
 # Product Brief — zorzo.dev.br
 
-2026-11-20 · André de Castro Zorzo · Status: draft
+2026-11-26 · André de Castro Zorzo · Status: draft
 
 ## Overview
 
@@ -106,7 +106,7 @@ Platform: web (desktop and mobile browsers).
 | Cost | Recurring running cost under US$10/month; one-time model credits allowed outside the cap |
 | Availability | Always on, no cold starts: the first visitor of the day gets the same speed as the others |
 | Performance | First words of an answer appear within 3 seconds for visitors in the US |
-| Privacy | No personal data of visitors stored; public traces are redacted; the corpus holds only material André reviewed |
+| Privacy | No personal data of visitors stored; public traces are redacted; the corpus holds only material André reviewed; visitors are told before asking that answers run on providers' free tiers, which may train on their questions |
 | Abuse | Bots and scripted traffic can't drain the model budget; prompt-injection attempts are contained and counted in public |
 | Accessibility | Works on mobile and on devices without 3D graphics support |
 | Openness | All code is public on GitHub, written in English (imposed) |

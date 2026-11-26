@@ -1,6 +1,6 @@
 # LLD — zorzo.dev.br (zorzo-api)
 
-2026-11-25 · André de Castro Zorzo · Status: draft · HLD: [hld.md](hld.md)
+2026-11-26 · André de Castro Zorzo · Status: draft · HLD: [hld.md](hld.md)
 
 Scope: the `zorzo-api` repository. The front (`zorzo-site`) keeps its own LLD for rendering and the 3D brain;
 section 8 here covers only how the front behaves against the API, plus the dashboard pages.
@@ -657,6 +657,10 @@ Behavior only; rendering and the 3D brain are in `zorzo-site`'s LLD.
 - **Session:** a UUID created on the first question and kept in `sessionStorage`, so it lasts while the tab is
   open and survives a reload. A "new conversation" button creates a new UUID; after `SESSION_TTL` idle, the
   next question creates a new UUID and shows a "new conversation" notice.
+- **Free-tier notice:** the answers run on the free tiers of the providers in `config/models.yaml`, whose terms
+  may let them train on what they receive. A line under the question box, shown before any question, says the
+  questions may be used to train models and asks for no personal data; the footer names the providers. A
+  provider added to or removed from the models config changes the footer too.
 - **Asking:** the invisible Turnstile widget produces a token for each question; after a token is used the
   widget is reset and the next one is fetched in the background, so a question rarely waits. The widget's
   script loads on the first interaction with the question box, not on page load. The front sends `POST /api/v1/ask` with `fetch`
