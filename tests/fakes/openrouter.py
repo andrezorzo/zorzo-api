@@ -124,6 +124,7 @@ class FakeOpenRouter:
             if pace == "whitespace_stall":  # a line break, then nothing
                 yield _frame({"content": "\n"})
                 await asyncio.sleep(60)
+                return
             if pace == "no_text":  # a role frame, then the end
                 yield _frame({"role": "assistant"})
                 yield b"data: [DONE]\n\n"

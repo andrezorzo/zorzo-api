@@ -146,12 +146,10 @@ def _stream_chunk(payload: str) -> ChatChunk:
         text = delta.get("content") if isinstance(delta, dict) else None
         text = text if isinstance(text, str) else ""
         usage = data.get("usage")  # some providers send it with the last text, or on every frame
-        if isinstance(usage, dict) and usage:
-            return ChatChunk(
-                text=text,
-                tokens_in=int(usage.get("prompt_tokens") or 0),
-                tokens_out=int(usage.get("completion_tokens") or 0),
-            )
+        if isinstance(usage, dict):
+            tokens_in, tokens_out = usage.get("prompt_tokens"), usage.get("completion_tokens")
+            if isinstance(tokens_in, int) and isinstance(tokens_out, int):  # partial counts are no counts
+                return ChatChunk(text=text, tokens_in=tokens_in, tokens_out=tokens_out)
     except (ValueError, LookupError, TypeError, AttributeError) as exc:
         raise ProviderError("malformed frame") from exc
     return ChatChunk(text=text)

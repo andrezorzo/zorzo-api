@@ -33,3 +33,15 @@ async def test_a_usage_frame_with_an_odd_choice_still_reads() -> None:
     chunks = [c async for c in provider.chat_stream("m", [{"role": "user", "content": "q"}], max_tokens=5)]
     await provider.close()
     assert chunks == [ChatChunk(tokens_in=3, tokens_out=1)]
+
+
+async def test_null_token_counts_are_no_counts() -> None:
+    frames = (
+        b'data: {"choices":[{"delta":{"content":"end"}}],'
+        b'"usage":{"prompt_tokens":null,"completion_tokens":4}}\n\ndata: [DONE]\n\n'
+    )
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=frames))
+    provider = OpenAICompatProvider("https://provider.test/v1", "k", transport=transport)
+    chunks = [c async for c in provider.chat_stream("m", [{"role": "user", "content": "q"}], max_tokens=5)]
+    await provider.close()
+    assert chunks == [ChatChunk(text="end")]  # the counts can't be trusted half-way: none are taken

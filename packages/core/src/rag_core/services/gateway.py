@@ -174,8 +174,9 @@ class ModelGateway:
     ) -> AsyncIterator[str | Completion]:
         """Yields the answer's text as it comes, then its `Completion`.
 
-        A failure before the first token falls to the next entry; after it, `ModelsUnavailable`, and the
-        caller keeps the text it was given.
+        The answer starts with the model's first real text (leading whitespace is held back until then). A
+        failure, or a stream that ends with no text, before it falls to the next entry; a failure after it
+        raises `ModelsUnavailable`, and the caller keeps the text it was given.
         """
         chars = _prompt_chars(messages)
         max_tokens = self.config.stage(stage).max_tokens
@@ -219,8 +220,6 @@ class ModelGateway:
                             wrote = True
                             yield text
                             last_chunk_at = loop.time()  # the consumer's time isn't the provider's silence
-                if not wrote:
-                    raise ProviderError("stream ended without text")
             except BaseException as exc:
                 if wrote and loop.time() - last_chunk_at < FAIR_SHARE * self._timeouts[stage]:
                     ticket.blame_timeout = False  # the answer was still coming: alive, only long
@@ -234,6 +233,11 @@ class ModelGateway:
                 raise
             usage = Usage(tokens_in, tokens_out)
             cost = await self._close(ticket, None, usage)
+            if not wrote:
+                # The stream ended with no text (a content filter, the tokens spent on reasoning): the
+                # provider worked, the model missed, so like a schema miss it never counts toward the breaker.
+                log.warning("model_empty_answer", stage=stage, model=entry.model)
+                continue
             yield Completion("".join(parts), None, usage, cost, entry.provider, entry.model)
             return
         raise ModelsUnavailable(stage)
