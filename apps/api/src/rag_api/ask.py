@@ -20,13 +20,13 @@ from sse_starlette import EventSourceResponse, ServerSentEvent
 log = structlog.get_logger()
 router = APIRouter()
 
-TURNSTILE_TOKEN_MAX = 2048  # Cloudflare's maximum token length
+TURNSTILE_TOKEN_MAX_CHARS = 2048  # Cloudflare's maximum token length
 
 
 class AskRequest(BaseModel):
     q: str  # bounded by the body cap; max_question_chars applies after trimming
     session: UUID
-    turnstile: str = Field(min_length=1, max_length=TURNSTILE_TOKEN_MAX)
+    turnstile: str = Field(min_length=1, max_length=TURNSTILE_TOKEN_MAX_CHARS)
 
 
 class QueueSink:

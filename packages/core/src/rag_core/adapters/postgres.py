@@ -14,6 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from rag_core.ports import StoreUnavailableError
+from rag_core.units import MS_PER_S
 
 CONNECT_TIMEOUT_S = 5
 DEAD_SOCKET_MS = 10_000  # unacknowledged data for this long ends the connection
@@ -22,7 +23,6 @@ DEAD_SOCKET_MS = 10_000  # unacknowledged data for this long ends the connection
 KEEPALIVE_IDLE_S = 5
 KEEPALIVE_INTERVAL_S = 2
 KEEPALIVE_PROBES = 2
-MS_PER_S = 1000
 POOL_WAIT_S = 5
 PROBE_TIMEOUT_S = 2.0
 # A short statement (a budget row, an alert row, a log row) that takes seconds is stuck: Postgres ends a

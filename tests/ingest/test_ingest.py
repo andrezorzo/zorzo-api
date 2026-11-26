@@ -18,6 +18,7 @@ import psycopg
 import pytest
 import yaml
 from rag_core.ports import EMBEDDING_DIM
+from rag_ingest.__main__ import EXIT_SIGTERM
 
 from tests.conftest import ROOT, create_migrated_database, drop_database, run_ingest
 
@@ -299,6 +300,6 @@ def test_sigterm_rejects_the_candidate(db: str, source: Path, tmp_path: Path) ->
             if process.poll() is None:
                 process.kill()
                 print(process.communicate()[0])
-    assert process.returncode == 143, output
+    assert process.returncode == EXIT_SIGTERM, output
     assert "ingest_interrupted" in output
     assert rows(db, "SELECT status FROM corpus_versions") == [("rejected",)]

@@ -16,6 +16,7 @@ from rag_core.events import Degraded, DegradedReason, Done, Error, Hit, Retrieva
 from rag_core.limits import Limits
 from rag_core.ports import ActiveCorpus, Embedder, Reranker, SearchHit, TraceSink, VectorStore
 from rag_core.services import retrieval
+from rag_core.units import MS_PER_S
 
 log = structlog.get_logger()
 
@@ -26,7 +27,7 @@ def _stage(sink: TraceSink, name: StageName) -> Iterator[None]:
     started = time.perf_counter()
     sink.record(Stage(name=name, status="start", ms=None))
     yield
-    sink.record(Stage(name=name, status="end", ms=round((time.perf_counter() - started) * 1000)))
+    sink.record(Stage(name=name, status="end", ms=round((time.perf_counter() - started) * MS_PER_S)))
 
 
 def end_with_error(sink: TraceSink, trace_id: UUID) -> None:

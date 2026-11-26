@@ -10,6 +10,7 @@ from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from rag_core.errors import DEFAULT_MESSAGE, STATUS, ApiError, ErrorCode, error_body
+from rag_core.units import MS_PER_S
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 log = structlog.get_logger()
@@ -44,7 +45,7 @@ def install(app: FastAPI) -> None:
                 method=request.method,
                 path=request.url.path,
                 status=response.status_code,
-                ms=round((time.perf_counter() - started) * 1000),
+                ms=round((time.perf_counter() - started) * MS_PER_S),
             )
         return response
 

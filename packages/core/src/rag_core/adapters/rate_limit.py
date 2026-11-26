@@ -10,8 +10,9 @@ from datetime import datetime
 from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import ARRAY, DOUBLE_PRECISION, TEXT
 
-from rag_core.adapters.postgres import BOUNDS, MS_PER_S, Database, store_errors
+from rag_core.adapters.postgres import BOUNDS, Database, store_errors
 from rag_core.ports import Bucket
+from rag_core.units import MS_PER_S
 
 # The refilled level of a stored bucket at :now; `i` is the bucket's input row.
 _LEVEL = """least(i.capacity, b.tokens
