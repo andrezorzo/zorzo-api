@@ -102,11 +102,12 @@ class OpenAICompatProvider:
                         break
                     chunk, unreadable = _stream_chunk(payload)
                     odd += unreadable
-                    read_text = read_text or bool(chunk.text)
+                    read_text = read_text or bool(chunk.text.strip())  # as the gateway counts text
                     yield chunk
                 if odd:
                     log.warning("provider_odd_frames", model=model, frames=odd)
                     if not read_text:  # a stream we can't read at all is the provider's failure, not a miss
+                        # Settled at the estimate even if a usage frame came: the conservative side.
                         raise ProviderError("unreadable stream")
         except httpx.HTTPError as exc:
             raise ProviderError(type(exc).__name__) from exc
@@ -191,9 +192,14 @@ def _text(content: object) -> str | None:
         return content
     if isinstance(content, dict):  # one part sent on its own
         content = [content]
-    if isinstance(content, list):
-        return "".join(p["text"] for p in content if _answer_part(p))
-    return None
+    if not isinstance(content, list):
+        return None
+    answer = [p["text"] for p in content if _answer_part(p)]
+    if answer or not content:
+        return "".join(answer)
+    # No answer part: parts of a known kind (reasoning, an image) are no text yet; nothing recognizable is
+    # unreadable, so a provider that sends only that fails instead of passing for the model's empty answer.
+    return "" if any(isinstance(p, dict) and isinstance(p.get("type"), str) for p in content) else None
 
 
 def _answer_part(part: object) -> bool:

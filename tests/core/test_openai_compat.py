@@ -1,5 +1,7 @@
 """AC6: the OpenAI-compatible adapter reads a stream as providers send it."""
 
+import json
+
 import httpx
 import pytest
 from rag_core.adapters.openai_compat import OpenAICompatProvider, _counts
@@ -139,7 +141,7 @@ async def test_an_error_choice_is_the_providers_failure() -> None:
 async def test_an_odd_streamed_delta_is_no_text_not_a_failure() -> None:
     frames = (
         b'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n'
-        b'data: {"choices":[{"delta":{"content":{}}}]}\n\n'
+        b'data: {"choices":[{"delta":{"content":7}}]}\n\n'
         b'data: {"choices":[{"delta":{"content":" there"}}]}\n\ndata: [DONE]\n\n'
     )
     transport = httpx.MockTransport(lambda request: httpx.Response(200, content=frames))
@@ -179,3 +181,28 @@ async def test_an_odd_part_type_is_skipped_not_a_crash() -> None:
     result = await provider.chat("m", [{"role": "user", "content": "q"}], max_tokens=5, schema=None)
     await provider.close()
     assert result.text == "ok"
+
+
+@pytest.mark.parametrize(
+    ("content", "unreadable"),
+    [
+        ([7], True),
+        ([{"type": ["text"], "text": "x"}], True),
+        ({}, True),
+        ([{"type": "reasoning", "text": "x"}], False),
+    ],
+)
+async def test_parts_with_nothing_recognizable_are_unreadable(content: object, unreadable: bool) -> None:
+    frame = json.dumps({"choices": [{"delta": {"content": content}}]}).encode()
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, content=b"data: " + frame + b"\n\ndata: [DONE]\n\n")
+    )
+    provider = OpenAICompatProvider("https://provider.test/v1", "k", transport=transport)
+    try:
+        _ = [c async for c in provider.chat_stream("m", [{"role": "user", "content": "q"}], max_tokens=5)]
+    except ProviderError:
+        failed = True
+    else:
+        failed = False
+    await provider.close()
+    assert failed is unreadable
