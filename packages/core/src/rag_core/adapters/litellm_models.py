@@ -13,7 +13,7 @@ import os
 # Set before LiteLLM is imported: otherwise the import fetches the model cost map from GitHub.
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any, cast
 
 import litellm
@@ -33,7 +33,6 @@ from litellm.types.router import RouterRateLimitError
 
 from rag_core.models_config import Entry, ModelsConfig, Provider, StageName, entry_id
 from rag_core.ports import (
-    ChatChunk,
     ChatResult,
     ContextTooLongError,
     Cooldown,
@@ -58,9 +57,8 @@ _LIBRARY_ERRORS = (openai.OpenAIError, RouterRateLimitError)
 
 class LiteLLMModels:
     def __init__(self, config: ModelsConfig, keys: Mapping[str, str | None], cooldown_s: float) -> None:
-        """`keys` maps each provider's name to its key (None for a keyless one). Build it inside the running
-        event loop: the Router starts background tasks."""
-        self._paid: dict[str, dict[str, Any]] = {}
+        """`keys` maps each provider's name to its key (None for a keyless one)."""
+        self._paid: dict[str, tuple[str, dict[str, Any]]] = {}  # stage → (entry id, LiteLLM params)
         deployments: list[dict[str, Any]] = []
         for stage in STAGES:
             chain = config.stage(stage)
@@ -76,7 +74,7 @@ class LiteLLMModels:
             if chain.paid is not None:
                 paid = chain.paid
                 params = _params(stage, paid, config.providers[paid.provider], keys.get(paid.provider))
-                self._paid[stage] = {**params, "_entry": entry_id(stage, paid)}
+                self._paid[stage] = (entry_id(stage, paid), params)
         self._router = Router(model_list=deployments, num_retries=0, cooldown_time=cooldown_s)
 
     async def complete(
@@ -88,35 +86,20 @@ class LiteLLMModels:
         schema: dict[str, Any] | None,
         timeout: float,
     ) -> ChatResult:
-        try:
-            response = await self._router.acompletion(
-                model=stage,
-                messages=_messages(messages),
-                max_tokens=max_tokens,
-                timeout=timeout,
-                **_format(schema),
-            )
-        except _LIBRARY_ERRORS as exc:
-            raise _provider_error(exc) from None
-        return _result(response, str(response._hidden_params.get("model_id") or ""))
+        call = self._router.acompletion(
+            model=stage, **_request(messages, max_tokens, timeout), **_format(schema)
+        )
+        return await _complete(call, entry=None)
 
-    async def stream(
+    def stream(
         self, stage: str, messages: list[dict[str, str]], *, max_tokens: int, timeout: float
-    ) -> AsyncIterator[ChatChunk]:
-        try:
-            response = await self._router.acompletion(
-                model=stage,
-                messages=_messages(messages),
-                max_tokens=max_tokens,
-                timeout=timeout,
-                stream_timeout=timeout,
-                stream=True,
-                stream_options={"include_usage": True},
-            )
-            async for chunk in _chunks(response):
-                yield chunk
-        except _LIBRARY_ERRORS as exc:
-            raise _provider_error(exc) from None
+    ) -> AsyncIterator[str | ChatResult]:
+        return _stream(
+            lambda: self._router.acompletion(
+                model=stage, **_request(messages, max_tokens, timeout, stream=True)
+            ),
+            entry=None,
+        )
 
     async def complete_paid(
         self,
@@ -127,39 +110,22 @@ class LiteLLMModels:
         schema: dict[str, Any] | None,
         timeout: float,
     ) -> ChatResult:
-        params = self._paid_params(stage)
-        try:
-            response = await litellm.acompletion(
-                **params,
-                messages=_messages(messages),
-                max_tokens=max_tokens,
-                timeout=timeout,
-                num_retries=0,
-                **_format(schema),
-            )
-        except _LIBRARY_ERRORS as exc:
-            raise _provider_error(exc) from None
-        return _result(response, self._paid[stage]["_entry"])
+        entry, params = self._paid_entry(stage)
+        call = litellm.acompletion(
+            **params, num_retries=0, **_request(messages, max_tokens, timeout), **_format(schema)
+        )
+        return await _complete(call, entry)
 
-    async def stream_paid(
+    def stream_paid(
         self, stage: str, messages: list[dict[str, str]], *, max_tokens: int, timeout: float
-    ) -> AsyncIterator[ChatChunk]:
-        params = self._paid_params(stage)
-        try:
-            response = await litellm.acompletion(
-                **params,
-                messages=_messages(messages),
-                max_tokens=max_tokens,
-                timeout=timeout,
-                stream_timeout=timeout,
-                num_retries=0,
-                stream=True,
-                stream_options={"include_usage": True},
-            )
-            async for chunk in _chunks(response, self._paid[stage]["_entry"]):
-                yield chunk
-        except _LIBRARY_ERRORS as exc:
-            raise _provider_error(exc) from None
+    ) -> AsyncIterator[str | ChatResult]:
+        entry, params = self._paid_entry(stage)
+        return _stream(
+            lambda: litellm.acompletion(
+                **params, num_retries=0, **_request(messages, max_tokens, timeout, stream=True)
+            ),
+            entry,
+        )
 
     async def rerank(self, query: str, documents: list[str], *, timeout: float) -> list[float]:
         try:
@@ -188,10 +154,10 @@ class LiteLLMModels:
         self._router.discard()  # type: ignore[no-untyped-call]
         await close_litellm_async_clients()  # type: ignore[no-untyped-call]
 
-    def _paid_params(self, stage: str) -> dict[str, Any]:
+    def _paid_entry(self, stage: str) -> tuple[str, dict[str, Any]]:
         if stage not in self._paid:
             raise ProviderError("no paid entry")
-        return {k: v for k, v in self._paid[stage].items() if not k.startswith("_")}
+        return self._paid[stage]
 
 
 def _params(stage: StageName, entry: Entry, provider: Provider, key: str | None) -> dict[str, Any]:
@@ -201,11 +167,6 @@ def _params(stage: StageName, entry: Entry, provider: Provider, key: str | None)
     if stage == "rerank":
         return {"model": f"cohere/{entry.model}", "api_base": f"{base}/rerank", "api_key": key or KEYLESS}
     return {"model": f"{provider.kind}/{entry.model}", "api_base": base, "api_key": key or KEYLESS}
-
-
-def _messages(messages: list[dict[str, str]]) -> Any:
-    """Our `{role, content}` dicts, which LiteLLM types as a union of TypedDicts."""
-    return cast(Any, messages)
 
 
 def _format(schema: dict[str, Any] | None) -> dict[str, Any]:
@@ -219,7 +180,22 @@ def _format(schema: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def _result(response: Any, entry: str) -> ChatResult:
+def _request(
+    messages: list[dict[str, str]], max_tokens: int, timeout: float, stream: bool = False
+) -> dict[str, Any]:
+    """The arguments every call shares; `messages` as LiteLLM types them (a union of TypedDicts)."""
+    request: dict[str, Any] = {"messages": cast(Any, messages), "max_tokens": max_tokens, "timeout": timeout}
+    if stream:
+        request |= {"stream": True, "stream_timeout": timeout, "stream_options": {"include_usage": True}}
+    return request
+
+
+async def _complete(call: Awaitable[Any], entry: str | None) -> ChatResult:
+    """One answer; `entry` is the paid entry's id, or None to take the free entry the Router chose."""
+    try:
+        response = await call
+    except _LIBRARY_ERRORS as exc:
+        raise _provider_error(exc) from None
     content = response.choices[0].message.content if response.choices else None
     if content is not None and not isinstance(content, str):
         raise ProviderError("unreadable content")
@@ -228,30 +204,42 @@ def _result(response: Any, entry: str) -> ChatResult:
         content or "",
         getattr(usage, "prompt_tokens", 0) or 0,
         getattr(usage, "completion_tokens", 0) or 0,
-        entry,
-        _cost(response),
+        entry or str(response._hidden_params.get("model_id") or ""),
+        _cost(usage),
     )
 
 
-async def _chunks(response: Any, entry: str | None = None) -> AsyncIterator[ChatChunk]:
-    tokens_in = tokens_out = None
-    async for piece in response:
-        usage = getattr(piece, "usage", None)
-        if usage is not None:
-            tokens_in, tokens_out = usage.prompt_tokens, usage.completion_tokens
-        text = piece.choices[0].delta.content if piece.choices else None
-        if text is not None and not isinstance(text, str):
-            raise ProviderError("unreadable content")
-        if text:
-            yield ChatChunk(text)
-    hidden = getattr(response, "_hidden_params", {}) or {}
-    yield ChatChunk("", tokens_in, tokens_out, entry or hidden.get("model_id"), _cost(response))
+async def _stream(call: Callable[[], Awaitable[Any]], entry: str | None) -> AsyncIterator[str | ChatResult]:
+    """The text as it comes, then the `ChatResult`. A break after text is a failure that ran (and billed),
+    whatever LiteLLM makes of it: this code knows text went out, the library's wrapper may not say so."""
+    parts: list[str] = []
+    usage: Any = None
+    try:
+        response = await call()
+        async for piece in response:
+            usage = getattr(piece, "usage", None) or usage
+            text = piece.choices[0].delta.content if piece.choices else None
+            if text is not None and not isinstance(text, str):
+                raise ProviderError("unreadable content")
+            if text:
+                parts.append(text)
+                yield text
+    except _LIBRARY_ERRORS as exc:
+        if parts:
+            raise ProviderError("stream broke") from None
+        raise _provider_error(exc) from None
+    yield ChatResult(
+        "".join(parts),
+        getattr(usage, "prompt_tokens", 0) or 0,
+        getattr(usage, "completion_tokens", 0) or 0,
+        entry or str((getattr(response, "_hidden_params", {}) or {}).get("model_id") or ""),
+        _cost(usage),
+    )
 
 
-def _cost(response: Any) -> float | None:
-    """What OpenRouter reported it billed (`usage.cost`, copied by LiteLLM); None when it reported nothing."""
-    hidden = getattr(response, "_hidden_params", {}) or {}
-    reported = (hidden.get("additional_headers") or {}).get("llm_provider-x-litellm-response-cost")
+def _cost(usage: Any) -> float | None:
+    """What OpenRouter reported it billed (`usage.cost`); None when it reported nothing."""
+    reported = getattr(usage, "cost", None)
     try:
         return float(reported) if reported is not None else None
     except (TypeError, ValueError):
@@ -261,12 +249,10 @@ def _cost(response: Any) -> float | None:
 def _provider_error(exc: BaseException) -> Exception:
     """LiteLLM's error as ours: a timeout, a 429, a prompt too long, or a failure that was refused or may have
     run (LLD "6.2 Daily budget": only a refused call releases its reservation)."""
-    if isinstance(exc, MidStreamFallbackError):
-        # A stream that broke. Before any text, it is the original failure; after it, the provider ran (and
-        # billed), whatever status LiteLLM gives the wrapper (503 when the original had none).
-        if exc.is_pre_first_chunk and not exc.generated_content and exc.original_exception is not None:
-            return _provider_error(exc.original_exception)
-        return ProviderError("stream broke")
+    if isinstance(exc, MidStreamFallbackError) and exc.original_exception is not None:
+        # LiteLLM wraps a stream's failure, with status 503 when the original had none; the original says
+        # what happened (a break after text is classified by `_stream`, which knows text went out).
+        return _provider_error(exc.original_exception)
     if isinstance(exc, Timeout):
         return TimeoutError("timeout")
     if isinstance(exc, RateLimitError | RouterRateLimitError):

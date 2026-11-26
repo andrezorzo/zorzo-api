@@ -6,6 +6,7 @@ thread with its own event loop (LLD "10. Development environment").
 
 import asyncio
 import threading
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -73,16 +74,11 @@ class FakeServer:
 
     def __enter__(self) -> str:
         self._thread.start()
-        started = threading.Event()
-
-        def wait() -> None:
-            while not self._server.started:
-                threading.Event().wait(0.01)
-            started.set()
-
-        threading.Thread(target=wait, daemon=True).start()
-        if not started.wait(STARTUP_TIMEOUT_S):
-            raise RuntimeError("fake server did not start")
+        deadline = time.monotonic() + STARTUP_TIMEOUT_S
+        while not self._server.started:
+            if time.monotonic() > deadline or not self._thread.is_alive():
+                raise RuntimeError("fake server did not start")
+            time.sleep(0.01)
         port = self._server.servers[0].sockets[0].getsockname()[1]
         return f"http://127.0.0.1:{port}"
 

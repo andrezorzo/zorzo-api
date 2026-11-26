@@ -140,20 +140,8 @@ class ChatResult:
 
 
 @dataclass(frozen=True)
-class ChatChunk:
-    """One piece of a streamed answer: its text, its token counts (usually on the last piece), and on the last
-    piece the entry that answered and the cost the provider reported."""
-
-    text: str = ""
-    tokens_in: int | None = None
-    tokens_out: int | None = None
-    entry: str | None = None
-    cost_usd: float | None = None
-
-
-@dataclass(frozen=True)
 class Cooldown:
-    """A free entry the Router keeps out for now (LLD "6.6 Circuit breaker")."""
+    """A free entry the Router keeps out for now (LLD "6.6 Circuit breaker", the LiteLLM cooldown)."""
 
     status: str  # the status that caused it ("429", "500", "408" …)
     started_at: float  # epoch seconds
@@ -179,7 +167,8 @@ class ModelRouter(Protocol):
 
     def stream(
         self, stage: str, messages: list[dict[str, str]], *, max_tokens: int, timeout: float
-    ) -> AsyncIterator[ChatChunk]: ...
+    ) -> AsyncIterator[str | ChatResult]:
+        """The answer's text as it comes, then its `ChatResult` (the whole text, usage, entry, cost)."""
 
     async def complete_paid(
         self,
@@ -193,7 +182,7 @@ class ModelRouter(Protocol):
 
     def stream_paid(
         self, stage: str, messages: list[dict[str, str]], *, max_tokens: int, timeout: float
-    ) -> AsyncIterator[ChatChunk]: ...
+    ) -> AsyncIterator[str | ChatResult]: ...
 
     async def rerank(self, query: str, documents: list[str], *, timeout: float) -> list[float]:
         """One score per document, in the documents' order."""
@@ -362,7 +351,6 @@ __all__ = [
     "Bucket",
     "Budget",
     "BudgetState",
-    "ChatChunk",
     "ChatResult",
     "ChunkRow",
     "ContextTooLongError",

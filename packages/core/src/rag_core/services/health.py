@@ -28,7 +28,7 @@ MODE_TIMEOUT_S = 2.0
 
 async def check(probe: HealthProbe, gateway: ModelGateway) -> HealthReport:
     """`degraded` whenever a question would go search-only for a reason the gateway gives (budget at the cap,
-    every `answer` entry open, no `answer` entry within quota)."""
+    or every free `answer` entry cooling down while the paid entry can't run)."""
     try:
         await probe.ping()
         async with asyncio.timeout(MODE_TIMEOUT_S):
