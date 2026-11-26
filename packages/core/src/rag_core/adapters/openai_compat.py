@@ -140,17 +140,21 @@ def _raise_for_status(response: httpx.Response) -> None:
 def _stream_chunk(payload: str) -> ChatChunk:
     """One data frame: its text, if any, and its token counts, if any (some providers send them with text).
 
-    A frame without text (a role or reasoning delta) still comes from the model, so it is still a chunk; one
-    whose content we can't read is a malformed frame, the provider's failure.
+    A frame without text (a role or reasoning delta) still comes from the model, so it is still a chunk. A
+    frame of the wrong shape is a "malformed frame", and one whose content isn't a string "unreadable
+    content": both the provider's failure.
     """
     try:
         data = json.loads(payload)
         if isinstance(data, dict) and data.get("error"):  # a mid-stream failure, as OpenRouter sends it
             raise ProviderError("error frame")
-        choices = data.get("choices") or []
+        choices = data.get("choices")
+        choices = [] if choices is None else choices
         if not isinstance(choices, list):
             raise ProviderError("malformed frame")
         choice = choices[0] if choices else None  # a usage-only frame may have no choice, or a null one
+        if choice is not None and not isinstance(choice, dict):
+            raise ProviderError("malformed frame")
         if isinstance(choice, dict) and _choice_failed(choice):
             raise ProviderError("error frame")
         delta = choice.get("delta") if isinstance(choice, dict) else None

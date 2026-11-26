@@ -145,6 +145,8 @@ async def test_a_streamed_error_choice_after_text_is_the_providers_failure() -> 
         (b'{"choices":[{"delta":{"content":7}}]}', "unreadable content"),
         (b'{"choices":[{"delta":"Hello"}]}', "malformed frame"),
         (b'{"choices":{"delta":{"content":"x"}}}', "malformed frame"),
+        (b'{"choices":["42"]}', "malformed frame"),
+        (b'{"choices":{}}', "malformed frame"),
     ],
 )
 async def test_a_frame_we_cant_read_before_any_text_fails_the_stream(frame: bytes, kind: str) -> None:
