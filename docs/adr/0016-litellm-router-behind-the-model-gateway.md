@@ -28,8 +28,3 @@ request's deadline; free-tier limits are learned from the provider's 429 instead
 a dependency with a large surface and a supply-chain history (versions 1.82.7 and 1.82.8 were malicious,
 March 2026), handled by an exact pin, releases at least two weeks old with a matching GitHub release, and
 upgrades as reviewed PRs.
-
-Interview answer: "I first built the fallback chain myself to understand the failure modes, then moved the
-free part onto LiteLLM's Router, because a maintained library beats code I have to keep alive. I kept the
-paid call outside it: its budget check isn't atomic under concurrency, and with a hard ten-cent daily cap I
-reserve the cost in Postgres before calling."
