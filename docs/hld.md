@@ -1,6 +1,6 @@
 # HLD — zorzo.dev.br
 
-2026-11-25 · André de Castro Zorzo · Status: draft · LLD: [lld.md](lld.md) · Brief: [product-brief.md](product-brief.md)
+2026-11-26 · André de Castro Zorzo · Status: draft · LLD: [lld.md](lld.md) · Brief: [product-brief.md](product-brief.md)
 
 ## 1. Context and goals
 
@@ -391,7 +391,7 @@ the corpus and the brain data can be rebuilt from git.
   trace, and the trace leads to its logs.
 - **Metrics:** `/status` shows p50/p95 latency, cost per answer, budget used, the active model chain and
   breaker state, all computed from traces and counters. Quality metrics come from eval runs.
-- **Alerts:** daily budget exhausted and all answer providers down go to André on Telegram through a bot,
+- **Alerts:** the daily budget reaching its paid cutoff (and then running out) and all answer providers down go to André on Telegram through a bot,
   from the API; site down goes by email straight from UptimeRobot, never through the API, so it arrives
   even when the VPS is down. Each alert fires once per incident, not
   on every request. Failed ingest or deploy runs are already reported by GitHub.
