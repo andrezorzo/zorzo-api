@@ -160,6 +160,7 @@ class ModelRouter(Protocol):
     async def complete(
         self,
         entry_id: str,
+        /,
         messages: list[dict[str, str]],
         *,
         max_tokens: int,
@@ -168,11 +169,13 @@ class ModelRouter(Protocol):
     ) -> ChatResult: ...
 
     def stream(
-        self, entry_id: str, messages: list[dict[str, str]], *, max_tokens: int, timeout: float
+        self, entry_id: str, /, messages: list[dict[str, str]], *, max_tokens: int, timeout: float
     ) -> AsyncIterator[str | ChatResult]:
         """The answer's text as it comes, then its `ChatResult` (the whole text, usage, entry, cost)."""
 
-    async def rerank(self, entry_id: str, query: str, documents: list[str], *, timeout: float) -> list[float]:
+    async def rerank(
+        self, entry_id: str, /, query: str, documents: list[str], *, timeout: float
+    ) -> list[float]:
         """One score per document, in the documents' order."""
 
     async def cooldowns(self) -> dict[str, Cooldown]:

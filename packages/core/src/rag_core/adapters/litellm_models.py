@@ -3,13 +3,13 @@ entry, called by the gateway entry by entry.
 
 The Router makes each call (timeouts, the provider's quirks, the cost OpenRouter reports) and keeps the
 cooldowns: a 429, a 401 or a 404 cools an entry at once, for `Retry-After` when the provider sends one;
-any other failure cools it on the `FAILS_BEFORE_COOLDOWN + 1`-th within the cooldown time. LiteLLM leaves
-some failures out of that count (a dropped connection, a 402 on a lone deployment, and what this adapter
-finds wrong in a 200), so each call checks the count moved and adds the failure through LiteLLM's own
-counting when it didn't. There is no
-same-entry retry (`num_retries=0`: the next entry is the retry) and no Router fallback (the gateway walks
-the chain). Failures come out as `ProviderError` (`refused` when the provider turned the call down) or
-`TimeoutError`; the message names the kind, never the request or the response.
+another failure of the entry cools it on the `FAILS_BEFORE_COOLDOWN + 1`-th within the cooldown time.
+LiteLLM leaves three kinds of the entry's failures out of that count: a dropped connection, a 402, and what
+this adapter finds wrong in a 200. The adapter adds exactly those, through LiteLLM's own counting. A
+failure the request caused (a prompt too long, a 400, a 403) never counts: a visitor's question must not cool
+an entry. There is no same-entry retry (`num_retries=0`: the next entry is the retry) and no Router fallback
+(the gateway walks the chain). Failures come out as `ProviderError` (`refused` when the provider turned the
+call down) or `TimeoutError`; the message names the kind, never the request or the response.
 """
 
 import math
@@ -96,6 +96,7 @@ class LiteLLMModels:
     async def complete(
         self,
         entry_key: str,
+        /,
         messages: list[dict[str, str]],
         *,
         max_tokens: int,
@@ -120,7 +121,7 @@ class LiteLLMModels:
         return ChatResult(content or "", tokens_in, tokens_out, entry_key, _cost(usage))
 
     def stream(
-        self, entry_key: str, messages: list[dict[str, str]], *, max_tokens: int, timeout: float
+        self, entry_key: str, /, messages: list[dict[str, str]], *, max_tokens: int, timeout: float
     ) -> AsyncIterator[str | ChatResult]:
         request = _request(messages, max_tokens, timeout, stream=True)
         return self._stream(lambda: self._router.acompletion(model=entry_key, **request), entry_key)
@@ -195,30 +196,21 @@ class LiteLLMModels:
 
     @contextmanager
     def _failures_counted(self, entry_key: str) -> Iterator[None]:
-        """Make each failure of a call count once toward the entry's cooldown (see the module docstring)."""
-        before = self._fails(entry_key)
+        """Add to the entry's cooldown count the failures LiteLLM leaves out (see the module docstring)."""
         try:
             yield
         except (ProviderError, TimeoutError) as exc:
-            cause = exc.__cause__
-            if not isinstance(cause, RouterRateLimitError) and self._fails(entry_key) == before:
-                counted = cause if isinstance(cause, Exception) else exc
-                if should_cooldown_based_on_allowed_fails_policy(self._router, entry_key, counted):
-                    status = getattr(cause, "status_code", None)
-                    self._router.cooldown_cache.add_deployment_to_cooldown(
-                        model_id=entry_key,
-                        original_exception=counted,
-                        exception_status=status
-                        if isinstance(status, int)
-                        else HTTPStatus.INTERNAL_SERVER_ERROR,
-                        cooldown_time=self._cooldown_s,
-                    )
+            skipped = _skipped_by_litellm(exc)
+            if skipped is not None and should_cooldown_based_on_allowed_fails_policy(
+                self._router, entry_key, skipped
+            ):
+                self._router.cooldown_cache.add_deployment_to_cooldown(
+                    model_id=entry_key,
+                    original_exception=skipped,
+                    exception_status=_status(skipped) or HTTPStatus.INTERNAL_SERVER_ERROR,
+                    cooldown_time=self._cooldown_s,
+                )
             raise
-
-    def _fails(self, entry_key: str) -> int:
-        """The entry's failures in LiteLLM's count (the key its allowed-fails logic uses)."""
-        count = self._router.cache.get_cache(key=f"deployment:{entry_key}:allowed_fails", local_only=True)
-        return count if isinstance(count, int) else 0
 
 
 def _params(stage: StageName, entry: Entry, provider: Provider, key: str | None) -> dict[str, Any]:
@@ -254,6 +246,27 @@ def _format(schema: dict[str, Any] | None) -> dict[str, Any]:
             "json_schema": {"name": "output", "strict": True, "schema": schema},
         }
     }
+
+
+def _skipped_by_litellm(exc: BaseException) -> Exception | None:
+    """The failure to count, when it is the entry's and LiteLLM's cooldown accounting doesn't count it: an
+    error this adapter found in a 200 (no library error behind it), a dropped connection (LiteLLM skips any
+    error whose text names `APIConnectionError`), or a 402 (skipped on a lone deployment)."""
+    cause = exc.__cause__
+    if isinstance(cause, MidStreamFallbackError) and cause.original_exception is not None:
+        cause = cause.original_exception
+    if cause is None:
+        return exc if isinstance(exc, Exception) else None
+    if not isinstance(cause, Exception) or isinstance(cause, RouterRateLimitError):
+        return None  # an entry already cooling: nothing new
+    if "APIConnectionError" in str(cause) or _status(cause) == HTTPStatus.PAYMENT_REQUIRED:
+        return cause
+    return None
+
+
+def _status(exc: BaseException) -> int | None:
+    status = getattr(exc, "status_code", None)
+    return status if isinstance(status, int) else None
 
 
 def _failed_choice(choice: Any) -> bool:

@@ -171,12 +171,23 @@ async def test_repeated_failures_cool_an_entry(rig: Rig, failure: str) -> None:
     assert rig.fake.models_called()[calls:] == [B]  # A cooling: no request
 
 
-async def test_repeated_broken_streams_cool_an_entry(rig: Rig) -> None:
+async def test_broken_streams_cool_an_entry_on_the_third(rig: Rig) -> None:
     rig.fake.always(A, "break_after_first_token")  # a dropped connection: LiteLLM leaves it out of its count
-    for _ in range(FAILS_BEFORE_COOLDOWN + 1):
+    for _ in range(FAILS_BEFORE_COOLDOWN):
         with pytest.raises(ModelsUnavailableError):
             await rig.stream()
+    await asyncio.sleep(0.2)  # LiteLLM counts a stream's failure on a thread: let it, if it would
+    assert f"answer:openrouter/{A}" not in await rig.gateway.models.cooldowns()  # counted once each
+    with pytest.raises(ModelsUnavailableError):
+        await rig.stream()
     assert f"answer:openrouter/{A}" in await rig.gateway.models.cooldowns()
+
+
+async def test_a_prompt_too_long_never_cools_an_entry(rig: Rig) -> None:
+    rig.fake.always(A, "context_too_long")  # the visitor's question, not the entry: it must not cool it
+    for _ in range(FAILS_BEFORE_COOLDOWN + 2):
+        await rig.complete()
+    assert f"answer:openrouter/{A}" not in await rig.gateway.models.cooldowns()
 
 
 class Verdict(BaseModel):
@@ -230,13 +241,13 @@ async def test_a_negative_reported_cost_is_ignored(rig: Rig) -> None:
     assert result.cost_usd == pytest.approx(price)  # never less than spent, never a broken number
 
 
-async def test_a_reported_cost_far_past_the_estimate_settles_at_the_estimate(rig: Rig) -> None:
+async def test_a_reported_cost_far_past_the_estimate_settles_at_twice_the_estimate(rig: Rig) -> None:
     rig.fake.script(A, "error")
     rig.fake.script(B, "error")
     rig.fake.script(PAID, Reply(cost=250.0))  # a provider's bug: one answer can't cost the day's budget
     result = await rig.complete()
-    assert result.cost_usd == pytest.approx(ESTIMATE)
-    assert rig.spent_today() == pytest.approx(ESTIMATE, abs=1e-6)
+    assert result.cost_usd == pytest.approx(2 * ESTIMATE)
+    assert rig.spent_today() == pytest.approx(2 * ESTIMATE, abs=1e-6)
 
 
 async def test_skips_a_paid_entry_the_budget_cant_cover(rig: Rig) -> None:
@@ -452,7 +463,7 @@ async def test_a_cooldown_that_restarts_between_looks_is_logged_as_both(rig: Rig
 
 async def test_a_cooldown_renewed_before_it_ended_is_the_same_cooldown(rig: Rig) -> None:
     entry = f"answer:openrouter/{A}"
-    looks = iter([{entry: Cooldown("429", 1.0, 30.0)}, {entry: Cooldown("500", 10.0, 60.0)}])
+    looks = iter([{entry: Cooldown("429", 1.0, 30.0)}, {entry: Cooldown("429", 10.0, 30.0)}])
 
     async def cooldowns() -> dict[str, Cooldown]:
         return next(looks)

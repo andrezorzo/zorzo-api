@@ -41,7 +41,7 @@ CHARS_PER_TOKEN = 3  # conservative for English and Portuguese, no tokenizer (LL
 ATTEMPTS_PER_FREE_ENTRY = 2
 RATE_LIMITED = "429"
 # The estimate already assumes the longest answer, so a settle past this multiple of it is a provider's bug
-# (a unit change, a broken count), and the estimate is kept instead (LLD "6.2 Daily budget").
+# (a unit change, a broken count): it settles at the multiple (LLD "6.2 Daily budget").
 MAX_COST_OVER_ESTIMATE = 2
 # The background work gets this long at shutdown, its three kinds at once, plus a short wait for what it
 # cancels (`CANCEL_WAIT_S`): Docker kills the container 10 s after SIGTERM.
@@ -429,8 +429,8 @@ class ModelGateway:
 
     async def _note_cooldowns(self) -> None:
         """Refresh the cooldowns and write the ones that started or ended since the last look (LLD "6.6
-        Circuit breaker"). A cooldown that ended and started again in between counts as both; one renewed
-        before it ended (LiteLLM restarts it on a later failure) is the same cooldown."""
+        Circuit breaker"). A cooldown that ended and started again in between counts as both, and so does one
+        renewed for another cause; one renewed for the same cause before it ended is the same cooldown."""
         try:
             now = await self.models.cooldowns()
         except Exception as exc:  # a bookkeeping failure never fails a question
@@ -439,7 +439,8 @@ class ModelGateway:
         restarted = {
             name
             for name, old in self._cooling.items()
-            if name in now and now[name].started_at >= old.started_at + old.length_s
+            if name in now
+            and (now[name].started_at >= old.started_at + old.length_s or now[name].status != old.status)
         }
         for name in self._cooling:
             if name not in now or name in restarted:
@@ -493,9 +494,10 @@ class ModelGateway:
             cost = reservation.estimate
         else:
             cost = (result.tokens_in * price.input_per_mtok + result.tokens_out * price.output_per_mtok) / 1e6
-        if cost > MAX_COST_OVER_ESTIMATE * reservation.estimate:
+        ceiling = MAX_COST_OVER_ESTIMATE * reservation.estimate
+        if cost > ceiling:
             log.warning("implausible_cost", stage=reservation.stage, cost=cost, estimate=reservation.estimate)
-            cost = reservation.estimate
+            cost = ceiling
         await self._settle(reservation, cost)
         return cost
 
