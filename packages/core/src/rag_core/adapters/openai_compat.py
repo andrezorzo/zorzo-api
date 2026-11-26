@@ -9,7 +9,7 @@ prompt or the response body.
 import json
 import math
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import structlog
@@ -177,7 +177,7 @@ def _stream_chunk(payload: str) -> tuple[ChatChunk, bool]:
     return ChatChunk(text=text), read is None
 
 
-ANSWER_PARTS = {None, "text", "output_text"}  # part types that are the answer; reasoning parts are not
+ANSWER_TYPES = {"text", "output_text"}  # part types that are the answer; reasoning parts are not
 
 
 def _text(content: object) -> str | None:
@@ -185,36 +185,50 @@ def _text(content: object) -> str | None:
 
     - Absent or null (a filter, a refusal, the tokens spent on reasoning: some providers leave the key out):
       "", the model's miss.
-    - A string, or a list of parts (a lone part counts as a list of one): the text of its answer parts;
-      "" when it has none but has parts of a known other kind (reasoning, an image), or no parts at all.
-    - None when nothing in it is readable (another type, parts of no known kind, an answer part whose text
-      isn't a string): the provider's failure.
+    - A string. Or a list of parts (a lone part counts as a list of one): the text of its answer parts. An
+      answer part with null or no text is empty, like a null content; one whose text is another type spoils
+      the whole content. With no answer text, parts of another known kind (reasoning, an image) or no parts
+      at all give "".
+    - None when it isn't readable (another type, a spoiled answer part, parts of no known kind): the
+      provider's failure.
     """
     if content is None:
         return ""
     if isinstance(content, str):
         return content
-    if isinstance(content, dict):  # one part sent on its own
+    if isinstance(content, dict):
         content = [content]
     if not isinstance(content, list):
         return None
-    answer = [p["text"] for p in content if _answer_part(p)]
-    if answer or not content:
-        return "".join(answer)
-    # No answer part: parts of a known kind (reasoning, an image) are no text yet; nothing recognizable is
-    # unreadable, so a provider that sends only that fails instead of passing for the model's empty answer.
-    known = any(
-        isinstance(p, dict) and isinstance(p.get("type"), str) and p["type"] not in ANSWER_PARTS
-        for p in content
-    )
-    return "" if known else None
+    texts: list[str] = []
+    no_text = not content  # an empty list, an empty answer part or a known other part: no text yet
+    for part in content:
+        kind = _part_kind(part)
+        if kind == "answer" and isinstance(part, dict):
+            text = part.get("text")
+            if isinstance(text, str):
+                texts.append(text)
+            elif text is None:
+                no_text = True
+            else:
+                return None
+        elif kind == "other":
+            no_text = True
+    if texts:
+        return "".join(texts)
+    return "" if no_text else None
 
 
-def _answer_part(part: object) -> bool:
-    if not isinstance(part, dict) or not isinstance(part.get("text"), str):
-        return False
+def _part_kind(part: object) -> Literal["answer", "other"] | None:
+    """An answer part (typed as one, or untyped with text), a part of another known kind, or neither."""
+    if not isinstance(part, dict):
+        return None
     kind = part.get("type")
-    return (kind is None or isinstance(kind, str)) and kind in ANSWER_PARTS
+    if kind is None:
+        return "answer" if isinstance(part.get("text"), str) else None
+    if not isinstance(kind, str):
+        return None
+    return "answer" if kind in ANSWER_TYPES else "other"
 
 
 def _choice_failed(choice: dict[str, Any]) -> bool:

@@ -212,15 +212,28 @@ async def test_parts_with_nothing_recognizable_are_unreadable(content: object, u
 
 
 @pytest.mark.parametrize(
-    ("content", "text"), [([{"type": "reasoning", "text": "x"}], ""), ([7], None), ({}, None)]
+    ("content", "text"),
+    [
+        ([{"type": "reasoning", "text": "x"}], ""),
+        ([{"type": "text", "text": None}], ""),  # an empty answer part, like a null content
+        ([{"type": "output_text"}], ""),
+        ([{"type": "text", "text": "an"}, 7, {"text": "swer"}], "answer"),
+        ([7], None),
+        ({}, None),
+        ([{"type": "text", "text": 7}], None),
+        ({"type": "text", "text": {"value": "hi"}}, None),
+        ([{"type": "reasoning", "text": "r"}, {"type": "text", "text": {"value": "hi"}}], None),
+        ([{"type": "text", "text": "hi"}, {"type": "text", "text": 7}], None),  # spoiled, not cut short
+    ],
 )
 async def test_chat_reads_parts_the_same_way(content: object, text: str | None) -> None:
     body = {"choices": [{"message": {"content": content}}]}
     transport = httpx.MockTransport(lambda request: httpx.Response(200, json=body))
     provider = OpenAICompatProvider("https://provider.test/v1", "k", transport=transport)
-    try:
-        result = await provider.chat("m", [{"role": "user", "content": "q"}], max_tokens=5, schema=None)
-        assert result.text == text
-    except ProviderError:
-        assert text is None  # unreadable: the provider's failure
+    messages = [{"role": "user", "content": "q"}]
+    if text is None:
+        with pytest.raises(ProviderError, match="malformed body"):
+            await provider.chat("m", messages, max_tokens=5, schema=None)
+    else:
+        assert (await provider.chat("m", messages, max_tokens=5, schema=None)).text == text
     await provider.close()
