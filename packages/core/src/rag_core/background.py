@@ -8,6 +8,8 @@ import structlog
 
 log = structlog.get_logger()
 
+CANCEL_WAIT_S = 1.0
+
 
 class BackgroundTasks:
     """Holds the running tasks (the event loop keeps only weak references) until they end."""
@@ -31,7 +33,10 @@ class BackgroundTasks:
                 while self._tasks:
                     await asyncio.gather(*self._tasks, return_exceptions=True)
         except TimeoutError:
-            stuck = sorted(t.get_coro().__qualname__ for t in self._tasks)  # type: ignore[union-attr]
-            log.error("background_tasks_stuck", tasks=stuck)
-            for task in list(self._tasks):
+            stuck = list(self._tasks)
+            log.error("background_tasks_stuck", tasks=sorted(t.get_coro().__qualname__ for t in stuck))  # type: ignore[union-attr]
+            for task in stuck:
                 task.cancel()
+            # Let them unwind (a rollback, a connection back to the pool) before the caller closes what they
+            # use; a task that ignores the cancel is left behind after this.
+            await asyncio.wait(stuck, timeout=CANCEL_WAIT_S)

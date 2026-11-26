@@ -10,7 +10,7 @@ from datetime import datetime
 from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import ARRAY, DOUBLE_PRECISION, TEXT
 
-from rag_core.adapters.postgres import Database, store_errors
+from rag_core.adapters.postgres import BOUNDS, Database, store_errors
 from rag_core.ports import Bucket
 
 # The refilled level of a stored bucket at :now; `i` is the bucket's input row.
@@ -41,7 +41,6 @@ RETURNING b.key
 # (cancelling a query on a dead socket waits on that socket).
 LOCK_TIMEOUT_S = 2.0  # Postgres's statement and lock timeout for a take: seconds mean it is stuck
 
-BOUNDS = text("SELECT set_config('statement_timeout', :ms, true), set_config('lock_timeout', :ms, true)")
 
 LEVELS = text(f"""
 {_INPUT}

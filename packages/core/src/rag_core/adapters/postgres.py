@@ -18,7 +18,7 @@ from rag_core.ports import StoreUnavailable
 CONNECT_TIMEOUT_S = 5
 PROBE_TIMEOUT_S = 2.0
 # A short statement (a budget row, an alert row, a log row) that takes seconds is stuck: Postgres ends a
-# statement or lock wait past this, and the whole call, connection included, gets one second more.
+# statement or lock wait past this. No client-side timeout: one could cut a COMMIT the server already did.
 SHORT_STATEMENT_S = 2.0
 
 BOUNDS = text("SELECT set_config('statement_timeout', :ms, true), set_config('lock_timeout', :ms, true)")
@@ -57,13 +57,13 @@ class Database:
 
     @asynccontextmanager
     async def short_transaction(self) -> AsyncIterator[AsyncConnection]:
-        """A transaction for a few short statements, bounded by `SHORT_STATEMENT_S`; a failure (a timeout
+        """A transaction whose statements Postgres ends past `SHORT_STATEMENT_S`; a failure (such a timeout
         included) is `StoreUnavailable`."""
         try:
-            async with asyncio.timeout(SHORT_STATEMENT_S + 1), self.engine.begin() as conn:
+            async with self.engine.begin() as conn:
                 await conn.execute(BOUNDS, {"ms": str(int(SHORT_STATEMENT_S * 1000))})
                 yield conn
-        except (OSError, SQLAlchemyError, TimeoutError) as exc:
+        except (OSError, SQLAlchemyError) as exc:
             raise StoreUnavailable(type(exc).__name__) from exc
 
     async def ping(self) -> None:

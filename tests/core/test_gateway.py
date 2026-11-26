@@ -356,7 +356,7 @@ async def test_the_alert_says_when_the_cutoff_becomes_search_only(rig: Rig) -> N
     messages = [m for _, m in rig.alerter.sent]
     assert len(messages) == 2
     assert "cutoff" in messages[0]
-    assert messages[1].startswith("still open: ") and "search-only" in messages[1]  # told at once
+    assert messages[1].startswith("still open: ") and "search-only" in messages[1]  # told within a minute
 
 
 async def test_a_paid_stream_that_breaks_after_text_keeps_its_estimate(rig: Rig) -> None:
@@ -414,3 +414,11 @@ async def test_a_later_rerank_entry_with_most_of_the_time_is_blamed(rig: Rig) ->
     with pytest.raises(ModelsUnavailable):
         await rig.gateway.rerank("q", ["a"])
     assert not rig.gateway.breakers.callable(("openrouter", "test/rerank-b:free"))
+
+
+async def test_the_callers_deadline_never_blames_the_provider_even_with_most_of_the_timeout(rig: Rig) -> None:
+    rig = with_limits(rig, timeout_answer=0.2, breaker_failures=1)
+    rig.fake.script(A, "hang")
+    with pytest.raises(ModelsUnavailable):
+        await rig.complete(deadline_at=rig.deadline(0.15))  # 75% of the stage timeout, cut by the caller
+    assert rig.gateway.breakers.closed(("openrouter", A))

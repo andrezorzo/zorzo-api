@@ -39,9 +39,10 @@ log = structlog.get_logger()
 
 CHARS_PER_TOKEN = 3  # conservative for English and Portuguese, no tokenizer (LLD "6.2 Daily budget")
 # A timeout counts toward the breaker only when the entry had at least this share of its stage timeout: with
-# less, the caller's deadline or the earlier entries of the chain ran it out, not the provider.
+# less, the earlier entries of the chain ran it out, not the provider.
 FAIR_SHARE = 0.5
-SHUTDOWN_DRAIN_S = 10.0  # each kind of background work gets this long at shutdown
+# The background work gets this long at shutdown, all of it: Docker kills the container 10 s after SIGTERM.
+SHUTDOWN_DRAIN_S = 7.0
 
 
 class ModelsUnavailable(Exception):
@@ -279,10 +280,12 @@ class ModelGateway:
         return None
 
     async def drain(self, timeout: float | None = None) -> None:
-        """Wait for the background work (settles of cancelled calls, alerts, breaker rows)."""
-        await self._background.drain(timeout)
-        await self.alerts.drain(timeout)
-        await self.breakers.event_log.drain(timeout)
+        """Wait for the background work (settles of cancelled calls, alerts, breaker rows), all of it within
+        `timeout`."""
+        loop = asyncio.get_running_loop()
+        ends_at = None if timeout is None else loop.time() + timeout
+        for drain in (self._background.drain, self.alerts.drain, self.breakers.event_log.drain):
+            await drain(None if ends_at is None else max(0.0, ends_at - loop.time()))
 
     async def close(self) -> None:
         """At shutdown: the background work, then every client the gateway owns (providers, alerter)."""
@@ -300,8 +303,11 @@ class ModelGateway:
         """`min(TIMEOUT_<STAGE>, time left)`; notes on the ticket whether its timeout is the provider's."""
         now = asyncio.get_running_loop().time()
         timeout = self._timeouts[ticket.stage]
-        granted = min(now + timeout, ticket.chain_ends_at, ticket.deadline_at) - now
-        ticket.blame_timeout = granted >= FAIR_SHARE * timeout
+        own_end = min(now + timeout, ticket.chain_ends_at)
+        granted = min(own_end, ticket.deadline_at) - now
+        # The provider's fault only when the gateway's own limit ended the call (never the caller's
+        # deadline) and the call had a fair share of its stage timeout.
+        ticket.blame_timeout = own_end <= ticket.deadline_at and granted >= FAIR_SHARE * timeout
         return granted
 
     def _out_of_time(self, deadline_at: float) -> bool:
@@ -372,7 +378,7 @@ class ModelGateway:
         """Record the verdict on the breaker and the quota, settle the reservation; returns the cost."""
         entry = ticket.entry
         key, trial = (entry.provider, entry.model), ticket.trial
-        # A timeout counts toward the breaker only when the stage timeout bound the call (LLD "6.6").
+        # A timeout counts toward the breaker only when `_time_for` said it is the provider's (LLD "6.6").
         if exc is None:
             self.breakers.success(key, trial)
         elif isinstance(exc, RateLimited):
