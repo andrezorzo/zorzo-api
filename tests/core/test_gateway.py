@@ -336,7 +336,7 @@ async def test_a_hanging_remote_rerank_opens_its_breaker(rig: Rig) -> None:
     assert not rig.gateway.breakers.callable(("openrouter", "test/rerank:free"))
 
 
-async def test_the_alert_says_when_the_paid_cutoff_becomes_search_only(rig: Rig) -> None:
+async def test_a_worse_budget_state_keeps_one_open_incident(rig: Rig) -> None:
     rig.seed_budget(0.08, paid_disabled=True)
     await rig.gateway.mode()
     await rig.gateway.drain()
@@ -344,4 +344,25 @@ async def test_the_alert_says_when_the_paid_cutoff_becomes_search_only(rig: Rig)
     await rig.gateway.mode()
     await rig.gateway.drain()
     messages = [m for _, m in rig.alerter.sent]
-    assert len(messages) == 2 and messages[1].startswith("now: ") and "search-only" in messages[1]
+    assert len(messages) == 1  # the open incident's next reminder carries the new message
+
+
+async def test_a_paid_stream_that_breaks_after_text_keeps_its_estimate(rig: Rig) -> None:
+    rig.fake.script(A, "error")
+    rig.fake.script(B, "error")
+    rig.fake.script(PAID, "break_after_first_token")
+    with pytest.raises(ModelsUnavailable):
+        async for _ in rig.gateway.stream(
+            "answer", MESSAGES, deadline_at=rig.deadline(), spend=RequestSpend(0.01)
+        ):
+            pass
+    assert rig.spent_today() > 0  # the provider ran: no refund
+
+
+async def test_the_remote_rerank_chain_gets_one_timeout(rig: Rig) -> None:
+    rig = with_limits(rig, timeout_rerank=0.2)
+    rig.fake.always("test/rerank:free", "hang")
+    started = time.monotonic()
+    with pytest.raises(ModelsUnavailable):
+        await rig.gateway.rerank("q", ["a"])
+    assert time.monotonic() - started < 0.5

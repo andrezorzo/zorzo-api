@@ -38,6 +38,7 @@ from rag_core.services.quota import Quota
 log = structlog.get_logger()
 
 CHARS_PER_TOKEN = 3  # conservative for English and Portuguese, no tokenizer (LLD "6.2 Daily budget")
+BLAME_SLACK_S = 0.05
 
 
 class ModelsUnavailable(Exception):
@@ -85,6 +86,7 @@ class _Ticket:
     # False when the call's time ran out for a reason that says nothing about the provider: the request's
     # deadline came before the stage timeout, or a slow consumer of the stream held the time.
     blame_timeout: bool = True
+    streamed: bool = False  # a stream already gave text: the provider ran, whatever happens next
 
 
 class ModelGateway:
@@ -195,6 +197,7 @@ class ModelGateway:
                     if chunk.tokens_in is not None:
                         tokens_in, tokens_out = chunk.tokens_in, chunk.tokens_out or 0
                     if chunk.text:
+                        ticket.streamed = True
                         parts.append(chunk.text)
                         yield chunk.text
             except BaseException as exc:
@@ -213,7 +216,11 @@ class ModelGateway:
         raise ModelsUnavailable(stage)
 
     async def rerank(self, query: str, documents: list[str], *, deadline_at: float = math.inf) -> list[float]:
-        """Scores per document from the `rerank` stage; `ModelsUnavailable` sends the caller to local."""
+        """Scores per document from the `rerank` stage; `ModelsUnavailable` sends the caller to local.
+
+        The whole chain gets one `TIMEOUT_RERANK`: the local level must still have time after it.
+        """
+        deadline_at = min(deadline_at, asyncio.get_running_loop().time() + self._timeouts["rerank"])
         chars = len(query) + sum(len(d) for d in documents)
         spend = RequestSpend(self.limits.request_cost_cap_usd)
         for entry in self.config.stage("rerank").chain:
@@ -290,7 +297,9 @@ class ModelGateway:
         """`min(TIMEOUT_<STAGE>, time left)`; notes on the ticket which of the two binds."""
         left = ticket.deadline_at - asyncio.get_running_loop().time()
         timeout = self._timeouts[ticket.stage]
-        ticket.blame_timeout = timeout <= left
+        # The slack covers the moments between taking the deadline and this call, so the first entry of a
+        # chain whose deadline is its stage timeout (rerank) still blames the provider.
+        ticket.blame_timeout = timeout <= left + BLAME_SLACK_S
         return min(timeout, left)
 
     def _out_of_time(self, deadline_at: float) -> bool:
@@ -381,7 +390,8 @@ class ModelGateway:
         # A call the provider refused settles with actual 0 (LLD "6.2 Daily budget"). One that may have run on
         # the provider's side (a timeout, or the visitor leaving mid-call) keeps its estimate: refunding it
         # would let a visitor who disconnects spend past the cap unseen.
-        cost = 0.0 if isinstance(exc, ProviderError) else ticket.estimate
+        refused = isinstance(exc, ProviderError) and exc.refused and not ticket.streamed
+        cost = 0.0 if refused else ticket.estimate
         if exc is None:
             assert entry.price is not None
             if usage is None or usage.tokens_in + usage.tokens_out == 0:

@@ -125,7 +125,7 @@ def _raise_for_status(response: httpx.Response) -> None:
         raise RateLimited("http 429")
     if status in (400, 413) and any(m in response.text.lower() for m in _CONTEXT_MARKERS):
         raise ContextTooLong(f"http {status}")
-    raise ProviderError(f"http {status}")
+    raise ProviderError(f"http {status}", refused=True)
 
 
 def _stream_chunk(payload: str) -> ChatChunk | None:

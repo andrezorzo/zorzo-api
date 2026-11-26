@@ -106,16 +106,28 @@ class Reranker(Protocol):
 class ProviderError(Exception):
     """A model provider failed the call: transport error, 5xx, an unexpected status or a malformed body.
 
-    The message names the kind of failure, never the request or the response body.
+    The message names the kind of failure, never the request or the response body. `refused` is True when
+    the provider answered with an error status, so it ran (and billed) nothing; a dropped connection or a
+    malformed answer may have run.
     """
+
+    def __init__(self, kind: str, refused: bool = False) -> None:
+        super().__init__(kind)
+        self.refused = refused
 
 
 class RateLimited(ProviderError):
     """The provider answered 429."""
 
+    def __init__(self, kind: str = "http 429") -> None:
+        super().__init__(kind, refused=True)
+
 
 class ContextTooLong(ProviderError):
     """The provider refused the prompt as longer than the model's context."""
+
+    def __init__(self, kind: str) -> None:
+        super().__init__(kind, refused=True)
 
 
 @dataclass(frozen=True)
