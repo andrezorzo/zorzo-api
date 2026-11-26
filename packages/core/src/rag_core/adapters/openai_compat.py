@@ -82,17 +82,14 @@ class OpenAICompatProvider:
                     await response.aread()
                     _raise_for_status(response)
                 async for line in response.aiter_lines():
-                    if line.startswith(":"):
-                        yield ChatChunk()  # a keep-alive: the provider is still there
-                        continue
                     if not line.startswith("data:"):
-                        continue  # blank lines between events
+                        # Blank lines, and `: comment` keep-alives: those come from OpenRouter's edge, not
+                        # from the model, so they say nothing about whether the model is still working.
+                        continue
                     payload = line[len("data:") :].strip()
                     if payload == "[DONE]":
                         return
-                    chunk = _stream_chunk(payload)
-                    if chunk is not None:
-                        yield chunk
+                    yield _stream_chunk(payload)
         except httpx.HTTPError as exc:
             raise ProviderError(type(exc).__name__) from exc
 
@@ -134,7 +131,8 @@ def _raise_for_status(response: httpx.Response) -> None:
     raise ProviderError(f"http {status}", refused=refused)
 
 
-def _stream_chunk(payload: str) -> ChatChunk | None:
+def _stream_chunk(payload: str) -> ChatChunk:
+    """One data frame; one without text (a role or reasoning delta) is still a sign the model works."""
     try:
         data = json.loads(payload)
         if "error" in data:  # OpenRouter reports a mid-stream failure as an error frame
@@ -149,7 +147,7 @@ def _stream_chunk(payload: str) -> ChatChunk | None:
         text = (choices[0].get("delta") or {}).get("content") if choices else None
     except (ValueError, LookupError, TypeError, AttributeError) as exc:
         raise ProviderError("malformed frame") from exc
-    return ChatChunk(text=text) if isinstance(text, str) and text else None
+    return ChatChunk(text=text if isinstance(text, str) else "")
 
 
 def _rate(response: httpx.Response) -> RateInfo | None:

@@ -148,7 +148,8 @@ class ChatResult:
 
 @dataclass(frozen=True)
 class ChatChunk:
-    """One piece of a streamed answer: text, or (last) the token counts."""
+    """One data frame of a streamed answer: text, the token counts (last), or neither (the model sent a frame
+    with no text, such as reasoning). Every chunk is a sign the model is still working."""
 
     text: str = ""
     tokens_in: int | None = None

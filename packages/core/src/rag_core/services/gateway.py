@@ -39,10 +39,10 @@ log = structlog.get_logger()
 
 CHARS_PER_TOKEN = 3  # conservative for English and Portuguese, no tokenizer (LLD "6.2 Daily budget")
 # A timeout counts toward the breaker when the call had at least this share of its stage timeout, whatever
-# limit ended it (the stage timeout, the rerank chain's, the caller's deadline), and the provider had been
-# silent for this share of it too (for a stream, since its last chunk or keep-alive): a provider silent that
-# long is failing. With less time it never had its chance, and a stream still coming is alive, only long
-# (owner decision, LLD "6.6 Circuit breaker").
+# limit ended it (the stage timeout, the rerank chain's, the caller's deadline), and the model had been
+# silent for this share of it too (for a stream, since its last data frame; an aggregator's keep-alive is
+# not the model): a model silent that long is failing. With less time it never had its chance, and a stream
+# still coming is alive, only long (owner decision, LLD "6.6 Circuit breaker").
 FAIR_SHARE = 0.5
 # The background work gets this long at shutdown, its three kinds at once, plus a short wait for what it
 # cancels (`CANCEL_WAIT_S`): Docker kills the container 10 s after SIGTERM.
@@ -211,8 +211,8 @@ class ModelGateway:
                         parts.append(chunk.text)
                         yield chunk.text
             except BaseException as exc:
-                if parts and loop.time() - last_chunk_at < FAIR_SHARE * self._timeouts[stage]:
-                    ticket.blame_timeout = False  # the provider was still sending: alive, only long
+                if loop.time() - last_chunk_at < FAIR_SHARE * self._timeouts[stage]:
+                    ticket.blame_timeout = False  # the model was still sending: alive, only long
                 if chunks is not None:
                     await _aclose(chunks)  # the provider's response, not left to the garbage collector
                 await self._close(ticket, exc)
@@ -293,7 +293,9 @@ class ModelGateway:
         `timeout`."""
         # At once, each with the whole time: one kind stuck on the database can't take the others' time.
         drains = (self._background.drain, self.alerts.drain, self.breakers.event_log.drain)
-        await asyncio.gather(*(drain(timeout) for drain in drains))
+        for result in await asyncio.gather(*(drain(timeout) for drain in drains), return_exceptions=True):
+            if isinstance(result, BaseException):  # a bug in one drain must not cut the others short
+                log.error("drain_failed", error=type(result).__name__)
 
     async def close(self) -> None:
         """At shutdown: the background work, then every client the gateway owns (providers, alerter)."""
@@ -444,8 +446,10 @@ class ModelGateway:
             return
         except asyncio.CancelledError:
             # Shutdown ran out of time: the day's row may keep this estimate. Said, so the gap is explained.
-            if not reserving.cancelled():
-                log.warning("reservation_release_abandoned", day=str(day), estimate=estimate)
+            event = (
+                "reservation_outcome_unknown" if reserving.cancelled() else "reservation_release_abandoned"
+            )
+            log.warning(event, day=str(day), estimate=estimate)
             reserving.add_done_callback(lambda f: f.cancelled() or f.exception())
             raise
 

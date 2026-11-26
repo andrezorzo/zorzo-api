@@ -464,3 +464,15 @@ async def test_a_stream_that_goes_silent_after_a_token_is_blamed(rig: Rig) -> No
         ):
             pass
     assert not rig.gateway.breakers.callable(("openrouter", A))
+
+
+@pytest.mark.parametrize(("pace", "blamed"), [("keepalive_only", True), ("reasoning", False)])
+async def test_only_the_models_own_frames_are_signs_of_life(rig: Rig, pace: str, blamed: bool) -> None:
+    rig = with_limits(rig, timeout_answer=0.4, breaker_failures=1)
+    rig.fake.script(A, pace)
+    with pytest.raises(ModelsUnavailable):
+        async for _ in rig.gateway.stream(
+            "answer", MESSAGES, deadline_at=rig.deadline(), spend=RequestSpend(0)
+        ):
+            pass
+    assert rig.gateway.breakers.callable(("openrouter", A)) is not blamed
