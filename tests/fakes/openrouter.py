@@ -9,7 +9,8 @@ normally. It records every request (path, model, body), so a test can assert whi
 - failures: "rate_limited" (429 with `Retry-After`), "error" (500), "bad_gateway" (502), "unavailable"
   (503), "bad_request" (400), "unauthorized" (401), "payment_required" (402), "hang", "malformed" (a 200
   that isn't the expected JSON), "error_choice" (a 200 whose choice says the model failed),
-  "context_too_long" (400), "no_text" (a stream that ends with no text), "break_after_first_token" (a
+  "context_too_long" (400), "no_text" (a stream that ends with no text), "stall_after_headers" (a
+  stream that opens and never sends a frame), "break_after_first_token" (a
   stream that dies mid-way);
 - `Reply(...)` for a given text, token counts or reported cost.
 """
@@ -141,6 +142,9 @@ class FakeOpenRouter:
     def _stream(self, reply: Reply, behavior: Behavior) -> httpx.Response:
         async def frames() -> AsyncIterator[bytes]:
             yield b": OPENROUTER PROCESSING\n\n"
+            if behavior == "stall_after_headers":  # the 200 and its headers, then nothing
+                await asyncio.sleep(60)
+                return
             if behavior == "no_text":  # a role frame, its usage, then the end
                 yield _frame({"role": "assistant"})
                 yield _data({"choices": [], "usage": {"prompt_tokens": 800, "completion_tokens": 0}})

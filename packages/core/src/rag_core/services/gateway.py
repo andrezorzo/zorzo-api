@@ -244,15 +244,17 @@ class ModelGateway:
 
         The whole stage gets one `TIMEOUT_RERANK`: the local level must still have time after it.
         """
-        ends_at = min(deadline_at, asyncio.get_running_loop().time() + self._timeouts["rerank"])
+        loop = asyncio.get_running_loop()
+        window_ends_at = loop.time() + self._timeouts["rerank"]
         await self._note_cooldowns()
         for entry in self.config.stage("rerank").free:
-            if not self._callable("rerank", entry, ends_at):
+            if not self._callable("rerank", entry, min(deadline_at, window_ends_at)):
                 continue
+            timeout = self._time_for("rerank", deadline_at, window_ends_at - loop.time())
             try:
-                async with asyncio.timeout_at(ends_at):
+                async with asyncio.timeout_at(deadline_at if math.isfinite(deadline_at) else None):
                     return await self.models.rerank(
-                        entry_id("rerank", entry), query, documents, timeout=self._time_for("rerank", ends_at)
+                        entry_id("rerank", entry), query, documents, timeout=timeout
                     )
             except (ProviderError, TimeoutError) as exc:
                 self._failed("rerank", exc)
@@ -424,12 +426,13 @@ class ModelGateway:
         else:
             log.warning("model_call_failed", stage=stage, error=str(exc) or type(exc).__name__)
 
-    def _time_for(self, stage: StageName, deadline_at: float) -> float:
-        """The call's own timeout: `TIMEOUT_<STAGE>` when it ends before the deadline; otherwise past the
-        deadline by `DEADLINE_MARGIN_S`, so the deadline's guard ends the call (see `DEADLINE_MARGIN_S`)."""
+    def _time_for(self, stage: StageName, deadline_at: float, stage_left: float | None = None) -> float:
+        """The call's own timeout: what the stage allows (`TIMEOUT_<STAGE>`, or `stage_left` of a window the
+        stage shares) when that ends before the deadline; otherwise past the deadline by
+        `DEADLINE_MARGIN_S`, so the deadline's guard ends the call (see `DEADLINE_MARGIN_S`)."""
         left = deadline_at - asyncio.get_running_loop().time()
-        stage_timeout = self._timeouts[stage]
-        return stage_timeout if stage_timeout <= left else left + DEADLINE_MARGIN_S
+        allowed = self._timeouts[stage] if stage_left is None else stage_left
+        return allowed if allowed <= left else left + DEADLINE_MARGIN_S
 
     def _out_of_time(self, deadline_at: float) -> bool:
         return deadline_at - asyncio.get_running_loop().time() <= 0

@@ -192,9 +192,10 @@ async def test_broken_streams_cool_an_entry_on_the_third(rig: Rig) -> None:
     assert f"answer:openrouter/{A}" in await rig.gateway.models.cooldowns()
 
 
-async def test_hanging_streams_cool_an_entry_on_the_third(rig: Rig) -> None:
+@pytest.mark.parametrize("stall", ["hang", "stall_after_headers"])  # before any byte; after the headers
+async def test_stalling_streams_cool_an_entry_on_the_third(rig: Rig, stall: str) -> None:
     with_limits(rig, timeout_answer=0.2)
-    rig.fake.always(A, "hang")  # times out before any byte: LiteLLM counts it, once
+    rig.fake.always(A, stall)
     for _ in range(FAILS_BEFORE_COOLDOWN):
         await rig.stream()
     await settle_litellm()
@@ -202,6 +203,16 @@ async def test_hanging_streams_cool_an_entry_on_the_third(rig: Rig) -> None:
     await rig.stream()
     await settle_litellm()
     assert f"answer:openrouter/{A}" in await rig.gateway.models.cooldowns()
+
+
+async def test_a_hanging_remote_rerank_cools_on_the_third(rig: Rig) -> None:
+    with_limits(rig, timeout_rerank=0.2)
+    rig.fake.always(RERANK, "hang")
+    for _ in range(FAILS_BEFORE_COOLDOWN + 1):
+        with pytest.raises(ModelsUnavailableError):
+            await rig.gateway.rerank("q", ["a", "b"])
+    await settle_litellm()
+    assert f"rerank:openrouter/{RERANK}" in await rig.gateway.models.cooldowns()
 
 
 async def test_running_out_of_the_requests_time_never_cools_an_entry(rig: Rig) -> None:
