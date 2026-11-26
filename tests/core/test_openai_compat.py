@@ -83,16 +83,8 @@ def test_token_counts_are_whole_and_non_negative(
     ("message", "text"),
     [
         ({"content": None}, ""),
-        (
-            {
-                "content": [
-                    {"type": "text", "text": "an"},
-                    {"type": "image"},
-                    {"type": "text", "text": "swer"},
-                ]
-            },
-            "answer",
-        ),
+        ({"role": "assistant"}, ""),  # some providers leave the key out when nothing was written
+        ({"content": [{"type": "text", "text": "an"}, {"type": "image"}, None, {"text": "swer"}]}, "answer"),
     ],
 )
 async def test_reads_null_and_part_list_content(message: dict[str, object], text: str) -> None:
@@ -105,7 +97,7 @@ async def test_reads_null_and_part_list_content(message: dict[str, object], text
     assert result.text == text
 
 
-@pytest.mark.parametrize("message", [{}, {"content": 7}, {"content": {"text": "x"}}])
+@pytest.mark.parametrize("message", [{"content": 7}, {"content": {"text": "x"}}])
 async def test_a_malformed_message_is_the_providers_failure(message: dict[str, object]) -> None:
     transport = httpx.MockTransport(
         lambda request: httpx.Response(200, json={"choices": [{"message": message}]})
@@ -114,3 +106,12 @@ async def test_a_malformed_message_is_the_providers_failure(message: dict[str, o
     with pytest.raises(ProviderError):
         await provider.chat("m", [{"role": "user", "content": "q"}], max_tokens=5, schema=None)
     await provider.close()
+
+
+async def test_a_streamed_part_list_reads_as_text() -> None:
+    frames = b'data: {"choices":[{"delta":{"content":[{"type":"text","text":"hi"}]}}]}\n\ndata: [DONE]\n\n'
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=frames))
+    provider = OpenAICompatProvider("https://provider.test/v1", "k", transport=transport)
+    chunks = [c async for c in provider.chat_stream("m", [{"role": "user", "content": "q"}], max_tokens=5)]
+    await provider.close()
+    assert chunks == [ChatChunk(text="hi")]

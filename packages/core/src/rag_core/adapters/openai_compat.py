@@ -63,7 +63,7 @@ class OpenAICompatProvider:
             raise ProviderError("malformed body") from exc
         if not isinstance(message, dict):
             raise ProviderError("malformed body")
-        text = _content(message)
+        text = _text(message.get("content"))
         counts = _counts(data.get("usage")) or (0, 0)
         return ChatResult(text, *counts, _rate(response))
 
@@ -144,8 +144,7 @@ def _stream_chunk(payload: str) -> ChatChunk:
         choices = data.get("choices") or []
         choice = choices[0] if isinstance(choices, list) and choices else None
         delta = choice.get("delta") if isinstance(choice, dict) else None
-        text = delta.get("content") if isinstance(delta, dict) else None
-        text = text if isinstance(text, str) else ""
+        text = _text(delta.get("content")) if isinstance(delta, dict) else ""
         usage = data.get("usage")  # some providers send it with the last text, or on every frame
         counts = _counts(usage)
         if counts is not None:
@@ -155,20 +154,19 @@ def _stream_chunk(payload: str) -> ChatChunk:
     return ChatChunk(text=text)
 
 
-def _content(message: dict[str, Any]) -> str:
-    """A message's text: null (a filter or a refusal left none) is "", the model's miss; a list of content
-    parts is joined; a missing key or another type is a malformed body, the provider's failure."""
-    if "content" not in message:
-        raise ProviderError("malformed body")
-    content = message["content"]
+def _text(content: object) -> str:
+    """The text of a message's or a delta's `content`, for both paths.
+
+    Absent or null (a filter, a refusal, the tokens spent on reasoning: some providers leave the key out) is
+    "", the model's miss. A list of parts gives the text of every part that has one, whatever its type. Any
+    other type is a malformed body, the provider's failure.
+    """
     if content is None:
         return ""
     if isinstance(content, str):
         return content
-    if isinstance(content, list) and all(isinstance(p, dict) for p in content):
-        return "".join(
-            p["text"] for p in content if p.get("type") == "text" and isinstance(p.get("text"), str)
-        )
+    if isinstance(content, list):
+        return "".join(p["text"] for p in content if isinstance(p, dict) and isinstance(p.get("text"), str))
     raise ProviderError("malformed body")
 
 
