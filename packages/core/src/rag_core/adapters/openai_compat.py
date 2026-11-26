@@ -68,7 +68,7 @@ class OpenAICompatProvider:
             raise ProviderError("error choice")
         text = _text(message.get("content"))
         if text is None:
-            raise ProviderError("malformed body")
+            raise ProviderError("unreadable content")
         counts = _counts(data.get("usage")) or (0, 0)
         return ChatResult(text, *counts, _rate(response))
 
@@ -148,13 +148,17 @@ def _stream_chunk(payload: str) -> ChatChunk:
         if isinstance(data, dict) and data.get("error"):  # a mid-stream failure, as OpenRouter sends it
             raise ProviderError("error frame")
         choices = data.get("choices") or []
-        choice = choices[0] if isinstance(choices, list) and choices else None
+        if not isinstance(choices, list):
+            raise ProviderError("malformed frame")
+        choice = choices[0] if choices else None  # a usage-only frame may have no choice, or a null one
         if isinstance(choice, dict) and _choice_failed(choice):
             raise ProviderError("error frame")
         delta = choice.get("delta") if isinstance(choice, dict) else None
-        text = _text(delta.get("content")) if isinstance(delta, dict) else ""
-        if text is None:
+        if delta is not None and not isinstance(delta, dict):
             raise ProviderError("malformed frame")
+        text = _text(delta.get("content")) if delta is not None else ""
+        if text is None:
+            raise ProviderError("unreadable content")  # its own kind: a provider sending parts shows up
         usage = data.get("usage")  # some providers send it with the last text, or on every frame
         counts = _counts(usage)
         if counts is not None:

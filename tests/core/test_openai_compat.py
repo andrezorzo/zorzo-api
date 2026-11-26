@@ -85,7 +85,10 @@ def test_token_counts_are_whole_and_non_negative(
         ({"content": "an answer"}, "an answer"),
         ({"content": None}, ""),  # a filter or a refusal: the model's miss
         ({"role": "assistant"}, ""),  # some providers leave the key out when nothing was written
-        ({"content": [{"type": "text", "text": "x"}]}, None),  # parts lists aren't read: the provider's
+        (
+            {"content": [{"type": "text", "text": "x"}]},
+            None,
+        ),  # parts lists aren't read: the provider's failure
         ({"content": {"text": "x"}}, None),
         ({"content": 7}, None),
     ],
@@ -96,7 +99,7 @@ async def test_reads_string_content_only(message: dict[str, object], text: str |
     provider = OpenAICompatProvider("https://provider.test/v1", "k", transport=transport)
     messages = [{"role": "user", "content": "q"}]
     if text is None:
-        with pytest.raises(ProviderError, match="malformed body"):
+        with pytest.raises(ProviderError, match="unreadable content"):
             await provider.chat("m", messages, max_tokens=5, schema=None)
     else:
         assert (await provider.chat("m", messages, max_tokens=5, schema=None)).text == text
@@ -110,7 +113,7 @@ async def test_a_frame_we_cant_read_fails_the_stream_even_after_text() -> None:
     )
     transport = httpx.MockTransport(lambda request: httpx.Response(200, content=frames))
     provider = OpenAICompatProvider("https://provider.test/v1", "k", transport=transport)
-    with pytest.raises(ProviderError, match="malformed frame"):  # never an answer with a piece missing
+    with pytest.raises(ProviderError, match="unreadable content"):  # never an answer with a piece missing
         _ = [c async for c in provider.chat_stream("m", [{"role": "user", "content": "q"}], max_tokens=5)]
     await provider.close()
 
@@ -132,5 +135,21 @@ async def test_a_streamed_error_choice_after_text_is_the_providers_failure() -> 
     transport = httpx.MockTransport(lambda request: httpx.Response(200, content=frames))
     provider = OpenAICompatProvider("https://provider.test/v1", "k", transport=transport)
     with pytest.raises(ProviderError):
+        _ = [c async for c in provider.chat_stream("m", [{"role": "user", "content": "q"}], max_tokens=5)]
+    await provider.close()
+
+
+@pytest.mark.parametrize(
+    ("frame", "kind"),
+    [
+        (b'{"choices":[{"delta":{"content":7}}]}', "unreadable content"),
+        (b'{"choices":[{"delta":"Hello"}]}', "malformed frame"),
+        (b'{"choices":{"delta":{"content":"x"}}}', "malformed frame"),
+    ],
+)
+async def test_a_frame_we_cant_read_before_any_text_fails_the_stream(frame: bytes, kind: str) -> None:
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=b"data: " + frame + b"\n\n"))
+    provider = OpenAICompatProvider("https://provider.test/v1", "k", transport=transport)
+    with pytest.raises(ProviderError, match=kind):
         _ = [c async for c in provider.chat_stream("m", [{"role": "user", "content": "q"}], max_tokens=5)]
     await provider.close()
