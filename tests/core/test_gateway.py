@@ -232,6 +232,21 @@ async def test_a_later_rerank_entry_cut_by_the_shared_window_is_not_counted(rig:
     assert f"rerank:openrouter/{second.model}" not in await rig.gateway.models.cooldowns()
 
 
+async def test_with_the_first_rerank_entry_cooling_the_next_is_the_first_call(rig: Rig) -> None:
+    second = Entry(provider="openrouter", model="test/rerank-b:free")
+    stage = CONFIG.stage("rerank").model_copy(update={"chain": [*CONFIG.stage("rerank").chain, second]})
+    config = CONFIG.model_copy(update={"stages": CONFIG.stages.model_copy(update={"rerank": stage})})
+    limits = LIMITS.model_copy(update={"timeout_rerank": 0.3})
+    rig.gateway = build_gateway(served(config, rig.fake), {"openrouter": "k"}, rig.db, rig.alerter, limits)
+    rig.fake.always(RERANK, "unauthorized")  # A cools at once
+    rig.fake.always(second.model, "hang")
+    for _ in range(FAILS_BEFORE_COOLDOWN + 2):  # the first question: A cools and B is cut by the window
+        with pytest.raises(ModelsUnavailableError):
+            await rig.gateway.rerank("q", ["a"])
+    await settle_litellm()
+    assert f"rerank:openrouter/{second.model}" in await rig.gateway.models.cooldowns()
+
+
 async def test_running_out_of_the_requests_time_never_cools_an_entry(rig: Rig) -> None:
     rig.fake.always(A, "hang")
     for _ in range(FAILS_BEFORE_COOLDOWN + 2):

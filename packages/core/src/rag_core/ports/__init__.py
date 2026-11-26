@@ -178,6 +178,9 @@ class ModelRouter(Protocol):
     ) -> list[float]:
         """One score per document, in the documents' order."""
 
+    def strike(self, entry_id: str, /) -> None:
+        """Count a call the caller cut at the entry's own time limit as that entry's timeout."""
+
     async def cooldowns(self) -> dict[str, Cooldown]:
         """The entries cooling down now, by entry id."""
 

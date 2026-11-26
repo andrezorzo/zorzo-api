@@ -44,9 +44,6 @@ RATE_LIMITED = "429"
 # much past it, so the gateway's guard cuts the call at the deadline as a cancellation: running out of the
 # request's time is never the entry's failure. A stage timeout fires first and counts.
 DEADLINE_MARGIN_S = 1.0
-# A rerank entry's own timeout ends with the stage's window; the window's guard ends this much later, so the
-# entry's timeout fires first and counts, and the stage overruns its window by at most this much.
-WINDOW_GRACE_S = 0.05
 # The estimate already assumes the longest answer, so a settle past this multiple of it is a provider's bug
 # (a unit change, a broken count): it settles at the multiple (LLD "6.2 Daily budget").
 MAX_COST_OVER_ESTIMATE = 2
@@ -246,30 +243,32 @@ class ModelGateway:
         """Scores per document from the `rerank` stage; `ModelsUnavailableError` sends the caller to local.
 
         The whole stage gets one `TIMEOUT_RERANK`, from its first call: the local level must still have time
-        after it. Only that first call can time out on its own and count toward its entry's cooldown; a later
-        entry runs in what is left, and the window's guard cuts it uncounted (the time was spent before it).
+        after it. A cut at the window's end counts against the first call's entry (its own stage timeout ran
+        out), never against a later one (the time was spent before it), nor a cut at the request's deadline.
         """
         loop = asyncio.get_running_loop()
         stage_timeout = self._timeouts["rerank"]
         window_ends_at: float | None = None
         await self._note_cooldowns()
         for entry in self.config.stage("rerank").free:
+            if not self._callable("rerank", entry, min(deadline_at, window_ends_at or math.inf)):
+                continue
             first = window_ends_at is None
             if window_ends_at is None:
                 window_ends_at = loop.time() + stage_timeout
             ends_at = min(deadline_at, window_ends_at)
-            if not self._callable("rerank", entry, ends_at):
-                continue
-            if first and window_ends_at <= deadline_at:
-                timeout, guard_at = stage_timeout, ends_at + WINDOW_GRACE_S
-            else:
-                timeout, guard_at = ends_at - loop.time() + DEADLINE_MARGIN_S, ends_at
+            entry_key = entry_id("rerank", entry)
+            guard = asyncio.timeout_at(ends_at)
             try:
-                async with asyncio.timeout_at(guard_at):
+                async with guard:
                     return await self.models.rerank(
-                        entry_id("rerank", entry), query, documents, timeout=timeout
+                        entry_key, query, documents, timeout=ends_at - loop.time() + DEADLINE_MARGIN_S
                     )
             except (ProviderError, TimeoutError) as exc:
+                # The call's own timeout is set past the guard, so the guard always makes the cut: it counts
+                # here, once, only when it was the first call's own stage timeout.
+                if guard.expired() and first and window_ends_at <= deadline_at:
+                    self.models.strike(entry_key)
                 self._failed("rerank", exc)
             finally:
                 await self._note_cooldowns()

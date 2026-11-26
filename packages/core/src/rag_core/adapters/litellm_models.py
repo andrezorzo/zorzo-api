@@ -151,6 +151,10 @@ class LiteLLMModels:
                 raise ProviderError("incomplete rerank")
         return [scores[i] for i in range(len(documents))]
 
+    def strike(self, entry_key: str, /) -> None:
+        """A call the caller cut at the entry's own time limit: a timeout, counted like LiteLLM's."""
+        self._count(entry_key, TimeoutError("cut at the stage timeout"), HTTPStatus.REQUEST_TIMEOUT)
+
     async def cooldowns(self) -> dict[str, Cooldown]:
         active = await async_get_cooldown_deployments_with_debug_info(self._router, None)
         return {
@@ -205,16 +209,19 @@ class LiteLLMModels:
             yield
         except (ProviderError, TimeoutError) as exc:
             skipped = _skipped_by_litellm(exc, streaming=bool(stream and stream[0]))
-            if skipped is not None and should_cooldown_based_on_allowed_fails_policy(
-                self._router, entry_key, skipped
-            ):
-                self._router.cooldown_cache.add_deployment_to_cooldown(
-                    model_id=entry_key,
-                    original_exception=skipped,
-                    exception_status=_status(skipped) or HTTPStatus.INTERNAL_SERVER_ERROR,
-                    cooldown_time=self._cooldown_s,
-                )
+            if skipped is not None:
+                self._count(entry_key, skipped, _status(skipped) or HTTPStatus.INTERNAL_SERVER_ERROR)
             raise
+
+    def _count(self, entry_key: str, failure: Exception, status: int) -> None:
+        """One failure toward the entry's cooldown, through LiteLLM's own counting and threshold."""
+        if should_cooldown_based_on_allowed_fails_policy(self._router, entry_key, failure):
+            self._router.cooldown_cache.add_deployment_to_cooldown(
+                model_id=entry_key,
+                original_exception=failure,
+                exception_status=status,
+                cooldown_time=self._cooldown_s,
+            )
 
 
 def _params(stage: StageName, entry: Entry, provider: Provider, key: str | None) -> dict[str, Any]:
