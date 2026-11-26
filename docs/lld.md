@@ -65,7 +65,7 @@ means adding `domains/<other>/`, not changing `core`.
 | API | FastAPI | HLD constraint |
 | SSE | sse-starlette | Heartbeat, client disconnect and SSE framing built in |
 | Agent | LangGraph + langchain-core, LangChain 1.0+ | HLD constraint; 1.0 is the LTS line; bounded graph (ADR 0006) |
-| Model clients | langchain-openai `ChatOpenAI` with `base_url` per provider | Every provider is OpenAI-compatible (ADR 0007) |
+| Model clients | LiteLLM (SDK `Router` for the free entries, `acompletion` for the paid one), pinned to an exact version | A maintained library for order, cooldowns and timeouts; no proxy server (ADR 0016) |
 | Conversation state | langgraph-checkpoint-postgres | State in Postgres, not process memory (ADR 0001) |
 | Database access (API, ingest) | psycopg 3 + SQLAlchemy Core with schema reflection, no ORM | Django owns the schema; no second copy of the columns |
 | Dashboard | Django 5.2 LTS | HLD constraint; LTS keeps security fixes to April 2028 with one jump to the next LTS. Move to 6.2 LTS (April 2027) for native CSP and template partials |
@@ -138,9 +138,10 @@ connection; the domain is chosen by `DOMAIN` and loaded by the apps, never by `c
 | VectorStore | `search` | Query vector, query text, k, filters, corpus version | Hits with ids and scores | Hybrid in one query (vector + full-text + RRF); reads only the given version; a vector hit counts only at `SEARCH_MIN_SIMILARITY` or above; full text matches any term of the question (OR), in English and Portuguese |
 | VectorStore | `upsert` | Chunks, candidate version | Written count | Idempotent by content hash |
 | VectorStore | `activate` | Version | — | Atomic; exactly one active version (section 6.1) |
-| ModelGateway | `complete` / `stream` | Stage, messages, optional output schema, deadline, the request's spend | Result, usage, cost, provider | Tries the stage's chain in order; respects deadline, the day's budget and `REQUEST_COST_CAP_USD`; skips open breakers and entries past the quota warning; records cost; raises "unavailable" when the chain is exhausted; `stream` falls back only before the first token |
+| ModelGateway | `complete` / `stream` | Stage, messages, optional output schema, deadline, the request's spend | Result, usage, cost, provider | Runs the stage's free entries on the LiteLLM Router (section 6.6), then the paid entry under the day's budget and `REQUEST_COST_CAP_USD` (section 6.2); respects the deadline; records cost; raises "unavailable" when the chain is exhausted; `stream` falls back only before the first token |
 | ModelGateway | `rerank` | Query, documents, deadline | Scores per document | The `rerank` stage's chain under the same rules; raises "unavailable" so the Reranker falls to the local level |
-| ModelGateway | `mode` | — | Normal, or the degraded reason | `budget_exhausted`, `models_unavailable` (every `answer` entry open) or `quota_exhausted` (no `answer` entry within quota and budget); the route checks it after the gate |
+| ModelGateway | `mode` | — | Normal, or the degraded reason | `budget_exhausted`; with every free `answer` entry in cooldown and the paid entry unable to run, `quota_exhausted` when each was cooled by a 429, otherwise `models_unavailable`; the route checks it after the gate |
+| ModelRouter | `complete` / `stream` / `rerank` / `cooldowns` | A stage's messages or rerank input, timeout | Result with usage and the provider-reported cost; active cooldowns (entry, status, start, length) | The LiteLLM adapter: free entries through the Router, the paid entry through `acompletion`; no network call at import |
 | Embedder | `embed` | Texts | Vectors + model tag | Always the pinned tag |
 | Reranker | `rerank` (async) | Query, candidates, k | Ordered candidates + level used | A level may raise; the retrieval service falls to the next level, then to the fused order (ADR 0009) |
 | BotCheck | `verify` | Token | Pass or fail | Fails closed when the provider errors |
@@ -235,12 +236,12 @@ domain pieces, not ports (section 6.5).
 
 - Structured JSON on stdout through structlog, collected by Docker and journald. Every line carries
   `trace_id`, level and an event name.
-- Edge and infrastructure events from the closed catalog (fallback, breaker transition, rate limit, deploy,
-  ingest, snapshot failure) also go to `log_events`: per-request ones through the TraceSink, the others
-  (breaker transitions) through the EventLog port.
+- Edge and infrastructure events from the closed catalog (fallback, cooldown start and end, rate limit,
+  deploy, ingest, snapshot failure) also go to `log_events`: per-request ones through the TraceSink, the
+  others (cooldowns) through the EventLog port.
 - The `httpx` and `httpcore` loggers run at `warning`: at `info` they log every request URL, and Telegram's
   URL holds the bot token.
-- Levels: `info` for one summary line per request; `warning` for fallback, breaker opened, retry; `error` for
+- Levels: `info` for one summary line per request; `warning` for fallback, cooldown started, retry; `error` for
   bugs (recursion limit, "context too long", parse failure after the retry).
 - Never logged: secrets, raw IP, the question before scrubbing, Turnstile tokens, full prompts (those exist
   only in LangSmith, masked).
@@ -255,12 +256,13 @@ domain pieces, not ports (section 6.5).
   prompts, recorded with every answer; formatting and comments don't change it, so they don't invalidate the
   answer cache. The models file is `MODELS_FILE`, by default `config/models.yaml`, or `config/models.local.yaml`
   with `APP_ENV=local`.
-- **Models config:** `providers` (each with `base_url`, optional `key_env` and optional `daily_requests`, the
-  free-request limit per UTC day) and `stages`, exactly `route`, `rerank`, `answer` and `judge`, each with
+- **Models config:** `providers` (each with `base_url`, optional `key_env` and `kind`: `openrouter`, whose
+  reported cost is read, or `openai` for any other OpenAI-compatible endpoint) and `stages`, exactly `route`, `rerank`, `answer` and `judge`, each with
   `max_tokens` and an ordered `chain` of `{provider, model}` entries; a paid entry has `paid: true` and
   `price` (`input_per_mtok`, `output_per_mtok`, US$ per million tokens). Only `rerank` may have an empty
   chain. In production every provider a chain uses needs its key, or the app doesn't start. Other model
   calls of the graph map onto these stages (`assess` and `reformulate` to `route`, `repair` to `answer`).
+  The `rerank` stage's entries are called as a Cohere-style `/rerank` on the provider's base URL.
 - **Database bounds:** the short statements of the gateway (budget reserve and settle, alert state, event
   rows) run in a transaction that sets Postgres `statement_timeout` and `lock_timeout` to
   `SHORT_STATEMENT_TIMEOUT`; the server ends a stuck statement, so there is no client-side timeout to cancel
@@ -455,6 +457,9 @@ stateDiagram-v2
 
 States of the day's budget row; the day is UTC, so every visitor sees the same "today".
 
+- The paid entry runs outside the LiteLLM Router, only when the stage's free entries are exhausted: the
+  Router's own budget checks only spend already recorded, so concurrent calls could pass the cap together
+  (ADR 0016).
 - In `paid_disabled` the chain stops before its paid entries; free entries still run.
 - In `degraded` every question is answered in search-only mode; the `degraded` event gives the reason.
 - Reserve, then settle (section 3). The estimate is `prompt_tokens × input_price + max_tokens × output_price`,
@@ -463,15 +468,16 @@ States of the day's budget row; the day is UTC, so every visitor sees the same "
   search-only, takes over.
 - **Settle:** a call the provider refused (a 3xx or 4xx other than 408, a 503, a 429, context too long)
   settles at 0. Any other failure (timeout, 500, 502, 504, a dropped connection, the request cancelled) keeps
-  its estimate, because the provider may have billed it; a success without usage counts also keeps the
-  estimate.
+  its estimate, because the provider may have billed it. A success settles at the cost the provider
+  reported (OpenRouter's `usage.cost`), otherwise at its usage times the configured price; a success without
+  usage counts keeps the estimate.
 - The reservation is shielded from cancellation: a request that leaves while reserving still gets an answer
   from the database, and a reservation that landed after the caller left is released in the background.
 - The state moves on settle: when the settled spend crosses the cutoff, `paid_disabled_at` is set; at the cap,
   `degraded_at`. A reservation needs `paid_disabled_at` empty. `requests` counts reservations.
 - Per-request ceiling `REQUEST_COST_CAP_USD`: before each model call, if the estimate doesn't fit in what the
   request has left, the agent answers with what it has.
-- Free calls cost 0 in this table; their limit is the quota (section 6.8).
+- Free calls cost 0 in this table; their limit is the provider's (section 6.8).
 
 ### 6.3 Agent run
 
@@ -510,9 +516,9 @@ States of the day's budget row; the day is UTC, so every visitor sees the same "
 - **Process model:** the API runs as one process (`API_WORKERS`). The work is I/O-bound (seconds waiting on
   providers), so one async process handles the concurrency; extra workers would duplicate hundreds of MB of
   libraries and the ONNX model on an 8 GB machine shared with Postgres and Ollama, and would split in-memory
-  state such as breakers. The one CPU-bound step, local rerank, runs in a thread (`anyio.to_thread`). Revisit
+  state such as the Router's cooldowns. The one CPU-bound step, local rerank, runs in a thread (`anyio.to_thread`). Revisit
   if event-loop lag shows in p95, the API's CPU saturates, or traffic passes 20 concurrent sessions; the path
-  is two workers with breakers and counters moved to Postgres.
+  is two workers with the Router's cooldown state shared through Redis, which LiteLLM supports.
 
 ### 6.4 Answer contract and verification
 
@@ -548,36 +554,31 @@ does, where it lives, its decisions and ADRs) is a corpus source instead.
 
 ### 6.6 Circuit breaker
 
-**Breaker states (per provider and model)**
+**Cooldown of a free entry (per provider and model)**
 
 ```mermaid
 stateDiagram-v2
-    [*] --> closed: process starts
-    closed --> open: BREAKER_FAILURES failures within BREAKER_WINDOW, or one 429
-    open --> half_open: BREAKER_COOLDOWN elapsed
-    half_open --> closed: trial call succeeds
-    half_open --> open: trial call fails
+    [*] --> available: process starts
+    available --> cooling: a 429, a timeout, a 5xx, a 401 or 404, or most calls failing within a minute
+    cooling --> available: Retry-After elapsed, or BREAKER_COOLDOWN without one
 ```
 
-States of one chain entry's breaker; it lives in the API process memory.
+The free entries of a stage are one model group of the LiteLLM Router (ADR 0016), in the API process memory.
 
-- An open breaker skips its chain entry without waiting for a timeout.
-- Failures: a transport error, a 5xx, a malformed body or frame, content that isn't a string, or an error
-  choice counts toward `BREAKER_FAILURES`; a 429 opens the breaker at once. Each falls to the next entry;
-  there is no same-entry retry (the next entry is the retry).
-- **Model misses never count:** output that parses but fails the requested schema is retried once on the same
-  entry, then falls through; an empty answer, or a stream that ends cleanly with no text, falls through at
-  once. The provider works, the model missed.
-- **Blame for a timeout:** it counts only when the entry was granted at least `BREAKER_FAIR_SHARE` of the
-  stage timeout and either no real text was sent yet, or the model was silent for at least
-  `BREAKER_FAIR_SHARE` of the stage timeout after its last data frame. Any data frame from the model is a sign
-  of life; an aggregator's keep-alive comment is not; leading whitespace is held back until real text
-  arrives. A slow consumer is never blamed. Owner's decision: a short grant or a model that was still writing
-  says nothing about the provider.
-- Half-open lets exactly one trial call through; other calls skip the entry until it ends.
-- Each entry gets `min(TIMEOUT_<STAGE>, time left)`; an entry with no time left is not tried. The `rerank`
-  chain shares one `TIMEOUT_RERANK` for all its entries.
-- Every transition is written to `log_events`; `/dash/` shows the latest state per provider.
+- Entries are tried in chain order (`order`), not load-balanced; there is no same-entry retry
+  (`num_retries=0`): the next entry is the retry.
+- LiteLLM's cooldown rules: a 429 at once; more than half the calls failing within a minute, with at least
+  five; a timeout, a 5xx, a 401 or a 404. A 400 or a content-policy refusal doesn't cool an entry. The
+  cooldown lasts the provider's `Retry-After`, or `BREAKER_COOLDOWN` without one; there is no half-open trial
+  call. A group with a single entry gets no 429 cooldown (a LiteLLM rule), so that entry is tried on every
+  call.
+- **Model misses never cool an entry:** an empty answer, or output that fails the requested schema, is retried
+  once through the Router, then falls to the paid entry. The provider works, the model missed.
+- Each call gets `timeout=min(TIMEOUT_<STAGE>, time left)` and runs under the request deadline; the `rerank`
+  group shares one `TIMEOUT_RERANK`.
+- The gateway reads the active cooldowns after each call and in `mode()`: a new one writes `cooldown_started`
+  to `log_events` (entry, status, length), one gone writes `cooldown_ended`; `/dash/` shows the latest state
+  per provider.
 - In-memory state is correct because the API runs as one process (section 6.3, "Process model").
 
 ### 6.7 Rate limit
@@ -601,12 +602,11 @@ States of one chain entry's breaker; it lives in the API process memory.
 
 ### 6.8 Free quota
 
-- Each provider's count for the UTC day comes from its response headers (`x-ratelimit-remaining-requests`,
-  `x-ratelimit-limit-requests`) when present, otherwise from a local counter against `daily_requests` in the
-  models config. Counts live in process memory: a restart forgets them, and the provider's 429 then opens
-  the breaker, so the cost is one failed call. OpenRouter's key endpoint is not polled.
-- Above `QUOTA_WARN` of the day's limit, in order: rerank goes local; answers move to the paid entries (if the
-  budget allows); then search-only, with reason `quota_exhausted`.
+- Free limits are the providers': a provider past its limit answers 429, and the entry cools for its
+  `Retry-After` (section 6.6). Nothing is counted or read ahead from headers; OpenRouter's key endpoint is not
+  polled. The cost is one failed call per entry when a limit is reached.
+- With every free `answer` entry cooled by a 429 and the paid entry unable to run, questions go search-only
+  with reason `quota_exhausted`.
 
 ### 6.9 Answer cache
 
@@ -641,8 +641,8 @@ Kinds: `site_down`, `budget_exhausted`, `providers_down`, `backup_failed`, `rest
   the background tasks (section 7).
 - `budget_exhausted` opens when the gateway sees the day `paid_disabled` (owner's decision: the owner hears at
   the paid cutoff, while free entries still answer), escalates when the day reaches `degraded`, and closes on
-  the first check of a new UTC day; `providers_down` opens when every `answer` entry's breaker is open and
-  closes when one closes.
+  the first check of a new UTC day; `providers_down` opens when every free `answer` entry is in cooldown and
+  closes when one is back.
 - A condition is checked against `alert_states` at most once per `ALERT_CHECK_INTERVAL` per kind, so an
   escalation is sent within that interval. A restart forgets what was sent and may repeat one message.
 - An alerts service in core owns these rules over `alert_states`; the Alerter only delivers (Telegram in
@@ -721,7 +721,7 @@ Behavior only; rendering and the 3D brain are in `zorzo-site`'s LLD.
 
 | Route | Access | Reads | Shows | Status |
 | --- | --- | --- | --- | --- |
-| `/dash/` | Public | Traces, spans, budget, snapshots, log events | KPIs (questions and sessions, p50/p95, success and fallback rates, tokens in and out); stacked latency per step; intent distribution; questions per day; most cited documents; recent questions (only outcome `answered`, `abstained` or `cached`, with `public_ok` true and no `removed_at`), each linking to its trace; status (uptime, budget used today, active chain, breakers) | planned |
+| `/dash/` | Public | Traces, spans, budget, snapshots, log events | KPIs (questions and sessions, p50/p95, success and fallback rates, tokens in and out); stacked latency per step; intent distribution; questions per day; most cited documents; recent questions (only outcome `answered`, `abstained` or `cached`, with `public_ok` true and no `removed_at`), each linking to its trace; status (uptime, budget used today, active chain, cooldowns) | planned |
 | `/dash/t/<id>` | Public (random UUID) | `public_traces`, `trace_spans` | Timeline of one answer: scrubbed question, retrieved chunks with scores, tools, models and fallbacks, claims with verdicts, cost and latency; with `public_ok` false the question shows as "[hidden: not shown in public]"; 410 "this trace was removed" when `removed_at` is set; 404 "this trace expired" after expiry | planned |
 | `/dash/evals` | Public | `eval_runs`, `eval_results`, LangSmith snapshots | Latest run of the active version with date and pass or fail per target; each metric with one plain sentence, split by layer, PT and EN separately, `pre_release` and `nightly` separately; trend across versions with gate-blocked versions marked; failures of the latest run and verdicts flipped between the last two versions, without the answer when `career_fact` is true; links to the datasets; a stale notice when the latest `nightly` run is older than `EVAL_STALE_AFTER` | planned |
 | `/dash/defenses` | Public | `defense_events`, eval runs | Blocks per layer and category (7 and 30 days) with one plain sentence per layer; examples only from the `adversarial` dataset, real attacks only as counts; false-block rate from the `benign_tricky` dataset | planned |
@@ -771,9 +771,7 @@ endpoints and per-environment switches.
 | `DAILY_BUDGET_USD` | 0.10 | Paid spend per UTC day (from the one-time US$10 credit) | `limits.yaml` |
 | `BUDGET_PAID_CUTOFF` | 80% | Paid entries disabled | `limits.yaml` |
 | `REQUEST_COST_CAP_USD` | 0.01 | Per request | `limits.yaml` |
-| `QUOTA_WARN` | 80% | Free-quota saving steps | `limits.yaml` |
-| `BREAKER_FAILURES` / `BREAKER_WINDOW` / `BREAKER_COOLDOWN` | 5 / 60 s / 60 s | Circuit breaker | `limits.yaml` |
-| `BREAKER_FAIR_SHARE` | 50% | Timeout blame (section 6.6) | Code (`services/gateway.py`) |
+| `BREAKER_COOLDOWN` | 60 s | Cooldown of a free entry when the provider sends no `Retry-After` (section 6.6) | `limits.yaml` |
 | `CACHE_SIMILARITY` | 0.95 | Answer cache | `limits.yaml` |
 | `CACHE_TTL` | 60 days | Answer cache | `limits.yaml` |
 | `DEGRADED_MAX_PASSAGES` | 6 | Passages shown in search-only mode | `limits.yaml` |
@@ -846,7 +844,8 @@ What replaces each production service is in the HLD ("Deployment and environment
 - **DataPublisher:** the local adapter writes the brain data to a folder the local Caddy serves.
 - **Alerter and tracing:** the alerter only logs; LangSmith is on only when a key is present.
 - **Tests:** a separate test database per session, with the Django migrations applied by a fixture; the fake
-  OpenRouter server (`tests/fakes/`, an httpx `MockTransport`) answers scripted responses, 429s, hangs, malformed
+  provider server (`tests/fakes/`, a small ASGI app on `127.0.0.1`, since LiteLLM builds its own HTTP
+  clients) answers scripted responses, 429s, hangs, malformed
   JSON and canary leaks for the contract and fault tests. Real model calls only in eval runs.
 
 ## 11. Decisions
@@ -857,6 +856,7 @@ What replaces each production service is in the HLD ("Deployment and environment
 | [0013](adr/0013-own-chunk-tables-not-langchain-postgres.md) | Our own chunk tables in the Django migrations, not `langchain-postgres` | Accepted |
 | [0014](adr/0014-semantic-answer-cache-in-postgres.md) | Semantic answer cache in Postgres (pgvector) | Accepted |
 | [0015](adr/0015-dashboard-talks-to-api-through-database.md) | The dashboard talks to the API only through the database | Accepted |
+| [0016](adr/0016-litellm-router-behind-the-model-gateway.md) | The LiteLLM Router runs the free chain behind the model gateway | Accepted |
 
 Architecture decisions (0001–0011) are indexed in the HLD.
 
@@ -875,6 +875,6 @@ Architecture decisions (0001–0011) are indexed in the HLD.
 - [ ] Eval harness: dataset format, metrics per layer, noise-band rule: to detail.
 - [ ] Local profile address of Ollama: `models.local.yaml` uses `localhost`, while compose services use
   `ollama:11434`; to settle in F01-T06.
-- [ ] A model that always answers empty or always misses the schema never opens its breaker: revisit with the
+- [ ] A model that always answers empty or always misses the schema never cools its entry: revisit with the
   eval matrix at M3.
 - [ ] Production restart policy: the API fails fast when Postgres is not ready at boot (Database), so the production compose needs `restart: unless-stopped` and a start order; to settle with the deploy feature.
