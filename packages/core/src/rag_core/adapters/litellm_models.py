@@ -4,8 +4,9 @@ entry, called by the gateway entry by entry.
 The Router makes each call (timeouts, the provider's quirks, the cost OpenRouter reports) and keeps the
 cooldowns: a 429, a 401 or a 404 cools an entry at once, for `Retry-After` when the provider sends one;
 another failure of the entry cools it on the `FAILS_BEFORE_COOLDOWN + 1`-th within the cooldown time.
-LiteLLM leaves three kinds of the entry's failures out of that count: a dropped connection, a 402, and what
-this adapter finds wrong in a 200. The adapter adds exactly those, through LiteLLM's own counting. A
+LiteLLM leaves some of the entry's failures out of that count: a dropped connection, a stream's timeout
+after it opened, a 402, a 5xx whose text names `APIConnectionError`, and what this adapter finds wrong in a
+200. The adapter adds exactly those, through LiteLLM's own counting. A
 failure the request caused (a prompt too long, a 400, a 403) never counts: a visitor's question must not cool
 an entry. There is no same-entry retry (`num_retries=0`: the next entry is the retry) and no Router fallback
 (the gateway walks the chain). Failures come out as `ProviderError` (`refused` when the provider turned the
@@ -173,9 +174,11 @@ class LiteLLMModels:
         by LiteLLM, which raises on them."""
         parts: list[str] = []
         usage: Any = None
-        with self._failures_counted(entry_key, streaming=True):
+        opened = [False]
+        with self._failures_counted(entry_key, opened):
             try:
                 response = await call()
+                opened[0] = True
                 async for piece in response:
                     usage = getattr(piece, "usage", None) or usage
                     choice = piece.choices[0] if piece.choices else None
@@ -195,12 +198,13 @@ class LiteLLMModels:
         )
 
     @contextmanager
-    def _failures_counted(self, entry_key: str, streaming: bool = False) -> Iterator[None]:
-        """Add to the entry's cooldown count the failures LiteLLM leaves out (see the module docstring)."""
+    def _failures_counted(self, entry_key: str, stream: list[bool] | None = None) -> Iterator[None]:
+        """Add to the entry's cooldown count the failures LiteLLM leaves out (see the module docstring).
+        `stream` holds one flag, set once the stream has opened."""
         try:
             yield
         except (ProviderError, TimeoutError) as exc:
-            skipped = _skipped_by_litellm(exc, streaming)
+            skipped = _skipped_by_litellm(exc, streaming=bool(stream and stream[0]))
             if skipped is not None and should_cooldown_based_on_allowed_fails_policy(
                 self._router, entry_key, skipped
             ):
@@ -252,9 +256,10 @@ def _skipped_by_litellm(exc: BaseException, streaming: bool) -> Exception | None
     """The failure to count, when it is the entry's and LiteLLM's cooldown accounting doesn't count it:
     - an error this adapter found in a 200 (no library error behind it);
     - a dropped connection (LiteLLM skips any error whose text names `APIConnectionError`);
-    - on a stream, a timeout too (LiteLLM counts a stream's raw transport error, which has no status);
-    - a 402 (skipped on a lone deployment).
-    Decided by type, never by the text, which may quote the visitor's question."""
+    - once a stream is open, a timeout too (LiteLLM skips a stream's raw transport error: it has no status);
+    - a 402 (skipped on a lone deployment);
+    - a 5xx whose text names `APIConnectionError` (skipped for its text, which may quote the request).
+    A request's own 4xx never counts, whatever its text."""
     cause = exc.__cause__
     if isinstance(cause, MidStreamFallbackError) and cause.original_exception is not None:
         cause = cause.original_exception
@@ -265,7 +270,13 @@ def _skipped_by_litellm(exc: BaseException, streaming: bool) -> Exception | None
     dropped = isinstance(cause, openai.APIConnectionError) and (
         streaming or not isinstance(cause, openai.APITimeoutError)
     )
-    if dropped or _status(cause) == HTTPStatus.PAYMENT_REQUIRED:
+    status = _status(cause)
+    text_skipped = (
+        status is not None
+        and status >= HTTPStatus.INTERNAL_SERVER_ERROR
+        and ("APIConnectionError" in str(cause))
+    )
+    if dropped or text_skipped or status == HTTPStatus.PAYMENT_REQUIRED:
         return cause
     return None
 

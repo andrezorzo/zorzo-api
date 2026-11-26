@@ -40,9 +40,10 @@ CHARS_PER_TOKEN = 3  # conservative for English and Portuguese, no tokenizer (LL
 # the chain moves on, and a miss never cools an entry (LLD "6.6 Circuit breaker").
 ATTEMPTS_PER_FREE_ENTRY = 2
 RATE_LIMITED = "429"
-# The gateway's guard on a call ends this long after the deadline, so the call's own timeout (set to the
-# time left) fires first: a timeout counts toward the entry's cooldown, a cancellation doesn't.
-DEADLINE_GRACE_S = 0.05
+# When the request's deadline, not the stage timeout, bounds a call, the call's own timeout is set this
+# much past it, so the gateway's guard cuts the call at the deadline as a cancellation: running out of the
+# request's time is never the entry's failure. A stage timeout fires first and counts.
+DEADLINE_MARGIN_S = 1.0
 # The estimate already assumes the longest answer, so a settle past this multiple of it is a provider's bug
 # (a unit change, a broken count): it settles at the multiple (LLD "6.2 Daily budget").
 MAX_COST_OVER_ESTIMATE = 2
@@ -147,7 +148,7 @@ class ModelGateway:
                 if not self._callable(stage, entry, deadline_at):
                     break
                 try:
-                    async with asyncio.timeout_at(deadline_at + DEADLINE_GRACE_S):
+                    async with asyncio.timeout_at(deadline_at):
                         result = await self.models.complete(
                             entry_id(stage, entry),
                             messages,
@@ -249,7 +250,7 @@ class ModelGateway:
             if not self._callable("rerank", entry, ends_at):
                 continue
             try:
-                async with asyncio.timeout_at(ends_at + DEADLINE_GRACE_S):
+                async with asyncio.timeout_at(ends_at):
                     return await self.models.rerank(
                         entry_id("rerank", entry), query, documents, timeout=self._time_for("rerank", ends_at)
                     )
@@ -343,7 +344,7 @@ class ModelGateway:
         result = ChatResult("", 0, 0, billable_counts=False)
         try:
             while True:
-                async with asyncio.timeout_at(deadline_at + DEADLINE_GRACE_S):
+                async with asyncio.timeout_at(deadline_at):
                     piece = await anext(chunks, None)
                 if piece is None:
                     break
@@ -390,7 +391,7 @@ class ModelGateway:
     ) -> ChatResult | None:
         """Await the paid call; settle it on failure (None) and leave the success to the caller."""
         try:
-            async with asyncio.timeout_at(deadline_at + DEADLINE_GRACE_S):
+            async with asyncio.timeout_at(deadline_at):
                 result = await call
         except BaseException as exc:
             await self._settle_failure(reservation, exc)
@@ -424,8 +425,11 @@ class ModelGateway:
             log.warning("model_call_failed", stage=stage, error=str(exc) or type(exc).__name__)
 
     def _time_for(self, stage: StageName, deadline_at: float) -> float:
-        """`min(TIMEOUT_<STAGE>, time left)`."""
-        return min(self._timeouts[stage], deadline_at - asyncio.get_running_loop().time())
+        """The call's own timeout: `TIMEOUT_<STAGE>` when it ends before the deadline; otherwise past the
+        deadline by `DEADLINE_MARGIN_S`, so the deadline's guard ends the call (see `DEADLINE_MARGIN_S`)."""
+        left = deadline_at - asyncio.get_running_loop().time()
+        stage_timeout = self._timeouts[stage]
+        return stage_timeout if stage_timeout <= left else left + DEADLINE_MARGIN_S
 
     def _out_of_time(self, deadline_at: float) -> bool:
         return deadline_at - asyncio.get_running_loop().time() <= 0

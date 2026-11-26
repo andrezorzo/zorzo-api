@@ -88,7 +88,8 @@ class Rig:
 async def settle_litellm() -> None:
     """Wait for the background tasks LiteLLM spawned (its failure handlers) to finish."""
     pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-    await asyncio.wait(pending, timeout=2)
+    if pending:
+        await asyncio.wait(pending, timeout=2)
     await asyncio.sleep(0.05)  # a handler it hands to a thread
 
 
@@ -189,6 +190,27 @@ async def test_broken_streams_cool_an_entry_on_the_third(rig: Rig) -> None:
     with pytest.raises(ModelsUnavailableError):
         await rig.stream()
     assert f"answer:openrouter/{A}" in await rig.gateway.models.cooldowns()
+
+
+async def test_hanging_streams_cool_an_entry_on_the_third(rig: Rig) -> None:
+    with_limits(rig, timeout_answer=0.2)
+    rig.fake.always(A, "hang")  # times out before any byte: LiteLLM counts it, once
+    for _ in range(FAILS_BEFORE_COOLDOWN):
+        await rig.stream()
+    await settle_litellm()
+    assert f"answer:openrouter/{A}" not in await rig.gateway.models.cooldowns()
+    await rig.stream()
+    await settle_litellm()
+    assert f"answer:openrouter/{A}" in await rig.gateway.models.cooldowns()
+
+
+async def test_running_out_of_the_requests_time_never_cools_an_entry(rig: Rig) -> None:
+    rig.fake.always(A, "hang")
+    for _ in range(FAILS_BEFORE_COOLDOWN + 2):
+        with pytest.raises(ModelsUnavailableError):
+            await rig.complete(deadline_at=rig.deadline(0.2))  # the deadline, not TIMEOUT_ANSWER, cuts it
+    await settle_litellm()
+    assert f"answer:openrouter/{A}" not in await rig.gateway.models.cooldowns()
 
 
 async def test_a_prompt_too_long_never_cools_an_entry(rig: Rig) -> None:
