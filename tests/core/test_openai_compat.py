@@ -107,7 +107,7 @@ async def test_reads_null_and_part_list_content(message: dict[str, object], text
     assert result.text == text
 
 
-@pytest.mark.parametrize("message", [{"content": 7}, {"content": {"text": "x"}}])
+@pytest.mark.parametrize("message", [{"content": 7}, {"content": True}])
 async def test_a_malformed_message_is_the_providers_failure(message: dict[str, object]) -> None:
     transport = httpx.MockTransport(
         lambda request: httpx.Response(200, json={"choices": [{"message": message}]})
@@ -147,3 +147,35 @@ async def test_an_odd_streamed_delta_is_no_text_not_a_failure() -> None:
     chunks = [c async for c in provider.chat_stream("m", [{"role": "user", "content": "q"}], max_tokens=5)]
     await provider.close()
     assert "".join(c.text for c in chunks) == "Hello there"
+
+
+async def test_a_streamed_error_choice_after_text_is_the_providers_failure() -> None:
+    frames = (
+        b'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n'
+        b'data: {"choices":[{"delta":{},"finish_reason":"error"}]}\n\n'
+    )
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=frames))
+    provider = OpenAICompatProvider("https://provider.test/v1", "k", transport=transport)
+    with pytest.raises(ProviderError):
+        _ = [c async for c in provider.chat_stream("m", [{"role": "user", "content": "q"}], max_tokens=5)]
+    await provider.close()
+
+
+async def test_a_stream_with_no_readable_text_is_the_providers_failure() -> None:
+    frames = b'data: {"choices":[{"delta":{"content":7}}]}\n\ndata: [DONE]\n\n'
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=frames))
+    provider = OpenAICompatProvider("https://provider.test/v1", "k", transport=transport)
+    with pytest.raises(ProviderError):
+        _ = [c async for c in provider.chat_stream("m", [{"role": "user", "content": "q"}], max_tokens=5)]
+    await provider.close()
+
+
+async def test_an_odd_part_type_is_skipped_not_a_crash() -> None:
+    message = {"content": [{"type": ["text"], "text": "x"}, {"text": "ok"}]}
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"choices": [{"message": message}]})
+    )
+    provider = OpenAICompatProvider("https://provider.test/v1", "k", transport=transport)
+    result = await provider.chat("m", [{"role": "user", "content": "q"}], max_tokens=5, schema=None)
+    await provider.close()
+    assert result.text == "ok"

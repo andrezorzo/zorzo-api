@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
+import structlog
 
 from rag_core.ports import (
     ChatChunk,
@@ -22,6 +23,8 @@ from rag_core.ports import (
     RateLimited,
     RerankResult,
 )
+
+log = structlog.get_logger()
 
 # A backstop only: the gateway bounds every call with min(TIMEOUT_<STAGE>, time left).
 CLIENT_TIMEOUT_S = 60.0
@@ -87,6 +90,8 @@ class OpenAICompatProvider:
                 if response.status_code != 200:
                     await response.aread()
                     _raise_for_status(response)
+                odd = 0  # frames whose content had no readable text
+                read_text = False
                 async for line in response.aiter_lines():
                     if not line.startswith("data:"):
                         # Blank lines, and `: comment` keep-alives: those come from OpenRouter's edge, not
@@ -94,8 +99,15 @@ class OpenAICompatProvider:
                         continue
                     payload = line[len("data:") :].strip()
                     if payload == "[DONE]":
-                        return
-                    yield _stream_chunk(payload)
+                        break
+                    chunk, unreadable = _stream_chunk(payload)
+                    odd += unreadable
+                    read_text = read_text or bool(chunk.text)
+                    yield chunk
+                if odd:
+                    log.warning("provider_odd_frames", model=model, frames=odd)
+                    if not read_text:  # a stream we can't read at all is the provider's failure, not a miss
+                        raise ProviderError("unreadable stream")
         except httpx.HTTPError as exc:
             raise ProviderError(type(exc).__name__) from exc
 
@@ -137,8 +149,9 @@ def _raise_for_status(response: httpx.Response) -> None:
     raise ProviderError(f"http {status}", refused=refused)
 
 
-def _stream_chunk(payload: str) -> ChatChunk:
-    """One data frame: its text, if any, and its token counts, if any (some providers send them with text).
+def _stream_chunk(payload: str) -> tuple[ChatChunk, bool]:
+    """One data frame: its text, if any, and its token counts, if any (some providers send them with text);
+    and whether its content was of a type with no readable text.
 
     A frame without text (a role or reasoning delta) still comes from the model, so it is still a chunk.
     """
@@ -151,15 +164,16 @@ def _stream_chunk(payload: str) -> ChatChunk:
         if isinstance(choice, dict) and _choice_failed(choice):
             raise ProviderError("error frame")
         delta = choice.get("delta") if isinstance(choice, dict) else None
-        # A frame with content of an odd type is no text: one odd frame must not end an answer under way.
-        text = (_text(delta.get("content")) or "") if isinstance(delta, dict) else ""
+        # Content of an odd type is no text: one odd frame must not end an answer under way.
+        read = _text(delta.get("content")) if isinstance(delta, dict) else ""
+        text = read or ""
         usage = data.get("usage")  # some providers send it with the last text, or on every frame
         counts = _counts(usage)
         if counts is not None:
-            return ChatChunk(text=text, tokens_in=counts[0], tokens_out=counts[1])
+            return ChatChunk(text=text, tokens_in=counts[0], tokens_out=counts[1]), read is None
     except (ValueError, LookupError, TypeError, AttributeError) as exc:
         raise ProviderError("malformed frame") from exc
-    return ChatChunk(text=text)
+    return ChatChunk(text=text), read is None
 
 
 ANSWER_PARTS = {None, "text", "output_text"}  # part types that are the answer; reasoning parts are not
@@ -175,13 +189,18 @@ def _text(content: object) -> str | None:
         return ""
     if isinstance(content, str):
         return content
+    if isinstance(content, dict):  # one part sent on its own
+        content = [content]
     if isinstance(content, list):
-        return "".join(
-            p["text"]
-            for p in content
-            if isinstance(p, dict) and p.get("type") in ANSWER_PARTS and isinstance(p.get("text"), str)
-        )
+        return "".join(p["text"] for p in content if _answer_part(p))
     return None
+
+
+def _answer_part(part: object) -> bool:
+    if not isinstance(part, dict) or not isinstance(part.get("text"), str):
+        return False
+    kind = part.get("type")
+    return (kind is None or isinstance(kind, str)) and kind in ANSWER_PARTS
 
 
 def _choice_failed(choice: dict[str, Any]) -> bool:
