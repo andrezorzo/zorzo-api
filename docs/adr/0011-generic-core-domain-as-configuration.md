@@ -16,7 +16,3 @@ for a 15-day MVP and a single owner).
 
 Cost accepted: discipline to keep domain specifics out of the core, and some indirection (intents and
 tools come from configuration); adapting still means a fork plus a new eval set for the new domain.
-
-Interview answer: "The core is domain-agnostic; my career is just content and config. Swap the corpus,
-prompts, intents, tools and evals and you have a RAG for a law firm, without touching the core. I stopped
-short of a framework on purpose."

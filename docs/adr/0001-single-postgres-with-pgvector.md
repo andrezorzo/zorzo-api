@@ -22,6 +22,3 @@ Cost accepted: at tens of millions of vectors or heavy filtered search, pgvector
 vector database, and rate limiting costs one database write per request. The way out is designed in:
 retrieval sits behind a store interface, and the M5 benchmark compares pgvector with Chroma on recall,
 latency and cost.
-
-Interview answer: "One stateful service. Hybrid search is one SQL query, corpus swaps are atomic, and
-there is one backup. At a few thousand chunks a dedicated vector DB adds operations, not recall."

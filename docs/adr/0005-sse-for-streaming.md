@@ -16,7 +16,3 @@ POST); polling (more requests, and the steps are no longer live).
 
 Cost accepted: whether CloudFront passes SSE event by event is a hypothesis until the M1 test; a dropped
 stream is not resumed, the visitor asks again.
-
-Interview answer: "The stream only goes one way, so SSE: a plain POST, so the WAF, rate limit and bot
-token work on it as usual. WebSocket is my fallback, with the same event contract, if CloudFront buffers
-the stream."

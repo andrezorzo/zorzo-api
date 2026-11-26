@@ -16,7 +16,3 @@ stops domain details from leaking into the core, and every image ships everythin
 
 Cost accepted: more structure up front (ports, wiring at startup, a workspace) and some indirection when
 reading the code; `docs/code-map.md` exists to make it navigable.
-
-Interview answer: "One workspace, one shared core behind ports and adapters, three thin apps, and a domain
-folder. Ingest, API and evals run the exact same retrieval code, and a new domain is a new folder, not a
-fork of the core."

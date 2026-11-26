@@ -16,7 +16,3 @@ migrations, versioning bolted onto JSON metadata, and full-text search outside t
 
 Cost accepted: the store adapter and its SQL are ours to write and test; LangChain retriever conveniences are
 not used directly (the adapter can still expose a LangChain retriever interface if a tool needs it).
-
-Interview answer: "I wrote the store instead of using langchain-postgres, because I need versioned corpora
-swapped in one transaction and hybrid search in a single query, all under the same migrations as the rest of
-the schema."

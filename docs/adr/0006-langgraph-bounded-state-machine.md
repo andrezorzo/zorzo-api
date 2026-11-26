@@ -32,8 +32,3 @@ common in production; teams with a narrow, well-defined task often move from it 
 as cost, latency and unpredictable answers show up ("workflows vs agents" in Anthropic's "Building
 effective agents"). Hybrids are common too: this graph's tool step is itself a small ReAct loop capped at
 three calls. A planned experiment measures both versions on the same eval set.
-
-Interview answer: "I know ReAct is the default. I used LangGraph as a bounded state machine instead: the
-model decides only at defined branches, every loop has a cap, so cost and latency have a ceiling on a free
-quota, verification can't be skipped when the answer is about me, and every transition is an event I can
-trace, test and show live. For open-ended tasks I'd pick ReAct."

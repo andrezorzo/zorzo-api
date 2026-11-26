@@ -17,6 +17,3 @@ GitHub Actions (a different runtime from query time, so vectors could drift).
 
 Cost accepted: CPU-only latency on a shared vCPU; Ollama's RAM on an 8 GB machine; the model choice
 (multilingual candidates) is still open and decided by recall in the LLD.
-
-Interview answer: "Embeddings run locally in Ollama, and ingest runs on the same box, so documents and
-queries always go through the identical model. No per-call cost, nothing external on the query path."
