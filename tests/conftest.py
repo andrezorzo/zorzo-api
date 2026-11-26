@@ -17,13 +17,13 @@ from fastapi import FastAPI
 from rag_api.main import create_app
 from rag_api.settings import ApiSettings
 from rag_core.adapters.factory import build_gateway, rerank_chain
-from rag_core.adapters.openai_compat import OpenAICompatProvider
 from rag_core.adapters.turnstile import TurnstileBotCheck
+from rag_core.models_config import ModelsConfig
 from rag_core.services.gateway import ModelGateway
 from sqlalchemy import make_url
 
 from tests.fakes.alerter import RecordingAlerter
-from tests.fakes.openrouter import FakeOpenRouter
+from tests.fakes.openrouter import FakeOpenRouter, stop_all
 from tests.fakes.turnstile import PASS_SECRET, FakeSiteverify
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -151,7 +151,7 @@ def build_app(
     limits: dict[str, object] | None = None,
     openrouter: FakeOpenRouter | None = None,
 ) -> FastAPI:
-    """The real app, with Turnstile's `siteverify` and OpenRouter replaced by stand-ins (AC6), alerts recorded
+    """The real app, with Turnstile's `siteverify` and OpenRouter replaced by stand-ins, alerts recorded
     on `app.state.alerter` and the given limits."""
     app = create_app(settings)
     gate = app.state.gate
@@ -165,14 +165,24 @@ def build_app(
     old: ModelGateway = app.state.gateway
     app.state.openrouter = fake = openrouter or FakeOpenRouter()
     app.state.alerter = RecordingAlerter()
-    provider = OpenAICompatProvider(
-        old.config.providers["openrouter"].base_url, "test-key", transport=fake.transport()
-    )
+    config = served(old.config, fake)
     app.state.gateway = build_gateway(
-        old.config, {"openrouter": provider}, app.state.db, app.state.alerter, gate.limits
+        config, {"openrouter": "test-key"}, app.state.db, app.state.alerter, gate.limits
     )
     app.state.rerankers = rerank_chain(app.state.gateway, app.state.local_rerankers)
     return app
+
+
+def served(config: ModelsConfig, fake: FakeOpenRouter) -> ModelsConfig:
+    """The models config with the OpenRouter provider pointing at the fake, served on a local port."""
+    provider = config.providers["openrouter"].model_copy(update={"base_url": fake.serve()})
+    return config.model_copy(update={"providers": {**config.providers, "openrouter": provider}})
+
+
+@pytest.fixture(autouse=True)
+def _stop_fake_servers() -> Iterator[None]:
+    yield
+    stop_all()
 
 
 def reset_tables(url: str, *tables: str) -> None:

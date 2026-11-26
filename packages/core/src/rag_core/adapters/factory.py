@@ -6,7 +6,7 @@ from typing import get_args
 from rag_core.adapters.postgres import Database
 from rag_core.limits import Limits
 from rag_core.models_config import ModelsConfig, StageName
-from rag_core.ports import Alerter, Embedder, ModelProvider, Reranker
+from rag_core.ports import Alerter, Embedder, Reranker
 from rag_core.services.gateway import ModelGateway
 from rag_core.settings import AppSettings
 
@@ -46,14 +46,12 @@ def build_rerankers(settings: AppSettings) -> list[Reranker]:
     return [LocalReranker(settings.rerank_cache_dir)]
 
 
-def build_providers(
+def provider_keys(
     models: ModelsConfig, keys: Mapping[str, str | None], app_env: str
-) -> dict[str, ModelProvider]:
-    """One client per provider of the models config; in production a provider a chain uses needs its key."""
-    from rag_core.adapters.openai_compat import OpenAICompatProvider
-
+) -> dict[str, str | None]:
+    """Each provider's key; in production a provider a chain uses needs its key."""
     used = {e.provider for name in get_args(StageName) for e in models.stage(name).chain}
-    providers: dict[str, ModelProvider] = {}
+    found: dict[str, str | None] = {}
     for name, provider in models.providers.items():
         key = None
         if provider.key_env is not None:
@@ -62,32 +60,31 @@ def build_providers(
             key = keys[provider.key_env]
             if key is None and app_env == "production" and name in used:
                 raise ConfigError(f"{provider.key_env} is required in production (provider {name})")
-        providers[name] = OpenAICompatProvider(provider.base_url, key)
-    return providers
+        found[name] = key
+    return found
 
 
 def build_gateway(
     models: ModelsConfig,
-    providers: Mapping[str, ModelProvider],
+    keys: Mapping[str, str | None],
     db: Database,
     alerter: Alerter,
     limits: Limits,
 ) -> ModelGateway:
-    """The model gateway over the Postgres stores (budget, breaker rows, alerts)."""
+    """The model gateway: LiteLLM for the calls (ADR 0016), the Postgres stores for the budget, the alerts and
+    the cooldown rows. `keys` maps each provider to its key (`provider_keys`)."""
     from rag_core.adapters.alerts import PostgresAlertStore
     from rag_core.adapters.budget import PostgresBudget
     from rag_core.adapters.event_log import PostgresEventLog
+    from rag_core.adapters.litellm_models import LiteLLMModels
     from rag_core.services.alerts import Alerts
-    from rag_core.services.breaker import Breakers
-    from rag_core.services.quota import Quota
 
     return ModelGateway(
         models,
-        providers,
+        LiteLLMModels(models, keys, limits.breaker_cooldown),
         PostgresBudget(db),
-        Breakers(limits, PostgresEventLog(db)),
-        Quota(models, limits),
         Alerts(PostgresAlertStore(db), alerter, limits),
+        PostgresEventLog(db),
         limits,
     )
 

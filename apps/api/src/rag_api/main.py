@@ -10,8 +10,8 @@ from rag_core.adapters.alerts import LogAlerter, TelegramAlerter
 from rag_core.adapters.factory import (
     build_embedder,
     build_gateway,
-    build_providers,
     build_rerankers,
+    provider_keys,
     rerank_chain,
 )
 from rag_core.adapters.pgvector_store import PgVectorStore
@@ -55,8 +55,8 @@ def _alerter(settings: ApiSettings) -> Alerter:
 def _gateway(settings: ApiSettings, limits: Limits, db: Database) -> tuple[ModelGateway, str]:
     """The model gateway and the `model_config_version` of what it loaded (LLD "Configuration")."""
     models = load_models(settings.models_path)
-    providers = build_providers(models, settings.provider_keys(), settings.app_env)
-    return build_gateway(models, providers, db, _alerter(settings), limits), config_version(models, limits)
+    keys = provider_keys(models, settings.provider_keys(), settings.app_env)
+    return build_gateway(models, keys, db, _alerter(settings), limits), config_version(models, limits)
 
 
 def create_app(settings: ApiSettings) -> FastAPI:

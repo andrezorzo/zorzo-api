@@ -268,14 +268,3 @@ def test_falls_to_the_local_reranker_when_the_remote_one_fails(corpus_database: 
     assert hits(stream) == local
     assert stream.names()[-1] == "done"
     assert len(fake.requests) == 1
-
-
-def test_rerank_goes_local_past_the_quota_warning(client: TestClient) -> None:
-    app: Any = client.app
-    fake: FakeOpenRouter = app.state.openrouter
-    for _ in range(8):  # 80% of the fixture's 10 free requests a day
-        ask(client)
-    assert len(fake.requests) == 8
-    stream = ask(client)
-    assert len(fake.requests) == 8
-    assert stream.names()[-1] == "done"

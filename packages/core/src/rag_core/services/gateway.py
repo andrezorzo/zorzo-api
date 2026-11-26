@@ -1,16 +1,16 @@
-"""Model gateway (ADR 0007, LLD "Components and dependencies"): every model call goes through a stage's chain.
+"""Model gateway (ADR 0007, ADR 0016, LLD "Components and dependencies"): every model call goes through a
+stage's chain.
 
-Each chain entry is tried in order, within `min(TIMEOUT_<STAGE>, time left)`; an entry is skipped when its
-breaker is open (LLD "6.6 Circuit breaker"), when it is free and its provider passed the quota warning (LLD
-"6.8 Free quota"), or when it is paid and its estimate doesn't fit in what the day or the request has left
-(LLD "6.2 Daily budget"). A failure falls to the next entry; an exhausted chain raises
-`ModelsUnavailableError`.
+The stage's free entries run on the LiteLLM Router (order, cooldowns, timeouts: LLD "6.6 Circuit breaker").
+When they are exhausted, the paid entry runs if its estimate fits in what the day and the request have left
+(LLD "6.2 Daily budget"): reserved in Postgres before the call, settled after it. Every call runs under the
+caller's deadline; an exhausted chain raises `ModelsUnavailableError`.
 """
 
 import asyncio
 import contextlib
 import math
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 
@@ -20,31 +20,27 @@ from pydantic import BaseModel, ValidationError
 from rag_core.background import BackgroundTasks
 from rag_core.events import DegradedReason
 from rag_core.limits import Limits
-from rag_core.models_config import Entry, ModelsConfig, StageName
+from rag_core.models_config import Entry, ModelsConfig, StageName, entry_id
 from rag_core.ports import (
-    Alerter,
     Budget,
     ChatChunk,
+    ChatResult,
     ContextTooLongError,
-    ModelProvider,
+    Cooldown,
+    EventLog,
+    ModelRouter,
     ProviderError,
-    RateInfo,
-    RateLimitedError,
     StoreUnavailableError,
 )
 from rag_core.services.alerts import Alerts
-from rag_core.services.breaker import Breakers
-from rag_core.services.quota import Quota
 
 log = structlog.get_logger()
 
 CHARS_PER_TOKEN = 3  # conservative for English and Portuguese, no tokenizer (LLD "6.2 Daily budget")
-# A timeout counts toward the breaker when the call had at least this share of its stage timeout, whatever
-# limit ended it (the stage timeout, the rerank chain's, the caller's deadline), and the model sent no text,
-# or went silent for this share of it after its text (silent: no data frame; an aggregator's keep-alive is not
-# the model). With less time it never had its chance, and an answer still coming is alive, only long (owner
-# decision, LLD "6.6 Circuit breaker").
-FAIR_SHARE = 0.5
+# An empty answer or a schema miss is the model's, not the provider's: the free entries get one more try
+# through the Router before the paid entry (LLD "6.6 Circuit breaker").
+FREE_ATTEMPTS = 2
+RATE_LIMITED = "429"
 # The background work gets this long at shutdown, its three kinds at once, plus a short wait for what it
 # cancels (`CANCEL_WAIT_S`): Docker kills the container 10 s after SIGTERM.
 SHUTDOWN_DRAIN_S = 6.0
@@ -82,41 +78,40 @@ class RequestSpend:
 
 
 @dataclass
-class _Ticket:
-    """One call let through: its entry, and the reservation to settle (0 for a free entry)."""
+class _Outcome:
+    """How one stream ended: with an answer, with the model's miss (neither field set), or failed."""
+
+    completion: Completion | None = None
+    failed: bool = False
+
+
+@dataclass
+class _Reservation:
+    """The paid entry's estimate, reserved against the request and the day."""
 
     stage: StageName
     entry: Entry
     estimate: float
-    day: date | None
+    day: date
     spend: RequestSpend
-    deadline_at: float  # the caller's (inf when the caller bounds the call itself)
-    chain_ends_at: float = math.inf  # a limit the gateway sets on the whole chain (rerank)
-    trial: bool = False  # the breaker's half-open trial call
-    # False when the call's time ran out for a reason that says nothing about the provider: it had less than
-    # `FAIR_SHARE` of its stage timeout, or its answer had started and was still coming, or a slow consumer
-    # held the time (see `FAIR_SHARE`).
-    blame_timeout: bool = True
 
 
 class ModelGateway:
     def __init__(
         self,
         config: ModelsConfig,
-        providers: Mapping[str, ModelProvider],
+        models: ModelRouter,
         budget: Budget,
-        breakers: Breakers,
-        quota: Quota,
         alerts: Alerts,
+        event_log: EventLog,
         limits: Limits,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.config = config
-        self.providers = providers
+        self.models = models
         self.budget = budget
-        self.breakers = breakers
-        self.quota = quota
         self.alerts = alerts
+        self.event_log = event_log
         self.limits = limits
         self.clock = clock
         self._timeouts: dict[StageName, float] = {
@@ -125,6 +120,8 @@ class ModelGateway:
             "answer": limits.timeout_answer,
             "judge": limits.timeout_judge,
         }
+        self._entries = {entry_id(name, e): e for name in self._timeouts for e in config.stage(name).chain}
+        self._cooling: dict[str, Cooldown] = {}
         self._background = BackgroundTasks()
 
     # -- operations ---------------------------------------------------------------------------------------
@@ -139,39 +136,50 @@ class ModelGateway:
         spend: RequestSpend,
     ) -> Completion:
         json_schema = schema.model_json_schema() if schema is not None else None
-        chars = _prompt_chars(messages)
         max_tokens = self.config.stage(stage).max_tokens
-        for entry in self.config.stage(stage).chain:
-            # A schema miss is retried once on the same entry, then falls through, and never counts toward
-            # the breaker: the provider worked, the model missed (LLD "6.6 Circuit breaker").
-            for _ in range(2 if schema is not None else 1):
-                ticket = await self._take(stage, entry, chars, deadline_at, spend)
-                if ticket is None:
+        if self.config.stage(stage).free:
+            for _ in range(FREE_ATTEMPTS):
+                if self._out_of_time(deadline_at):
                     break
                 try:
-                    async with asyncio.timeout(self._time_for(ticket)):
-                        result = await self.providers[entry.provider].chat(
-                            entry.model, messages, max_tokens=max_tokens, schema=json_schema
+                    async with asyncio.timeout_at(deadline_at):
+                        result = await self.models.complete(
+                            stage,
+                            messages,
+                            max_tokens=max_tokens,
+                            schema=json_schema,
+                            timeout=self._time_for(stage, deadline_at),
                         )
-                except BaseException as exc:
-                    await self._close(ticket, exc)
-                    if _failed(exc):
-                        break
-                    raise
-                usage = Usage(result.tokens_in, result.tokens_out)
-                cost = await self._close(ticket, None, usage, result.rate)
-                # The model's miss, as in `stream`: never the breaker's, and not retried like a schema miss.
-                if not result.text.strip():
-                    log.warning("model_empty_answer", stage=stage, model=entry.model)
+                except (ProviderError, TimeoutError) as exc:
+                    self._failed(stage, exc)
                     break
-                try:
-                    parsed = schema.model_validate_json(result.text) if schema is not None else None
-                except ValidationError:
-                    log.warning("model_schema_miss", stage=stage, model=entry.model)
-                    continue
-                return Completion(result.text, parsed, usage, cost, entry.provider, entry.model)
-            if self._out_of_time(deadline_at):
-                break
+                finally:
+                    await self._note_cooldowns()
+                completion = self._completion(stage, result, schema, cost=0.0)
+                if completion is not None:
+                    return completion
+        paid = self.config.stage(stage).paid
+        if paid is not None and not self._out_of_time(deadline_at):
+            reservation = await self._reserve(stage, paid, _prompt_chars(messages), spend)
+            if reservation is not None:
+                paid_result = await self._paid_call(
+                    reservation,
+                    self.models.complete_paid(
+                        stage,
+                        messages,
+                        max_tokens=max_tokens,
+                        schema=json_schema,
+                        timeout=self._time_for(stage, deadline_at),
+                    ),
+                    deadline_at,
+                )
+                if paid_result is not None:
+                    cost = await self._settle_success(
+                        reservation, paid_result.tokens_in, paid_result.tokens_out, paid_result.cost_usd
+                    )  # fmt: skip
+                    completion = self._completion(stage, paid_result, schema, cost)
+                    if completion is not None:
+                        return completion
         raise ModelsUnavailableError(stage)
 
     async def stream(
@@ -180,96 +188,60 @@ class ModelGateway:
         """Yields the answer's text as it comes, then its `Completion`.
 
         The answer starts with the model's first real text (leading whitespace is held back until then). A
-        failure, or a stream that ends with no text, before it falls to the next entry; a failure after it
-        raises `ModelsUnavailableError`, and the caller keeps the text it was given.
+        failure, or a stream that ends with no text, before it falls to the next entry (the Router does so
+        among the free ones); a failure after it raises `ModelsUnavailableError`, and the caller keeps the
+        text it was given.
         """
-        chars = _prompt_chars(messages)
         max_tokens = self.config.stage(stage).max_tokens
-        for entry in self.config.stage(stage).chain:
-            ticket = await self._take(stage, entry, chars, deadline_at, spend)
-            if ticket is None:
+        if self.config.stage(stage).free:
+            for _ in range(FREE_ATTEMPTS):
                 if self._out_of_time(deadline_at):
                     break
-                continue
-            parts: list[str] = []
-            tokens_in = tokens_out = 0
-            loop = asyncio.get_running_loop()
-            ends_at = loop.time() + self._time_for(ticket)
-            last_chunk_at = loop.time()  # the provider's silence is measured from here
-            # The answer has started once the model sent real text: whitespace before it is held back, so
-            # "started" means one thing for the visitor, the fallback and the breaker.
-            wrote = False
-            chunks: AsyncIterator[ChatChunk] | None = None
-            try:
-                chunks = aiter(
-                    self.providers[entry.provider].chat_stream(entry.model, messages, max_tokens=max_tokens)
+                chunks = self.models.stream(
+                    stage, messages, max_tokens=max_tokens, timeout=self._time_for(stage, deadline_at)
                 )
-                while True:
-                    # Each read is bounded on its own, never across a `yield`: the consumer's time between
-                    # chunks counts toward the end, but a timeout can't fire inside the consumer.
-                    if loop.time() >= ends_at:
-                        if wrote:  # the consumer held the time (it only gets it once there is text)
-                            ticket.blame_timeout = False
-                        raise TimeoutError
-                    async with asyncio.timeout_at(ends_at):
-                        chunk = await anext(chunks, None)
-                    last_chunk_at = loop.time()
-                    if chunk is None:
-                        break
-                    if chunk.tokens_in is not None:
-                        tokens_in, tokens_out = chunk.tokens_in, chunk.tokens_out or 0
-                    if chunk.text:
-                        parts.append(chunk.text)
-                        if wrote or chunk.text.strip():
-                            text = chunk.text if wrote else "".join(parts)  # with the held whitespace
-                            wrote = True
-                            yield text
-                            last_chunk_at = loop.time()  # the consumer's time isn't the provider's silence
-            except BaseException as exc:
-                if wrote and loop.time() - last_chunk_at < FAIR_SHARE * self._timeouts[stage]:
-                    ticket.blame_timeout = False  # the answer was still coming: alive, only long
-                if chunks is not None:
-                    await _aclose(chunks)  # the provider's response, not left to the garbage collector
-                await self._close(ticket, exc)
-                if _failed(exc):
-                    if wrote:
-                        raise ModelsUnavailableError(f"{stage} failed after the first token") from exc
-                    continue
-                raise
-            usage = Usage(tokens_in, tokens_out)
-            cost = await self._close(ticket, None, usage)
-            if not wrote:
-                # The stream ended with no text (a content filter, the tokens spent on reasoning): the
-                # provider worked, the model missed, so like a schema miss it never counts toward the breaker.
-                log.warning("model_empty_answer", stage=stage, model=entry.model)
-                continue
-            yield Completion("".join(parts), None, usage, cost, entry.provider, entry.model)
-            return
+                outcome = _Outcome()
+                try:
+                    async for text in self._relay(stage, chunks, deadline_at, outcome, reservation=None):
+                        yield text
+                finally:
+                    await self._note_cooldowns()
+                if outcome.completion is not None:
+                    yield outcome.completion
+                    return
+                if outcome.failed:  # the free entries failed: only a model miss gets another try
+                    break
+        paid = self.config.stage(stage).paid
+        if paid is not None and not self._out_of_time(deadline_at):
+            reservation = await self._reserve(stage, paid, _prompt_chars(messages), spend)
+            if reservation is not None:
+                chunks = self.models.stream_paid(
+                    stage, messages, max_tokens=max_tokens, timeout=self._time_for(stage, deadline_at)
+                )
+                outcome = _Outcome()
+                async for text in self._relay(stage, chunks, deadline_at, outcome, reservation):
+                    yield text
+                if outcome.completion is not None:
+                    yield outcome.completion
+                    return
         raise ModelsUnavailableError(stage)
 
     async def rerank(self, query: str, documents: list[str], *, deadline_at: float = math.inf) -> list[float]:
         """Scores per document from the `rerank` stage; `ModelsUnavailableError` sends the caller to local.
 
-        The whole chain gets one `TIMEOUT_RERANK`: the local level must still have time after it.
+        The whole stage gets one `TIMEOUT_RERANK`: the local level must still have time after it.
         """
-        chain_ends_at = asyncio.get_running_loop().time() + self._timeouts["rerank"]
-        chars = len(query) + sum(len(d) for d in documents)
-        spend = RequestSpend(self.limits.request_cost_cap_usd)
-        for entry in self.config.stage("rerank").chain:
-            ticket = await self._take("rerank", entry, chars, deadline_at, spend, chain_ends_at)
-            if ticket is None:
-                continue
-            try:
-                async with asyncio.timeout(self._time_for(ticket)):
-                    result = await self.providers[entry.provider].rerank(entry.model, query, documents)
-            except BaseException as exc:
-                await self._close(ticket, exc)
-                if _failed(exc):
-                    continue
-                raise
-            await self._close(ticket, None, Usage(math.ceil(chars / CHARS_PER_TOKEN), 0), result.rate)
-            return result.scores
-        raise ModelsUnavailableError("rerank")
+        ends_at = min(deadline_at, asyncio.get_running_loop().time() + self._timeouts["rerank"])
+        if not self.config.stage("rerank").free or self._out_of_time(ends_at):
+            raise ModelsUnavailableError("rerank")
+        try:
+            async with asyncio.timeout_at(ends_at):
+                return await self.models.rerank(query, documents, timeout=self._time_for("rerank", ends_at))
+        except (ProviderError, TimeoutError) as exc:
+            self._failed("rerank", exc)
+            raise ModelsUnavailableError("rerank") from exc
+        finally:
+            await self._note_cooldowns()
 
     async def mode(self) -> DegradedReason | None:
         """None when questions can be answered by the models now; otherwise why they go search-only.
@@ -292,88 +264,166 @@ class ModelGateway:
             )
         if state == "degraded":
             return "budget_exhausted"
-        answer = self.config.stage("answer").chain
-        keys = [(e.provider, e.model) for e in answer]
-        if any(self.breakers.closed(k) for k in keys):
+        await self._note_cooldowns()
+        answer = self.config.stage("answer")
+        cooling = [self._cooling.get(entry_id("answer", e)) for e in answer.free]
+        all_cooling = bool(cooling) and all(c is not None for c in cooling)
+        if not all_cooling:
             self.alerts.clear_soon("providers_down")
-        callable_entries = [e for e, k in zip(answer, keys, strict=True) if self.breakers.callable(k)]
-        if not callable_entries:
-            message = f"every answer entry ({len(answer)}) has an open breaker; questions go search-only"
+        elif answer.free:
+            message = f"every free answer entry ({len(answer.free)}) is cooling down"
             self.alerts.raise_soon("providers_down", message)
-            return "models_unavailable"
-        if not any(
-            (e.paid and state == "normal") or (not e.paid and not self.quota.over_warn(e.provider))
-            for e in callable_entries
-        ):
-            return "quota_exhausted"
+        if (all_cooling or not answer.free) and (answer.paid is None or state != "normal"):
+            limited = all_cooling and all(c is not None and c.status == RATE_LIMITED for c in cooling)
+            return "quota_exhausted" if limited else "models_unavailable"
         return None
 
     async def drain(self, timeout: float | None = None) -> None:
-        """Wait for the background work (settles of cancelled calls, alerts, breaker rows), all of it within
+        """Wait for the background work (settles of cancelled calls, alerts, cooldown rows), all of it within
         `timeout`."""
         # At once, each with the whole time: one kind stuck on the database can't take the others' time.
-        drains = (self._background.drain, self.alerts.drain, self.breakers.event_log.drain)
+        drains = (self._background.drain, self.alerts.drain, self.event_log.drain)
         results = await asyncio.gather(*(drain(timeout) for drain in drains), return_exceptions=True)
-        for name, result in zip(("settles", "alerts", "breaker_rows"), results, strict=True):
+        for name, result in zip(("settles", "alerts", "cooldown_rows"), results, strict=True):
             if isinstance(result, BaseException):  # a bug in one drain must not cut the others short
                 log.error("drain_failed", work=name, error=type(result).__name__)
 
     async def close(self) -> None:
-        """At shutdown: the background work, then every client the gateway owns (providers, alerter)."""
+        """At shutdown: the background work, then every client the gateway owns (models, alerter)."""
         await self.drain(SHUTDOWN_DRAIN_S)
-        clients: list[ModelProvider | Alerter] = [*self.providers.values(), self.alerts.alerter]
-        for client in clients:
-            try:  # one client failing to close doesn't keep the others open
+        for client in (self.models, self.alerts.alerter):
+            try:  # one client failing to close doesn't keep the other open
                 await client.close()
             except Exception as exc:
                 log.warning("client_close_failed", client=type(client).__name__, error=type(exc).__name__)
 
-    # -- one entry ----------------------------------------------------------------------------------------
+    # -- calls --------------------------------------------------------------------------------------------
 
-    def _time_for(self, ticket: _Ticket) -> float:
-        """`min(TIMEOUT_<STAGE>, time left)`; notes on the ticket whether its timeout is the provider's."""
-        now = asyncio.get_running_loop().time()
-        timeout = self._timeouts[ticket.stage]
-        granted = min(now + timeout, ticket.chain_ends_at, ticket.deadline_at) - now
-        ticket.blame_timeout = granted >= FAIR_SHARE * timeout
-        return granted
+    async def _relay(
+        self,
+        stage: StageName,
+        chunks: AsyncIterator[ChatChunk],
+        deadline_at: float,
+        outcome: _Outcome,
+        reservation: _Reservation | None,
+    ) -> AsyncIterator[str]:
+        """Yields one stream's text and records in `outcome` how it ended.
+
+        A failure before the text falls through (`outcome.failed`); after it, raises `ModelsUnavailableError`.
+        Each read is bounded by the deadline on its own, never across a `yield`.
+        """
+        parts: list[str] = []
+        wrote = False  # leading whitespace is held back until real text arrives
+        last = ChatChunk()
+        try:
+            while True:
+                async with asyncio.timeout_at(deadline_at):
+                    chunk = await anext(chunks, None)
+                if chunk is None:
+                    break
+                last = chunk if chunk.entry is not None else last
+                if chunk.text:
+                    parts.append(chunk.text)
+                    if wrote or chunk.text.strip():
+                        text = chunk.text if wrote else "".join(parts)
+                        wrote = True
+                        yield text
+        except BaseException as exc:
+            await _aclose(chunks)
+            if reservation is not None:
+                await self._settle_failure(reservation, exc)
+            if isinstance(exc, ProviderError | TimeoutError):
+                self._failed(stage, exc)
+                if wrote:
+                    raise ModelsUnavailableError(f"{stage} failed after the first token") from exc
+                outcome.failed = True
+                return
+            raise
+        usage = Usage(last.tokens_in or 0, last.tokens_out or 0)
+        cost = 0.0
+        if reservation is not None:
+            cost = await self._settle_success(reservation, usage.tokens_in, usage.tokens_out, last.cost_usd)
+        if not wrote:
+            # The stream ended with no text (a content filter, the tokens spent on reasoning): the model's
+            # miss, which falls through like a schema miss.
+            log.warning("model_empty_answer", stage=stage, entry=last.entry)
+            return
+        entry = self._entry(last.entry, reservation)
+        outcome.completion = Completion("".join(parts), None, usage, cost, entry.provider, entry.model)
+
+    async def _paid_call(
+        self, reservation: _Reservation, call: Awaitable[ChatResult], deadline_at: float
+    ) -> ChatResult | None:
+        """Await the paid call; settle it on failure (None) and leave the success to the caller."""
+        try:
+            async with asyncio.timeout_at(deadline_at):
+                result = await call
+        except BaseException as exc:
+            await self._settle_failure(reservation, exc)
+            if isinstance(exc, ProviderError | TimeoutError):
+                self._failed(reservation.stage, exc)
+                return None
+            raise
+        return result
+
+    def _completion(
+        self, stage: StageName, result: ChatResult, schema: type[BaseModel] | None, cost: float
+    ) -> Completion | None:
+        """The answer, or None for the model's miss (an empty answer, a schema miss)."""
+        if not result.text.strip():
+            log.warning("model_empty_answer", stage=stage, entry=result.entry)
+            return None
+        try:
+            parsed = schema.model_validate_json(result.text) if schema is not None else None
+        except ValidationError:
+            log.warning("model_schema_miss", stage=stage, entry=result.entry)
+            return None
+        entry = self._entry(result.entry, None)
+        usage = Usage(result.tokens_in, result.tokens_out)
+        return Completion(result.text, parsed, usage, cost, entry.provider, entry.model)
+
+    def _entry(self, name: str | None, reservation: _Reservation | None) -> Entry:
+        if reservation is not None:
+            return reservation.entry
+        entry = self._entries.get(name or "")
+        if entry is None:
+            raise ProviderError("unknown entry")
+        return entry
+
+    def _failed(self, stage: StageName, exc: BaseException) -> None:
+        if isinstance(exc, ContextTooLongError):
+            log.error("context_too_long", stage=stage)
+        else:
+            log.warning("model_call_failed", stage=stage, error=str(exc) or type(exc).__name__)
+
+    def _time_for(self, stage: StageName, deadline_at: float) -> float:
+        """`min(TIMEOUT_<STAGE>, time left)`."""
+        return min(self._timeouts[stage], deadline_at - asyncio.get_running_loop().time())
 
     def _out_of_time(self, deadline_at: float) -> bool:
         return deadline_at - asyncio.get_running_loop().time() <= 0
 
-    async def _take(
-        self,
-        stage: StageName,
-        entry: Entry,
-        chars: int,
-        deadline_at: float,
-        spend: RequestSpend,
-        chain_ends_at: float = math.inf,
-    ) -> _Ticket | None:
-        """A ticket to call the entry now, or None to skip it (no time, open breaker, quota, budget)."""
-        key = (entry.provider, entry.model)
-        if self._out_of_time(min(deadline_at, chain_ends_at)) or not self.breakers.callable(key):
-            return None
-        if not entry.paid and self.quota.over_warn(entry.provider):
-            log.info("model_entry_skipped", stage=stage, model=entry.model, why="quota")
-            return None
-        if not self.breakers.allow(key):  # another call took the half-open trial meanwhile
-            return None
-        trial = not self.breakers.closed(key)
-        ticket = _Ticket(stage, entry, 0.0, None, spend, deadline_at, chain_ends_at, trial)
+    async def _note_cooldowns(self) -> None:
+        """Write the cooldowns that started or ended since the last look (LLD "6.6 Circuit breaker")."""
         try:
-            reserved = not entry.paid or await self._reserve(ticket, chars)
-        except BaseException:
-            self.breakers.release(key, trial)  # cancelled while reserving: the trial must not stay taken
-            raise
-        if not reserved:
-            self.breakers.release(key, trial)
-            return None
-        return ticket
+            now = await self.models.cooldowns()
+        except Exception as exc:  # a bookkeeping failure never fails a question
+            log.warning("cooldowns_unreadable", error=type(exc).__name__)
+            return
+        for name, cooldown in now.items():
+            if name not in self._cooling:
+                fields = {"entry": name, "status": cooldown.status, "seconds": cooldown.length_s}
+                self.event_log.write("warning", "gateway", "cooldown_started", fields)
+        for name in self._cooling.keys() - now.keys():
+            self.event_log.write("info", "gateway", "cooldown_ended", {"entry": name})
+        self._cooling = now
 
-    async def _reserve(self, ticket: _Ticket, chars: int) -> bool:
-        """Reserve the paid entry's estimate against the request and the day; False skips the entry."""
-        stage, entry, spend = ticket.stage, ticket.entry, ticket.spend
+    # -- the paid entry's budget --------------------------------------------------------------------------
+
+    async def _reserve(
+        self, stage: StageName, entry: Entry, chars: int, spend: RequestSpend
+    ) -> _Reservation | None:
+        """Reserve the paid entry's estimate against the request and the day; None skips the entry."""
         assert entry.price is not None  # the config requires a price on a paid entry
         prompt_tokens = math.ceil(chars / CHARS_PER_TOKEN)
         max_tokens = self.config.stage(stage).max_tokens
@@ -382,7 +432,7 @@ class ModelGateway:
         ) / 1e6
         if not spend.fits(estimate):
             log.info("model_entry_skipped", stage=stage, model=entry.model, why="request_cap")
-            return False
+            return None
         day = self.clock().date()
         # Shielded: a caller that leaves mid-reserve must not leave a committed reservation nobody settles.
         reserving = asyncio.ensure_future(self.budget.reserve(day, estimate, self.limits.daily_budget_usd))
@@ -393,67 +443,39 @@ class ModelGateway:
             raise
         except StoreUnavailableError as exc:  # no reservation, no paid call
             log.error("budget_reserve_failed", error=str(exc))
-            return False
+            return None
         if not reserved:
             log.info("model_entry_skipped", stage=stage, model=entry.model, why="budget")
-            return False
+            return None
         spend.spent += estimate
-        ticket.estimate, ticket.day = estimate, day
-        return True
+        return _Reservation(stage, entry, estimate, day, spend)
 
-    async def _close(
-        self,
-        ticket: _Ticket,
-        exc: BaseException | None,
-        usage: Usage | None = None,
-        rate: RateInfo | None = None,
+    async def _settle_success(
+        self, reservation: _Reservation, tokens_in: int, tokens_out: int, reported: float | None
     ) -> float:
-        """Record the verdict on the breaker and the quota, settle the reservation; returns the cost."""
-        entry = ticket.entry
-        key, trial = (entry.provider, entry.model), ticket.trial
-        # A timeout counts toward the breaker only when `_time_for` said it is the provider's (LLD "6.6").
-        if exc is None:
-            self.breakers.success(key, trial)
-        elif isinstance(exc, RateLimitedError):
-            self.breakers.failure(key, rate_limited=True, trial=trial)
-        elif isinstance(exc, ContextTooLongError):
-            log.error("context_too_long", stage=ticket.stage, model=entry.model)
-            self.breakers.release(key, trial)
-        elif _failed(exc) and not (isinstance(exc, TimeoutError) and not ticket.blame_timeout):
-            self.breakers.failure(key, trial=trial)
-        else:  # a timeout that isn't the provider's, cancelled, or a bug: no verdict on the provider
-            self.breakers.release(key, trial)
-        if _failed(exc):
-            log.warning(
-                "model_call_failed",
-                stage=ticket.stage,
-                model=entry.model,
-                error=str(exc) or type(exc).__name__,
-            )
-        if not entry.paid:
-            if not isinstance(exc, asyncio.CancelledError):
-                self.quota.count(entry.provider, rate)
-            return 0.0
-        # A call the provider refused settles with actual 0 (LLD "6.2 Daily budget"). One that may have run on
-        # the provider's side (a timeout, or the visitor leaving mid-call) keeps its estimate: refunding it
-        # would let a visitor who disconnects spend past the cap unseen.
-        # A refusal comes with the status, before any text, so a stream that gave text is never refused.
-        cost = 0.0 if isinstance(exc, ProviderError) and exc.refused else ticket.estimate
-        if exc is None:
-            assert entry.price is not None
-            if usage is None or usage.tokens_in + usage.tokens_out == 0:
-                cost = ticket.estimate  # billed, but the provider sent no usage: keep the estimate
-            else:
-                cost = (
-                    usage.tokens_in * entry.price.input_per_mtok
-                    + usage.tokens_out * entry.price.output_per_mtok
-                ) / 1e6
+        """Settle a paid answer: the cost the provider reported, else its usage at the configured price, else
+        the estimate (billed, but no usage came)."""
+        price = reservation.entry.price
+        assert price is not None
+        if reported is not None:
+            cost = reported
+        elif tokens_in + tokens_out == 0:
+            cost = reservation.estimate
+        else:
+            cost = (tokens_in * price.input_per_mtok + tokens_out * price.output_per_mtok) / 1e6
+        await self._settle(reservation, cost)
+        return cost
+
+    async def _settle_failure(self, reservation: _Reservation, exc: BaseException) -> None:
+        """A call the provider refused settles at 0 (LLD "6.2 Daily budget"). One that may have run on the
+        provider's side (a timeout, a 5xx, the visitor leaving mid-call) keeps its estimate: refunding it
+        would let a visitor who disconnects spend past the cap unseen."""
+        cost = 0.0 if isinstance(exc, ProviderError) and exc.refused else reservation.estimate
         if isinstance(exc, asyncio.CancelledError | GeneratorExit):
             # The caller is leaving: don't hold it on the database.
-            self._background.spawn(self._settle(ticket, cost))
+            self._background.spawn(self._settle(reservation, cost))
         else:
-            await self._settle(ticket, cost)
-        return cost
+            await self._settle(reservation, cost)
 
     async def _release_if_reserved(
         self, reserving: "asyncio.Future[bool]", day: date, estimate: float
@@ -474,10 +496,9 @@ class ModelGateway:
             reserving.add_done_callback(lambda f: f.cancelled() or f.exception())
             raise
 
-    async def _settle(self, ticket: _Ticket, actual: float) -> None:
-        ticket.spend.spent += actual - ticket.estimate
-        if ticket.day is not None:
-            await self._settle_row(ticket.day, actual - ticket.estimate)
+    async def _settle(self, reservation: _Reservation, actual: float) -> None:
+        reservation.spend.spent += actual - reservation.estimate
+        await self._settle_row(reservation.day, actual - reservation.estimate)
 
     async def _settle_row(self, day: date, delta: float) -> None:
         lim = self.limits
@@ -497,8 +518,3 @@ async def _aclose(chunks: AsyncIterator[object]) -> None:
 
 def _prompt_chars(messages: list[dict[str, str]]) -> int:
     return sum(len(m.get("content", "")) for m in messages)
-
-
-def _failed(exc: BaseException | None) -> bool:
-    """A provider failure, which falls to the next entry; anything else (cancelled, a bug) propagates."""
-    return isinstance(exc, ProviderError | TimeoutError)

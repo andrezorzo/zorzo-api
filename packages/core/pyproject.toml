@@ -19,6 +19,9 @@ dependencies = [
     "httpx>=0.28.1",
     "phonenumbers>=9.0.42,<10",  # numbering plans change; uv.lock pins the vetted version
     "huggingface-hub>=0.30",
+    # Exact pin: 1.82.7 and 1.82.8 shipped malware (March 2026); upgrade only to a release two weeks old
+    # with a matching GitHub release, in a reviewed PR (ADR 0016).
+    "litellm==1.108.5",
 ]
 
 [build-system]

@@ -131,52 +131,75 @@ class ContextTooLongError(ProviderError):
 
 
 @dataclass(frozen=True)
-class RateInfo:
-    """A provider's request quota for the day, from its `x-ratelimit-*` headers."""
-
-    remaining: int
-    limit: int
-
-
-@dataclass(frozen=True)
 class ChatResult:
     text: str
     tokens_in: int
     tokens_out: int
-    rate: RateInfo | None = None
+    entry: str = ""  # which chain entry answered (`models_config.entry_id`)
+    cost_usd: float | None = None  # what the provider reported it billed; None when it reported nothing
 
 
 @dataclass(frozen=True)
 class ChatChunk:
-    """One data frame of a streamed answer: its text, its token counts (usually on the last frame, sometimes
-    with text), or neither (a frame from the model with no text, such as reasoning). After the answer's text
-    has started, any chunk shows the model still working; before it, only text counts (see the gateway's
-    `FAIR_SHARE`).
-    """
+    """One piece of a streamed answer: its text, its token counts (usually on the last piece), and on the last
+    piece the entry that answered and the cost the provider reported."""
 
     text: str = ""
     tokens_in: int | None = None
     tokens_out: int | None = None
+    entry: str | None = None
+    cost_usd: float | None = None
 
 
 @dataclass(frozen=True)
-class RerankResult:
-    scores: list[float]  # one per document, in the documents' order
-    rate: RateInfo | None = None
+class Cooldown:
+    """A free entry the Router keeps out for now (LLD "6.6 Circuit breaker")."""
+
+    status: str  # the status that caused it ("429", "500", "408" …)
+    started_at: float  # epoch seconds
+    length_s: float
 
 
-class ModelProvider(Protocol):
-    """One OpenAI-compatible endpoint (ADR 0007); failures raise `ProviderError`; the caller bounds time."""
+class ModelRouter(Protocol):
+    """The model calls (ADR 0016): a stage's free entries through the LiteLLM Router, its paid entry alone.
 
-    async def chat(
-        self, model: str, messages: list[dict[str, str]], *, max_tokens: int, schema: dict[str, Any] | None
+    Failures raise `ProviderError` (or `TimeoutError`); the free calls raise once every free entry failed or
+    is cooling down. The caller bounds the time as well.
+    """
+
+    async def complete(
+        self,
+        stage: str,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int,
+        schema: dict[str, Any] | None,
+        timeout: float,
     ) -> ChatResult: ...
 
-    def chat_stream(
-        self, model: str, messages: list[dict[str, str]], *, max_tokens: int
+    def stream(
+        self, stage: str, messages: list[dict[str, str]], *, max_tokens: int, timeout: float
     ) -> AsyncIterator[ChatChunk]: ...
 
-    async def rerank(self, model: str, query: str, documents: list[str]) -> RerankResult: ...
+    async def complete_paid(
+        self,
+        stage: str,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int,
+        schema: dict[str, Any] | None,
+        timeout: float,
+    ) -> ChatResult: ...
+
+    def stream_paid(
+        self, stage: str, messages: list[dict[str, str]], *, max_tokens: int, timeout: float
+    ) -> AsyncIterator[ChatChunk]: ...
+
+    async def rerank(self, query: str, documents: list[str], *, timeout: float) -> list[float]:
+        """One score per document, in the documents' order."""
+
+    async def cooldowns(self) -> dict[str, Cooldown]:
+        """The free entries cooling down now, by entry id."""
 
     async def close(self) -> None: ...
 
@@ -228,7 +251,7 @@ class Alerter(Protocol):
 
 
 class EventLog(Protocol):
-    """`log_events` rows for events that belong to no request (breaker transitions)."""
+    """`log_events` rows for events that belong to no request (cooldowns)."""
 
     def write(self, level: str, component: str, event: str, fields: dict[str, Any]) -> None:
         """Never blocks: the row is written in the background, and a failure is only logged."""
@@ -343,6 +366,7 @@ __all__ = [
     "ChatResult",
     "ChunkRow",
     "ContextTooLongError",
+    "Cooldown",
     "CorpusStore",
     "DataPublisher",
     "DocumentRow",
@@ -350,13 +374,11 @@ __all__ = [
     "EventLog",
     "Finding",
     "HealthProbe",
-    "ModelProvider",
+    "ModelRouter",
     "ProviderError",
     "PublishedChunk",
-    "RateInfo",
     "RateLimitedError",
     "RateLimiter",
-    "RerankResult",
     "Reranker",
     "SearchHit",
     "SecretScanner",

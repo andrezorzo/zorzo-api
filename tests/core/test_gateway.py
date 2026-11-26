@@ -1,5 +1,5 @@
-"""AC1, AC2 (free quota, breaker log) and AC6: the model gateway against the fake OpenRouter server and a
-real budget row."""
+"""The model gateway on the LiteLLM Router (F01-T13 AC1, AC2, AC3, AC5) against the fake OpenRouter server and
+a real budget row."""
 
 import asyncio
 import time
@@ -12,13 +12,12 @@ import psycopg
 import pytest
 from pydantic import BaseModel
 from rag_core.adapters.factory import build_gateway
-from rag_core.adapters.openai_compat import OpenAICompatProvider
 from rag_core.adapters.postgres import Database
 from rag_core.limits import Limits, load_limits
-from rag_core.models_config import Entry, load_models
+from rag_core.models_config import load_models
 from rag_core.services.gateway import Completion, ModelGateway, ModelsUnavailableError, RequestSpend
 
-from tests.conftest import reset_tables, seed_budget
+from tests.conftest import reset_tables, seed_budget, served
 from tests.fakes.alerter import RecordingAlerter
 from tests.fakes.openrouter import FakeOpenRouter, Reply
 
@@ -26,7 +25,10 @@ ROOT = Path(__file__).resolve().parents[2]
 LIMITS = load_limits(ROOT / "config/limits.yaml")
 CONFIG = load_models(ROOT / "tests/fixtures/models.test.yaml")
 A, B, PAID = "test/answer-a:free", "test/answer-b:free", "test/answer-paid"
+RERANK = "test/rerank:free"
 MESSAGES = [{"role": "user", "content": "Which AWS services has he used?"}]
+PROMPT_TOKENS = -(-len(MESSAGES[0]["content"]) // 3)
+ESTIMATE = (PROMPT_TOKENS * 1.0 + 200 * 4.0) / 1e6  # the fixture's paid price and answer max_tokens
 
 
 @dataclass
@@ -49,6 +51,14 @@ class Rig:
             **kwargs,
         )
 
+    async def stream(self, spend: float = 0.01, deadline: float = 10) -> list[str | Completion]:
+        return [
+            p
+            async for p in self.gateway.stream(
+                "answer", MESSAGES, deadline_at=self.deadline(deadline), spend=RequestSpend(spend)
+            )
+        ]
+
     def spent_today(self) -> float:
         with psycopg.connect(self.url) as conn:
             row = conn.execute(
@@ -59,12 +69,16 @@ class Rig:
     def seed_budget(self, cost: float, paid_disabled: bool = False, degraded: bool = False) -> None:
         seed_budget(self.url, cost, paid_disabled, degraded)
 
+    def log_events(self) -> list[tuple[str, str, dict[str, Any]]]:
+        with psycopg.connect(self.url) as conn:
+            rows = conn.execute("SELECT component, event, fields FROM log_events ORDER BY id").fetchall()
+        return [(r[0], r[1], r[2]) for r in rows]
+
 
 def make_gateway(
     db: Database, fake: FakeOpenRouter, alerter: RecordingAlerter, limits: Limits = LIMITS
 ) -> ModelGateway:
-    provider = OpenAICompatProvider("https://openrouter.test/api/v1", "test-key", transport=fake.transport())
-    return build_gateway(CONFIG, {"openrouter": provider}, db, alerter, limits)
+    return build_gateway(served(CONFIG, fake), {"openrouter": "test-key"}, db, alerter, limits)
 
 
 @pytest.fixture
@@ -72,7 +86,9 @@ async def rig(database_url: str) -> AsyncIterator[Rig]:
     reset_tables(database_url, "budget_daily", "alert_states", "log_events")
     db = Database(database_url)
     fake, alerter = FakeOpenRouter(), RecordingAlerter()
-    yield Rig(make_gateway(db, fake, alerter), fake, alerter, db, database_url)
+    rig = Rig(make_gateway(db, fake, alerter), fake, alerter, db, database_url)
+    yield rig
+    await rig.gateway.close()
     await db.close()
 
 
@@ -81,7 +97,10 @@ def with_limits(rig: Rig, **update: Any) -> Rig:
     return rig
 
 
-async def test_answers_from_the_first_entry(rig: Rig) -> None:
+# -- AC1: the free entries on the Router ------------------------------------------------------------------
+
+
+async def test_answers_from_the_first_free_entry(rig: Rig) -> None:
     result = await rig.complete()
     assert result.text == "Hello from the fake model"
     assert (result.usage.tokens_in, result.usage.tokens_out) == (100, 20)
@@ -92,19 +111,52 @@ async def test_answers_from_the_first_entry(rig: Rig) -> None:
 
 
 @pytest.mark.parametrize("failure", ["error", "hang", "malformed", "rate_limited", "context_too_long"])
-async def test_falls_to_the_next_entry_on_failure(rig: Rig, failure: str) -> None:
-    with_limits(rig, timeout_answer=0.2)
+async def test_a_failure_falls_to_the_next_entry(rig: Rig, failure: str) -> None:
+    with_limits(rig, timeout_answer=0.3)
     rig.fake.script(A, failure)
     result = await rig.complete()
     assert result.model == B
     assert rig.fake.models_called() == [A, B]
 
 
-async def test_skips_an_open_breaker(rig: Rig) -> None:
-    rig.fake.script(A, "rate_limited")
-    await rig.complete()
-    await rig.complete()
-    assert rig.fake.models_called() == [A, B, B]
+async def test_a_429_cools_the_entry_for_its_retry_after_and_falls_through_at_once(rig: Rig) -> None:
+    rig.fake.script(A, "rate_limited")  # Retry-After: 30
+    started = time.monotonic()
+    assert (await rig.complete()).model == B
+    assert time.monotonic() - started < 2  # no retry on A, no wait for its Retry-After
+    assert (await rig.complete()).model == B
+    assert rig.fake.models_called() == [A, B, B]  # the cooled entry gets no request
+    cooldowns = await rig.gateway.models.cooldowns()
+    assert cooldowns[f"answer:openrouter/{A}"].length_s == 30
+
+
+async def test_a_cooled_entry_is_tried_again_after_the_cooldown(rig: Rig) -> None:
+    with_limits(rig, breaker_cooldown=0.3)  # a 401 sends no Retry-After: the Router's cooldown applies
+    rig.fake.script(A, "unauthorized")
+    assert (await rig.complete()).model == B
+    assert (await rig.complete()).model == B
+    await asyncio.sleep(0.4)
+    assert (await rig.complete()).model == A
+    assert rig.fake.models_called() == [A, B, B, A]
+
+
+class Verdict(BaseModel):
+    supported: bool
+
+
+async def test_a_model_miss_is_retried_once_then_the_paid_entry_answers(rig: Rig) -> None:
+    rig.fake.script(A, Reply(text="not json"), Reply(text='{"supported": true}'))
+    result = await rig.complete(schema=Verdict)
+    assert result.parsed == Verdict(supported=True)
+    assert rig.fake.models_called() == [A, A]
+    assert rig.fake.requests[0].body["response_format"]["type"] == "json_schema"
+    rig.fake.script(A, Reply(text=""), Reply(text="{}"))  # an empty answer, then a schema miss
+    rig.fake.script(PAID, Reply(text='{"supported": false}'))
+    assert (await rig.complete(schema=Verdict)).model == PAID
+    assert not await rig.gateway.models.cooldowns()  # misses are the model's: no entry cools
+
+
+# -- AC2: the paid entry ----------------------------------------------------------------------------------
 
 
 async def test_pays_when_the_free_entries_fail(rig: Rig) -> None:
@@ -114,9 +166,19 @@ async def test_pays_when_the_free_entries_fail(rig: Rig) -> None:
     spend = RequestSpend(LIMITS.request_cost_cap_usd)
     result = await rig.complete(spend)
     assert result.model == PAID
-    assert result.cost_usd == pytest.approx(1000 * 1.0 / 1e6 + 100 * 4.0 / 1e6)
+    assert result.cost_usd == pytest.approx(1000 * 1.0 / 1e6 + 100 * 4.0 / 1e6)  # usage at the price
     assert spend.spent == pytest.approx(result.cost_usd)
     assert rig.spent_today() == pytest.approx(result.cost_usd, abs=1e-6)
+    assert rig.fake.models_called() == [A, B, PAID]
+
+
+async def test_settles_to_the_reported_cost(rig: Rig) -> None:
+    rig.fake.script(A, "error")
+    rig.fake.script(B, "error")
+    rig.fake.script(PAID, Reply(tokens_in=1000, tokens_out=100, cost=0.000321))
+    result = await rig.complete()
+    assert result.cost_usd == pytest.approx(0.000321)
+    assert rig.spent_today() == pytest.approx(0.000321, abs=1e-6)
 
 
 async def test_skips_a_paid_entry_the_budget_cant_cover(rig: Rig) -> None:
@@ -125,8 +187,6 @@ async def test_skips_a_paid_entry_the_budget_cant_cover(rig: Rig) -> None:
     rig.seed_budget(LIMITS.daily_budget_usd - 0.00001)  # the day has almost nothing left
     with pytest.raises(ModelsUnavailableError):
         await rig.complete()
-    with pytest.raises(ModelsUnavailableError):
-        await rig.complete(RequestSpend(0.0))  # nor the request
     assert PAID not in rig.fake.models_called()
 
 
@@ -145,144 +205,14 @@ async def test_only_a_refused_paid_call_releases_its_reservation(
     assert (rig.spent_today() == 0.0) is refunded  # a 502 or 500 may come after the model ran
 
 
-async def test_stops_at_the_deadline(rig: Rig) -> None:
-    rig.fake.script(A, "hang")
-    started = time.monotonic()
-    with pytest.raises(ModelsUnavailableError):
-        await rig.complete(deadline_at=rig.deadline(0.3))
-    assert time.monotonic() - started < 1  # the deadline, not TIMEOUT_ANSWER
-    assert rig.fake.models_called() == [A]  # no time left for the next entries
-
-
-async def test_raises_when_the_chain_is_exhausted(rig: Rig) -> None:
-    for model in (A, B, PAID):
-        rig.fake.script(model, "error")
+async def test_a_paid_call_that_may_have_run_keeps_its_estimate(rig: Rig) -> None:
+    with_limits(rig, timeout_answer=0.3)
+    rig.fake.script(A, "error")
+    rig.fake.script(B, "error")
+    rig.fake.script(PAID, "hang")  # the provider may still bill a call it never answered
     with pytest.raises(ModelsUnavailableError):
         await rig.complete()
-    assert rig.fake.models_called() == [A, B, PAID]
-
-
-class Verdict(BaseModel):
-    supported: bool
-
-
-async def test_retries_a_schema_miss_once_on_the_same_entry(rig: Rig) -> None:
-    rig.fake.script(A, Reply(text="not json"), Reply(text='{"supported": true}'))
-    result = await rig.complete(schema=Verdict)
-    assert result.parsed == Verdict(supported=True)
-    assert rig.fake.models_called() == [A, A]
-    assert rig.fake.requests[0].body["response_format"]["type"] == "json_schema"
-    rig.fake.always(B, Reply(text='{"supported": false}'))
-    rig.fake.script(A, Reply(text="{}"), Reply(text="{}"))
-    assert (await rig.complete(schema=Verdict)).model == B  # two misses fall through
-    rig.fake.script(A, Reply(text="{}"), Reply(text="{}"))
-    await rig.complete(schema=Verdict)  # five misses on A by now, as many as BREAKER_FAILURES
-    assert rig.gateway.breakers.closed(("openrouter", A))  # misses never count toward the breaker
-
-
-async def test_stream_falls_back_only_before_the_first_token(rig: Rig) -> None:
-    rig.fake.script(A, "error")
-    parts = [
-        p
-        async for p in rig.gateway.stream(
-            "answer", MESSAGES, deadline_at=rig.deadline(), spend=RequestSpend(0.01)
-        )
-    ]
-    *tokens, final = parts
-    assert "".join(t for t in tokens if isinstance(t, str)) == "Hello from the fake model"
-    assert isinstance(final, Completion) and final.model == B and final.usage.tokens_out == 20
-
-    rig.fake.script(A, "break_after_first_token")
-    given: list[str] = []
-    with pytest.raises(ModelsUnavailableError):
-        async for part in rig.gateway.stream(
-            "answer", MESSAGES, deadline_at=rig.deadline(), spend=RequestSpend(0.01)
-        ):
-            assert isinstance(part, str)
-            given.append(part)
-    assert given == ["Hello"]  # the caller keeps what it was given
-    assert rig.fake.models_called() == [A, B, A]  # no fallback after the first token
-
-
-async def test_saves_free_quota_past_the_warning(rig: Rig) -> None:
-    for _ in range(8):  # 80% of the fixture's 10 free requests a day
-        await rig.gateway.complete("route", MESSAGES, deadline_at=rig.deadline(), spend=RequestSpend(0.01))
-    assert len(rig.fake.requests) == 8
-    with pytest.raises(ModelsUnavailableError):
-        await rig.gateway.rerank("q", ["a", "b"], deadline_at=rig.deadline())  # rerank goes local
-    result = await rig.complete()
-    assert result.model == PAID  # free entries skipped, the paid one runs while the budget allows
-    assert await rig.gateway.mode() is None
-    rig.seed_budget(0.09, paid_disabled=True)
-    assert await rig.gateway.mode() == "quota_exhausted"
-    assert rig.fake.models_called()[8:] == [PAID]
-
-
-async def test_free_quota_follows_the_providers_headers(rig: Rig) -> None:
-    rig.fake.script(
-        A, Reply(headers={"x-ratelimit-remaining-requests": "5", "x-ratelimit-limit-requests": "100"})
-    )
-    await rig.complete()
-    await rig.complete()
-    assert rig.fake.models_called() == [A, PAID]  # 95 of 100 used: past the warning
-
-
-async def test_reranks_remotely(rig: Rig) -> None:
-    scores = await rig.gateway.rerank("q", ["a", "b", "c"], deadline_at=rig.deadline())
-    assert scores == [3.0, 2.0, 1.0]
-    assert rig.fake.requests[0].path == "/rerank"
-    assert rig.fake.requests[0].body == {
-        "model": "test/rerank:free",
-        "query": "q",
-        "documents": ["a", "b", "c"],
-        "top_n": 3,
-    }
-
-
-async def test_breaker_transitions_are_logged(rig: Rig, database_url: str) -> None:
-    rig.fake.script(A, "rate_limited")
-    await rig.complete()
-    await rig.gateway.drain()
-    with psycopg.connect(database_url) as conn:
-        rows = conn.execute("SELECT level, source, component, event, fields FROM log_events").fetchall()
-    assert rows == [
-        (
-            "warning",
-            "app",
-            "breaker",
-            "breaker_opened",
-            {"provider": "openrouter", "model": A, "rate_limited": True},
-        )
-    ]
-
-
-async def test_mode_follows_the_budget_and_the_breakers(rig: Rig) -> None:
-    assert await rig.gateway.mode() is None
-    for model in (A, B, PAID):
-        rig.gateway.breakers.failure(("openrouter", model), rate_limited=True)
-    assert await rig.gateway.mode() == "models_unavailable"
-    rig.seed_budget(0.10, paid_disabled=True, degraded=True)
-    assert await rig.gateway.mode() == "budget_exhausted"
-    await rig.gateway.drain()
-    assert sorted(kind for kind, _ in rig.alerter.sent) == ["budget_exhausted", "providers_down"]
-
-
-async def test_a_slow_consumer_ends_the_stream_with_unavailable_not_a_cancel(rig: Rig) -> None:
-    with_limits(rig, timeout_answer=0.2)
-    rig.fake.script(A, Reply(text="one two three"))
-    with pytest.raises(ModelsUnavailableError):
-        async for _ in rig.gateway.stream(
-            "answer", MESSAGES, deadline_at=rig.deadline(), spend=RequestSpend(0)
-        ):
-            await asyncio.sleep(0.3)  # the visitor's connection is slow
-
-
-async def test_the_request_deadline_never_counts_toward_the_breaker(rig: Rig) -> None:
-    for _ in range(LIMITS.breaker_failures + 1):
-        rig.fake.script(A, "hang")
-        with pytest.raises(ModelsUnavailableError):
-            await rig.complete(deadline_at=rig.deadline(0.05))
-    assert rig.gateway.breakers.closed(("openrouter", A))
+    assert rig.spent_today() == pytest.approx(ESTIMATE, abs=1e-6)
 
 
 async def test_a_paid_answer_without_usage_keeps_its_estimate(rig: Rig) -> None:
@@ -290,138 +220,8 @@ async def test_a_paid_answer_without_usage_keeps_its_estimate(rig: Rig) -> None:
     rig.fake.script(B, "error")
     rig.fake.script(PAID, Reply(tokens_in=0, tokens_out=0))
     result = await rig.complete()
-    prompt_tokens = -(-len(MESSAGES[0]["content"]) // 3)
-    estimate = (prompt_tokens * 1.0 + 200 * 4.0) / 1e6
-    assert result.cost_usd == pytest.approx(estimate)
-    assert rig.spent_today() == pytest.approx(estimate, abs=1e-6)
-
-
-async def test_the_budget_alert_opens_at_the_paid_cutoff(rig: Rig) -> None:
-    rig.seed_budget(0.08, paid_disabled=True)
-    assert await rig.gateway.mode() is None  # the free entries still answer
-    await rig.gateway.drain()
-    assert [kind for kind, _ in rig.alerter.sent] == ["budget_exhausted"]
-
-
-async def test_a_paid_call_that_may_have_run_keeps_its_estimate(rig: Rig) -> None:
-    with_limits(rig, timeout_answer=0.2)
-    rig.fake.script(A, "error")
-    rig.fake.script(B, "error")
-    rig.fake.script(PAID, "hang")  # the provider may still bill a call it never answered
-    with pytest.raises(ModelsUnavailableError):
-        await rig.complete()
-    prompt_tokens = -(-len(MESSAGES[0]["content"]) // 3)
-    assert rig.spent_today() == pytest.approx((prompt_tokens * 1.0 + 200 * 4.0) / 1e6, abs=1e-6)
-
-
-async def test_a_cancel_while_reserving_leaves_the_trial_free(rig: Rig) -> None:
-    key = ("openrouter", PAID)
-    rig.gateway.breakers.failure(key, rate_limited=True)
-    rig.gateway.breakers.clock = lambda: 10**9  # the cooldown has passed
-    entry = CONFIG.stage("answer").chain[2]
-
-    async def hang(*args: Any) -> bool:
-        await asyncio.sleep(60)
-        return True
-
-    rig.gateway.budget.reserve = hang  # type: ignore[method-assign,assignment]
-    task = asyncio.create_task(rig.gateway._take("answer", entry, 10, rig.deadline(), RequestSpend(0.01)))
-    await asyncio.sleep(0.05)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert rig.gateway.breakers.callable(key)  # the next call may take the trial
-
-
-async def test_a_hanging_remote_rerank_opens_its_breaker(rig: Rig) -> None:
-    rig = with_limits(rig, timeout_rerank=0.05, breaker_failures=2)
-    rig.fake.always("test/rerank:free", "hang")
-    for _ in range(2):
-        with pytest.raises(ModelsUnavailableError):
-            await rig.gateway.rerank("q", ["a", "b"])
-    assert not rig.gateway.breakers.callable(("openrouter", "test/rerank:free"))
-
-
-async def test_the_alert_says_when_the_cutoff_becomes_search_only(rig: Rig) -> None:
-    ticks = [0.0]
-    rig.gateway.alerts.monotonic = lambda: ticks[0]
-    rig.seed_budget(0.08, paid_disabled=True)
-    await rig.gateway.mode()
-    await rig.gateway.drain()
-    rig.seed_budget(0.10, paid_disabled=True, degraded=True)
-    for _ in range(2):  # the next check, a minute later; then another, with nothing new to tell
-        ticks[0] += 61
-        await rig.gateway.mode()
-        await rig.gateway.drain()
-    messages = [m for _, m in rig.alerter.sent]
-    assert len(messages) == 2
-    assert "cutoff" in messages[0]
-    assert messages[1].startswith("still open: ") and "search-only" in messages[1]  # told within a minute
-
-
-async def test_a_paid_stream_that_breaks_after_text_keeps_its_estimate(rig: Rig) -> None:
-    rig.fake.script(A, "error")
-    rig.fake.script(B, "error")
-    rig.fake.script(PAID, "break_after_first_token")  # a dropped connection: not a refusal
-    with pytest.raises(ModelsUnavailableError):
-        async for _ in rig.gateway.stream(
-            "answer", MESSAGES, deadline_at=rig.deadline(), spend=RequestSpend(0.01)
-        ):
-            pass
-    assert rig.spent_today() > 0  # the provider ran: no refund
-
-
-async def test_the_remote_rerank_chain_gets_one_timeout(rig: Rig) -> None:
-    rig = with_limits(rig, timeout_rerank=0.3, breaker_failures=1)
-    second = Entry(provider="openrouter", model="test/rerank-b:free")
-    stage = CONFIG.stage("rerank").model_copy(update={"chain": [*CONFIG.stage("rerank").chain, second]})
-    rig.gateway.config = CONFIG.model_copy(
-        update={"stages": CONFIG.stages.model_copy(update={"rerank": stage})}
-    )
-    rig.fake.script("test/rerank:free", "hang")
-    rig.fake.script("test/rerank-b:free", "hang")
-    started = time.monotonic()
-    with pytest.raises(ModelsUnavailableError):
-        await rig.gateway.rerank("q", ["a"])
-    assert time.monotonic() - started < 0.5  # both entries within one TIMEOUT_RERANK
-    # The first hang ran out its stage timeout: the provider's fault, so its breaker opened.
-    assert not rig.gateway.breakers.callable(("openrouter", "test/rerank:free"))
-
-
-async def test_a_later_rerank_entry_cut_by_the_chain_limit_is_not_blamed(rig: Rig) -> None:
-    rig = with_limits(rig, timeout_rerank=0.3, breaker_failures=1)
-    second = Entry(provider="openrouter", model="test/rerank-b:free")
-    stage = CONFIG.stage("rerank").model_copy(update={"chain": [*CONFIG.stage("rerank").chain, second]})
-    rig.gateway.config = CONFIG.model_copy(
-        update={"stages": CONFIG.stages.model_copy(update={"rerank": stage})}
-    )
-    rig.fake.script("test/rerank:free", "slow_error")  # fails after using most of the chain's time
-    rig.fake.script("test/rerank-b:free", "hang")
-    with pytest.raises(ModelsUnavailableError):
-        await rig.gateway.rerank("q", ["a"])
-    assert rig.gateway.breakers.callable(("openrouter", "test/rerank-b:free"))
-
-
-async def test_a_later_rerank_entry_with_most_of_the_time_is_blamed(rig: Rig) -> None:
-    rig = with_limits(rig, timeout_rerank=0.3, breaker_failures=1)
-    second = Entry(provider="openrouter", model="test/rerank-b:free")
-    stage = CONFIG.stage("rerank").model_copy(update={"chain": [*CONFIG.stage("rerank").chain, second]})
-    rig.gateway.config = CONFIG.model_copy(
-        update={"stages": CONFIG.stages.model_copy(update={"rerank": stage})}
-    )
-    rig.fake.script("test/rerank:free", "error")  # fails at once
-    rig.fake.script("test/rerank-b:free", "hang")
-    with pytest.raises(ModelsUnavailableError):
-        await rig.gateway.rerank("q", ["a"])
-    assert not rig.gateway.breakers.callable(("openrouter", "test/rerank-b:free"))
-
-
-async def test_a_call_with_most_of_its_timeout_is_blamed_whatever_cut_it(rig: Rig) -> None:
-    rig = with_limits(rig, timeout_answer=0.2, breaker_failures=1)
-    rig.fake.script(A, "hang")
-    with pytest.raises(ModelsUnavailableError):
-        await rig.complete(deadline_at=rig.deadline(0.15))  # 75% of the stage timeout, cut by the caller
-    assert not rig.gateway.breakers.callable(("openrouter", A))  # failing to answer in 75% counts
+    assert result.cost_usd == pytest.approx(ESTIMATE)
+    assert rig.spent_today() == pytest.approx(ESTIMATE, abs=1e-6)
 
 
 async def test_a_reservation_its_caller_left_is_given_back(rig: Rig) -> None:
@@ -444,85 +244,153 @@ async def test_a_reservation_its_caller_left_is_given_back(rig: Rig) -> None:
     assert rig.spent_today() == 0.0
 
 
-async def test_a_stream_still_sending_when_cut_is_not_blamed(rig: Rig) -> None:
-    rig = with_limits(rig, timeout_answer=1.0, breaker_failures=1)
-    rig.fake.script(A, "drip")  # a word every 50 ms for 2 s: still coming when 0.6 s runs out
+# -- AC3: streaming, the deadline and the request cap ------------------------------------------------------
+
+
+async def test_stream_falls_back_only_before_the_first_token(rig: Rig) -> None:
+    rig.fake.script(A, "error")
+    *tokens, final = await rig.stream()
+    assert "".join(t for t in tokens if isinstance(t, str)) == "Hello from the fake model"
+    assert isinstance(final, Completion) and final.model == B and final.usage.tokens_out == 20
+
+    rig.fake.script(A, "break_after_first_token")
+    given: list[str] = []
     with pytest.raises(ModelsUnavailableError):
-        async for _ in rig.gateway.stream(
-            "answer", MESSAGES, deadline_at=rig.deadline(0.6), spend=RequestSpend(0)
+        async for part in rig.gateway.stream(
+            "answer", MESSAGES, deadline_at=rig.deadline(), spend=RequestSpend(0.01)
         ):
-            pass  # the consumer reads at once; the provider is the slow one
-    assert rig.gateway.breakers.closed(("openrouter", A))
+            assert isinstance(part, str)
+            given.append(part)
+    assert given == ["Hello"]  # the caller keeps what it was given
+    assert rig.fake.models_called() == [A, B, A]  # no fallback after the first token
 
 
-async def test_a_stream_that_goes_silent_after_a_token_is_blamed(rig: Rig) -> None:
-    rig = with_limits(rig, timeout_answer=0.2, breaker_failures=1)
-    rig.fake.script(A, "stall_after_first_token")
+async def test_a_stream_without_real_text_is_retried_then_paid(rig: Rig) -> None:
+    rig.fake.script(A, "no_text", "no_text")
+    *tokens, final = await rig.stream()
+    assert tokens[0] == "Hello"  # nothing of the empty streams reached the visitor
+    assert isinstance(final, Completion) and final.model == PAID
+
+
+async def test_a_paid_stream_that_breaks_after_text_keeps_its_estimate(rig: Rig) -> None:
+    rig.fake.script(A, "error")
+    rig.fake.script(B, "error")
+    rig.fake.script(PAID, "break_after_first_token")  # a dropped connection: not a refusal
     with pytest.raises(ModelsUnavailableError):
-        async for _ in rig.gateway.stream(
-            "answer", MESSAGES, deadline_at=rig.deadline(), spend=RequestSpend(0)
-        ):
-            pass
-    assert not rig.gateway.breakers.callable(("openrouter", A))
-
-
-@pytest.mark.parametrize(("pace", "blamed"), [("keepalive_only", True), ("reasoning", False)])
-# Both after one word of text; with no text at all, a timeout is the model's (see the silent-stream test).
-async def test_only_the_models_own_frames_are_signs_of_life(rig: Rig, pace: str, blamed: bool) -> None:
-    rig = with_limits(rig, timeout_answer=0.4, breaker_failures=1)
-    rig.fake.script(A, pace)
-    with pytest.raises(ModelsUnavailableError):
-        async for _ in rig.gateway.stream(
-            "answer", MESSAGES, deadline_at=rig.deadline(), spend=RequestSpend(0)
-        ):
-            pass
-    assert rig.gateway.breakers.callable(("openrouter", A)) is not blamed
-
-
-async def test_a_model_that_only_reasons_past_its_timeout_is_blamed(rig: Rig) -> None:
-    rig = with_limits(rig, timeout_answer=0.3, breaker_failures=1)
-    rig.fake.script(A, "reasoning_only")
-    parts = [
-        p
-        async for p in rig.gateway.stream(
-            "answer", MESSAGES, deadline_at=rig.deadline(), spend=RequestSpend(0)
-        )
-    ]
-    assert isinstance(parts[-1], Completion) and parts[-1].model == B  # no text yet: the next entry answers
-    assert not rig.gateway.breakers.callable(("openrouter", A))  # no text in its whole timeout
-
-
-@pytest.mark.parametrize(("pace", "blamed"), [("whitespace_stall", True), ("no_text", False)])
-async def test_a_stream_without_real_text_falls_to_the_next_entry(rig: Rig, pace: str, blamed: bool) -> None:
-    rig = with_limits(rig, timeout_answer=0.3, breaker_failures=1)
-    rig.fake.script(A, pace)
-    parts = [
-        p
-        async for p in rig.gateway.stream(
-            "answer", MESSAGES, deadline_at=rig.deadline(), spend=RequestSpend(0)
-        )
-    ]
-    assert parts[0] == "Hello"  # nothing of A reached the visitor
-    assert isinstance(parts[-1], Completion) and parts[-1].model == B
-    # Stalled with no real text: the provider's failure. Ended cleanly with none: the model missed.
-    assert rig.gateway.breakers.callable(("openrouter", A)) is not blamed
-
-
-async def test_an_empty_completion_falls_to_the_next_entry_without_blame(rig: Rig) -> None:
-    rig = with_limits(rig, breaker_failures=1)
-    rig.fake.script(A, Reply(text=""))
-    result = await rig.complete()
-    assert result.model == B
-    assert rig.gateway.breakers.closed(("openrouter", A))  # the model missed; the provider answered
+        await rig.stream()
+    assert rig.spent_today() == pytest.approx(ESTIMATE, abs=1e-6)  # the provider ran: no refund
 
 
 async def test_a_paid_empty_stream_is_settled_from_its_usage(rig: Rig) -> None:
-    rig.fake.script(A, "error")
-    rig.fake.script(B, "error")
+    rig.fake.always(A, "error")
+    rig.fake.always(B, "error")
     rig.fake.script(PAID, "no_text")
     with pytest.raises(ModelsUnavailableError):
-        async for _ in rig.gateway.stream(
-            "answer", MESSAGES, deadline_at=rig.deadline(), spend=RequestSpend(0.01)
-        ):
-            pass
+        await rig.stream()
     assert rig.spent_today() == pytest.approx(800 * 1.0 / 1e6, abs=1e-6)  # its 800 input tokens, as reported
+
+
+async def test_stops_at_the_deadline(rig: Rig) -> None:
+    rig.fake.script(A, "hang")
+    started = time.monotonic()
+    with pytest.raises(ModelsUnavailableError):
+        await rig.complete(deadline_at=rig.deadline(0.3))
+    assert time.monotonic() - started < 1  # the deadline, not TIMEOUT_ANSWER
+    assert rig.fake.models_called() == [A]  # no time left for the next entries
+
+
+async def test_the_request_cap_stops_the_paid_entry(rig: Rig) -> None:
+    rig.fake.script(A, "error")
+    rig.fake.script(B, "error")
+    with pytest.raises(ModelsUnavailableError):
+        await rig.complete(RequestSpend(0.0))
+    assert PAID not in rig.fake.models_called()
+    assert rig.spent_today() == 0.0
+
+
+# -- the remote rerank (AC4 through the route, in tests/api) ------------------------------------------------
+
+
+async def test_reranks_remotely(rig: Rig) -> None:
+    scores = await rig.gateway.rerank("q", ["a", "b", "c"], deadline_at=rig.deadline())
+    assert scores == [3.0, 2.0, 1.0]
+    request = rig.fake.requests[0]
+    assert request.path == "/rerank"
+    assert (request.body["model"], request.body["query"], request.body["documents"]) == (
+        RERANK,
+        "q",
+        ["a", "b", "c"],
+    )
+
+
+async def test_a_hanging_remote_rerank_ends_within_its_timeout(rig: Rig) -> None:
+    with_limits(rig, timeout_rerank=0.2)
+    rig.fake.script(RERANK, "hang")
+    started = time.monotonic()
+    with pytest.raises(ModelsUnavailableError):
+        await rig.gateway.rerank("q", ["a", "b"])
+    assert time.monotonic() - started < 1  # the local level still has time
+
+
+# -- AC5: mode, alerts and the cooldown log ------------------------------------------------------------------
+
+
+async def test_mode_follows_the_budget_and_the_cooldowns(rig: Rig) -> None:
+    assert await rig.gateway.mode() is None
+    rig.fake.script(A, "unauthorized")
+    rig.fake.script(B, "unauthorized")
+    assert (await rig.complete()).model == PAID
+    assert await rig.gateway.mode() is None  # every free entry cooling, but the paid one can still run
+    rig.seed_budget(0.08, paid_disabled=True)
+    assert await rig.gateway.mode() == "models_unavailable"
+    rig.seed_budget(0.10, paid_disabled=True, degraded=True)
+    assert await rig.gateway.mode() == "budget_exhausted"
+    await rig.gateway.drain()
+    assert sorted(kind for kind, _ in rig.alerter.sent) == ["budget_exhausted", "providers_down"]
+
+
+async def test_quota_exhausted_when_every_free_answer_entry_was_cooled_by_a_429(rig: Rig) -> None:
+    rig.seed_budget(0.08, paid_disabled=True)
+    rig.fake.script(A, "rate_limited")
+    rig.fake.script(B, "rate_limited")
+    with pytest.raises(ModelsUnavailableError):
+        await rig.complete()
+    assert await rig.gateway.mode() == "quota_exhausted"
+
+
+async def test_cooldown_starts_and_ends_are_logged(rig: Rig) -> None:
+    with_limits(rig, breaker_cooldown=0.3)
+    rig.fake.script(A, "unauthorized")
+    await rig.complete()
+    await asyncio.sleep(0.4)
+    await rig.gateway.mode()
+    await rig.gateway.drain()
+    entry = f"answer:openrouter/{A}"
+    assert rig.log_events() == [
+        ("gateway", "cooldown_started", {"entry": entry, "status": "401", "seconds": 0.3}),
+        ("gateway", "cooldown_ended", {"entry": entry}),
+    ]
+
+
+async def test_the_budget_alert_opens_at_the_paid_cutoff(rig: Rig) -> None:
+    rig.seed_budget(0.08, paid_disabled=True)
+    assert await rig.gateway.mode() is None  # the free entries still answer
+    await rig.gateway.drain()
+    assert [kind for kind, _ in rig.alerter.sent] == ["budget_exhausted"]
+
+
+async def test_the_alert_says_when_the_cutoff_becomes_search_only(rig: Rig) -> None:
+    ticks = [0.0]
+    rig.gateway.alerts.monotonic = lambda: ticks[0]
+    rig.seed_budget(0.08, paid_disabled=True)
+    await rig.gateway.mode()
+    await rig.gateway.drain()
+    rig.seed_budget(0.10, paid_disabled=True, degraded=True)
+    for _ in range(2):  # the next check, a minute later; then another, with nothing new to tell
+        ticks[0] += 61
+        await rig.gateway.mode()
+        await rig.gateway.drain()
+    messages = [m for _, m in rig.alerter.sent]
+    assert len(messages) == 2
+    assert "cutoff" in messages[0]
+    assert messages[1].startswith("still open: ") and "search-only" in messages[1]  # told within a minute
