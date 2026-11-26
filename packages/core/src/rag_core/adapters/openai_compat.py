@@ -137,17 +137,19 @@ def _stream_chunk(payload: str) -> ChatChunk:
         data = json.loads(payload)
         if "error" in data:  # OpenRouter reports a mid-stream failure as an error frame
             raise ProviderError("error frame")
-        usage = data.get("usage")
+        choices = data.get("choices") or []
+        text = (choices[0].get("delta") or {}).get("content") if choices else None
+        text = text if isinstance(text, str) else ""
+        usage = data.get("usage")  # some providers send it with the last text, or on every frame
         if usage:
             return ChatChunk(
+                text=text,
                 tokens_in=int(usage.get("prompt_tokens", 0)),
                 tokens_out=int(usage.get("completion_tokens", 0)),
             )
-        choices = data.get("choices") or []
-        text = (choices[0].get("delta") or {}).get("content") if choices else None
     except (ValueError, LookupError, TypeError, AttributeError) as exc:
         raise ProviderError("malformed frame") from exc
-    return ChatChunk(text=text if isinstance(text, str) else "")
+    return ChatChunk(text=text)
 
 
 def _rate(response: httpx.Response) -> RateInfo | None:

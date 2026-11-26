@@ -8,8 +8,9 @@ normally. It records every request (path, model, body), so a test can assert whi
 - failures: "rate_limited" (429 with `Retry-After`), "error" (500), "bad_gateway" (502), "unavailable"
   (503), "bad_request" (400), "slow_error" (500 after 0.25 s), "hang", "stall_after_first_token", "drip",
   "keepalive_only" and "reasoning" (after one word: silence, a word every 50 ms, keep-alive comments only, or
-  reasoning frames without text), "malformed" (a 200 that isn't
-  the expected JSON), "context_too_long" (400), "break_after_first_token" (a stream that dies mid-way);
+  reasoning frames without text), "reasoning_only" (reasoning frames and never any text), "malformed" (a
+  200 that isn't the expected JSON), "context_too_long" (400), "break_after_first_token" (a stream that dies
+  mid-way);
 - `Reply(...)` for a given text, token counts or rate-limit headers.
 """
 
@@ -119,6 +120,11 @@ class FakeOpenRouter:
 
         async def frames() -> AsyncIterator[bytes]:
             yield b": OPENROUTER PROCESSING\n\n"
+            if pace == "reasoning_only":  # thinks for 5 s, never writes
+                for _ in range(100):
+                    await asyncio.sleep(0.05)
+                    thought = {"choices": [{"index": 0, "delta": {"reasoning": "..."}}]}
+                    yield f"data: {json.dumps(thought)}\n\n".encode()
             for n, word in enumerate(words):
                 text = word if n == 0 else " " + word
                 frame = {"choices": [{"index": 0, "delta": {"content": text}}]}

@@ -467,6 +467,7 @@ async def test_a_stream_that_goes_silent_after_a_token_is_blamed(rig: Rig) -> No
 
 
 @pytest.mark.parametrize(("pace", "blamed"), [("keepalive_only", True), ("reasoning", False)])
+# Both after one word of text; with no text at all, a timeout is the model's (see the silent-stream test).
 async def test_only_the_models_own_frames_are_signs_of_life(rig: Rig, pace: str, blamed: bool) -> None:
     rig = with_limits(rig, timeout_answer=0.4, breaker_failures=1)
     rig.fake.script(A, pace)
@@ -476,3 +477,16 @@ async def test_only_the_models_own_frames_are_signs_of_life(rig: Rig, pace: str,
         ):
             pass
     assert rig.gateway.breakers.callable(("openrouter", A)) is not blamed
+
+
+async def test_a_model_that_only_reasons_past_its_timeout_is_blamed(rig: Rig) -> None:
+    rig = with_limits(rig, timeout_answer=0.3, breaker_failures=1)
+    rig.fake.script(A, "reasoning_only")
+    parts = [
+        p
+        async for p in rig.gateway.stream(
+            "answer", MESSAGES, deadline_at=rig.deadline(), spend=RequestSpend(0)
+        )
+    ]
+    assert isinstance(parts[-1], Completion) and parts[-1].model == B  # no text yet: the next entry answers
+    assert not rig.gateway.breakers.callable(("openrouter", A))  # no text in its whole timeout
