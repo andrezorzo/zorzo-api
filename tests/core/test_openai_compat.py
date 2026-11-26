@@ -84,7 +84,17 @@ def test_token_counts_are_whole_and_non_negative(
     [
         ({"content": None}, ""),
         ({"role": "assistant"}, ""),  # some providers leave the key out when nothing was written
-        ({"content": [{"type": "text", "text": "an"}, {"type": "image"}, None, {"text": "swer"}]}, "answer"),
+        (
+            {
+                "content": [
+                    {"type": "text", "text": "an"},
+                    {"type": "reasoning", "text": "hmm"},
+                    None,
+                    {"text": "swer"},
+                ]
+            },
+            "answer",
+        ),  # reasoning never reaches the answer
     ],
 )
 async def test_reads_null_and_part_list_content(message: dict[str, object], text: str) -> None:
@@ -115,3 +125,25 @@ async def test_a_streamed_part_list_reads_as_text() -> None:
     chunks = [c async for c in provider.chat_stream("m", [{"role": "user", "content": "q"}], max_tokens=5)]
     await provider.close()
     assert chunks == [ChatChunk(text="hi")]
+
+
+async def test_an_error_choice_is_the_providers_failure() -> None:
+    body = {"choices": [{"message": {"role": "assistant"}, "finish_reason": "error", "error": {"code": 502}}]}
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=body))
+    provider = OpenAICompatProvider("https://provider.test/v1", "k", transport=transport)
+    with pytest.raises(ProviderError):
+        await provider.chat("m", [{"role": "user", "content": "q"}], max_tokens=5, schema=None)
+    await provider.close()
+
+
+async def test_an_odd_streamed_delta_is_no_text_not_a_failure() -> None:
+    frames = (
+        b'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n'
+        b'data: {"choices":[{"delta":{"content":{}}}]}\n\n'
+        b'data: {"choices":[{"delta":{"content":" there"}}]}\n\ndata: [DONE]\n\n'
+    )
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=frames))
+    provider = OpenAICompatProvider("https://provider.test/v1", "k", transport=transport)
+    chunks = [c async for c in provider.chat_stream("m", [{"role": "user", "content": "q"}], max_tokens=5)]
+    await provider.close()
+    assert "".join(c.text for c in chunks) == "Hello there"

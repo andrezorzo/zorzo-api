@@ -58,12 +58,17 @@ class OpenAICompatProvider:
         response = await self._post("chat/completions", body)
         try:
             data = response.json()
-            message = data["choices"][0]["message"]
+            choice = data["choices"][0]
+            message = choice["message"]
         except (ValueError, LookupError, TypeError) as exc:
             raise ProviderError("malformed body") from exc
-        if not isinstance(message, dict):
+        if not isinstance(choice, dict) or not isinstance(message, dict):
             raise ProviderError("malformed body")
+        if _choice_failed(choice):
+            raise ProviderError("error choice")
         text = _text(message.get("content"))
+        if text is None:
+            raise ProviderError("malformed body")
         counts = _counts(data.get("usage")) or (0, 0)
         return ChatResult(text, *counts, _rate(response))
 
@@ -143,8 +148,11 @@ def _stream_chunk(payload: str) -> ChatChunk:
             raise ProviderError("error frame")
         choices = data.get("choices") or []
         choice = choices[0] if isinstance(choices, list) and choices else None
+        if isinstance(choice, dict) and _choice_failed(choice):
+            raise ProviderError("error frame")
         delta = choice.get("delta") if isinstance(choice, dict) else None
-        text = _text(delta.get("content")) if isinstance(delta, dict) else ""
+        # A frame with content of an odd type is no text: one odd frame must not end an answer under way.
+        text = (_text(delta.get("content")) or "") if isinstance(delta, dict) else ""
         usage = data.get("usage")  # some providers send it with the last text, or on every frame
         counts = _counts(usage)
         if counts is not None:
@@ -154,20 +162,31 @@ def _stream_chunk(payload: str) -> ChatChunk:
     return ChatChunk(text=text)
 
 
-def _text(content: object) -> str:
-    """The text of a message's or a delta's `content`, for both paths.
+ANSWER_PARTS = {None, "text", "output_text"}  # part types that are the answer; reasoning parts are not
+
+
+def _text(content: object) -> str | None:
+    """The text of a message's or a delta's `content`, for both paths; None for a type that has no text.
 
     Absent or null (a filter, a refusal, the tokens spent on reasoning: some providers leave the key out) is
-    "", the model's miss. A list of parts gives the text of every part that has one, whatever its type. Any
-    other type is a malformed body, the provider's failure.
+    "", the model's miss. A list of parts gives the text of its answer parts (never reasoning).
     """
     if content is None:
         return ""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return "".join(p["text"] for p in content if isinstance(p, dict) and isinstance(p.get("text"), str))
-    raise ProviderError("malformed body")
+        return "".join(
+            p["text"]
+            for p in content
+            if isinstance(p, dict) and p.get("type") in ANSWER_PARTS and isinstance(p.get("text"), str)
+        )
+    return None
+
+
+def _choice_failed(choice: dict[str, Any]) -> bool:
+    """OpenRouter reports an upstream failure in the choice itself, with a 200."""
+    return bool(choice.get("error")) or choice.get("finish_reason") == "error"
 
 
 MAX_TOKEN_COUNT = 10_000_000  # far past any context: a larger count is a provider bug, not a bill
