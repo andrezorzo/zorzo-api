@@ -190,7 +190,9 @@ class ModelGateway:
             loop = asyncio.get_running_loop()
             ends_at = loop.time() + self._time_for(ticket)
             last_chunk_at = loop.time()  # the provider's silence is measured from here
-            wrote = False  # the model sent text (not only whitespace)
+            # The answer has started once the model sent real text: whitespace before it is held back, so
+            # "started" means one thing for the visitor, the fallback and the breaker.
+            wrote = False
             chunks: AsyncIterator[ChatChunk] | None = None
             try:
                 chunks = aiter(
@@ -199,7 +201,7 @@ class ModelGateway:
                 while True:
                     # Each read is bounded on its own, never across a `yield`: the consumer's time between
                     # chunks counts toward the end, but a timeout can't fire inside the consumer.
-                    if asyncio.get_running_loop().time() >= ends_at:
+                    if loop.time() >= ends_at:
                         if wrote:  # the consumer held the time (it only gets it once there is text)
                             ticket.blame_timeout = False
                         raise TimeoutError
@@ -211,9 +213,14 @@ class ModelGateway:
                     if chunk.tokens_in is not None:
                         tokens_in, tokens_out = chunk.tokens_in, chunk.tokens_out or 0
                     if chunk.text:
-                        wrote = wrote or bool(chunk.text.strip())
                         parts.append(chunk.text)
-                        yield chunk.text
+                        if wrote or chunk.text.strip():
+                            text = chunk.text if wrote else "".join(parts)  # with the held whitespace
+                            wrote = True
+                            yield text
+                            last_chunk_at = loop.time()  # the consumer's time isn't the provider's silence
+                if not wrote:
+                    raise ProviderError("stream ended without text")
             except BaseException as exc:
                 if wrote and loop.time() - last_chunk_at < FAIR_SHARE * self._timeouts[stage]:
                     ticket.blame_timeout = False  # the answer was still coming: alive, only long
@@ -221,7 +228,7 @@ class ModelGateway:
                     await _aclose(chunks)  # the provider's response, not left to the garbage collector
                 await self._close(ticket, exc)
                 if _failed(exc):
-                    if parts:
+                    if wrote:
                         raise ModelsUnavailable(f"{stage} failed after the first token") from exc
                     continue
                 raise

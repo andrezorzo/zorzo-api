@@ -8,7 +8,8 @@ normally. It records every request (path, model, body), so a test can assert whi
 - failures: "rate_limited" (429 with `Retry-After`), "error" (500), "bad_gateway" (502), "unavailable"
   (503), "bad_request" (400), "slow_error" (500 after 0.25 s), "hang", "stall_after_first_token", "drip",
   "keepalive_only" and "reasoning" (after one word: silence, a word every 50 ms, keep-alive comments only, or
-  reasoning frames without text), "reasoning_only" (reasoning frames and never any text), "malformed" (a
+  reasoning frames without text), "reasoning_only" (reasoning frames and never any text),
+  "whitespace_stall" (a line break, then silence), "no_text" (a stream that ends with no text), "malformed" (a
   200 that isn't the expected JSON), "context_too_long" (400), "break_after_first_token" (a stream that dies
   mid-way);
 - `Reply(...)` for a given text, token counts or rate-limit headers.
@@ -120,6 +121,13 @@ class FakeOpenRouter:
 
         async def frames() -> AsyncIterator[bytes]:
             yield b": OPENROUTER PROCESSING\n\n"
+            if pace == "whitespace_stall":  # a line break, then nothing
+                yield _frame({"content": "\n"})
+                await asyncio.sleep(60)
+            if pace == "no_text":  # a role frame, then the end
+                yield _frame({"role": "assistant"})
+                yield b"data: [DONE]\n\n"
+                return
             if pace == "reasoning_only":  # thinks for 5 s, never writes
                 for _ in range(100):
                     await asyncio.sleep(0.05)
@@ -155,3 +163,7 @@ class FakeOpenRouter:
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
+
+
+def _frame(delta: dict[str, str]) -> bytes:
+    return f"data: {json.dumps({'choices': [{'index': 0, 'delta': delta}]})}\n\n".encode()

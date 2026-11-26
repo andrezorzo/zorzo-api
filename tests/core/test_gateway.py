@@ -490,3 +490,18 @@ async def test_a_model_that_only_reasons_past_its_timeout_is_blamed(rig: Rig) ->
     ]
     assert isinstance(parts[-1], Completion) and parts[-1].model == B  # no text yet: the next entry answers
     assert not rig.gateway.breakers.callable(("openrouter", A))  # no text in its whole timeout
+
+
+@pytest.mark.parametrize("pace", ["whitespace_stall", "no_text"])
+async def test_a_stream_without_real_text_falls_to_the_next_entry(rig: Rig, pace: str) -> None:
+    rig = with_limits(rig, timeout_answer=0.3, breaker_failures=1)
+    rig.fake.script(A, pace)
+    parts = [
+        p
+        async for p in rig.gateway.stream(
+            "answer", MESSAGES, deadline_at=rig.deadline(), spend=RequestSpend(0)
+        )
+    ]
+    assert parts[0] == "Hello"  # nothing of A reached the visitor
+    assert isinstance(parts[-1], Completion) and parts[-1].model == B
+    assert not rig.gateway.breakers.callable(("openrouter", A))  # no real text in its time: its failure
