@@ -135,13 +135,14 @@ class ChatResult:
     text: str
     tokens_in: int
     tokens_out: int
-    entry: str = ""  # which chain entry answered (`models_config.entry_id`)
+    entry_id: str = ""  # which chain entry answered (`models_config.entry_id`)
     cost_usd: float | None = None  # what the provider reported it billed; None when it reported nothing
+    billable_counts: bool = True  # False when the counts may not be the provider's (a stream's)
 
 
 @dataclass(frozen=True)
 class Cooldown:
-    """A free entry the Router keeps out for now (LLD "6.6 Circuit breaker", the LiteLLM cooldown)."""
+    """A chain entry the Router keeps out for now (LLD "6.6 Circuit breaker", the LiteLLM cooldown)."""
 
     status: str  # the status that caused it ("429", "500", "408" …)
     started_at: float  # epoch seconds
@@ -149,15 +150,16 @@ class Cooldown:
 
 
 class ModelRouter(Protocol):
-    """The model calls (ADR 0016): a stage's free entries through the LiteLLM Router, its paid entry alone.
+    """The model calls (ADR 0016): one chain entry per call, by its id (`models_config.entry_id`), through
+    the LiteLLM Router, which keeps the entries' cooldowns.
 
-    Failures raise `ProviderError` (or `TimeoutError`); the free calls raise once every free entry failed or
-    is cooling down. The caller bounds the time as well.
+    Failures raise `ProviderError` (or `TimeoutError`); an entry cooling down raises `RateLimitedError`
+    without a request. The caller bounds the time as well.
     """
 
     async def complete(
         self,
-        stage: str,
+        entry_id: str,
         messages: list[dict[str, str]],
         *,
         max_tokens: int,
@@ -166,29 +168,15 @@ class ModelRouter(Protocol):
     ) -> ChatResult: ...
 
     def stream(
-        self, stage: str, messages: list[dict[str, str]], *, max_tokens: int, timeout: float
+        self, entry_id: str, messages: list[dict[str, str]], *, max_tokens: int, timeout: float
     ) -> AsyncIterator[str | ChatResult]:
         """The answer's text as it comes, then its `ChatResult` (the whole text, usage, entry, cost)."""
 
-    async def complete_paid(
-        self,
-        stage: str,
-        messages: list[dict[str, str]],
-        *,
-        max_tokens: int,
-        schema: dict[str, Any] | None,
-        timeout: float,
-    ) -> ChatResult: ...
-
-    def stream_paid(
-        self, stage: str, messages: list[dict[str, str]], *, max_tokens: int, timeout: float
-    ) -> AsyncIterator[str | ChatResult]: ...
-
-    async def rerank(self, query: str, documents: list[str], *, timeout: float) -> list[float]:
+    async def rerank(self, entry_id: str, query: str, documents: list[str], *, timeout: float) -> list[float]:
         """One score per document, in the documents' order."""
 
     async def cooldowns(self) -> dict[str, Cooldown]:
-        """The free entries cooling down now, by entry id."""
+        """The entries cooling down now, by entry id."""
 
     async def close(self) -> None: ...
 

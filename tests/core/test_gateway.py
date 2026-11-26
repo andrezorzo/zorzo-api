@@ -6,16 +6,24 @@ import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 import pytest
 from pydantic import BaseModel
 from rag_core.adapters.factory import build_gateway
+from rag_core.adapters.litellm_models import FAILS_BEFORE_COOLDOWN
 from rag_core.adapters.postgres import Database
 from rag_core.limits import Limits, load_limits
-from rag_core.models_config import load_models
-from rag_core.services.gateway import Completion, ModelGateway, ModelsUnavailableError, RequestSpend
+from rag_core.models_config import Price, load_models
+from rag_core.ports import Cooldown
+from rag_core.services.gateway import (
+    CHARS_PER_TOKEN,
+    Completion,
+    ModelGateway,
+    ModelsUnavailableError,
+    RequestSpend,
+)
 
 from tests.conftest import reset_tables, seed_budget, served
 from tests.fakes.alerter import RecordingAlerter
@@ -27,8 +35,10 @@ CONFIG = load_models(ROOT / "tests/fixtures/models.test.yaml")
 A, B, PAID = "test/answer-a:free", "test/answer-b:free", "test/answer-paid"
 RERANK = "test/rerank:free"
 MESSAGES = [{"role": "user", "content": "Which AWS services has he used?"}]
-PROMPT_TOKENS = -(-len(MESSAGES[0]["content"]) // 3)
-ESTIMATE = (PROMPT_TOKENS * 1.0 + 200 * 4.0) / 1e6  # the fixture's paid price and answer max_tokens
+PAID_PRICE = cast(Price, CONFIG.stage("answer").chain[-1].price)  # a paid entry always has one
+ANSWER_MAX_TOKENS = CONFIG.stage("answer").max_tokens
+PROMPT_TOKENS = -(-len(MESSAGES[0]["content"]) // CHARS_PER_TOKEN)
+ESTIMATE = (PROMPT_TOKENS * PAID_PRICE.input_per_mtok + ANSWER_MAX_TOKENS * PAID_PRICE.output_per_mtok) / 1e6
 
 
 @dataclass
@@ -110,7 +120,9 @@ async def test_answers_from_the_first_free_entry(rig: Rig) -> None:
     assert request.path == "/chat/completions" and request.body["max_tokens"] == 200
 
 
-@pytest.mark.parametrize("failure", ["error", "hang", "malformed", "rate_limited", "context_too_long"])
+@pytest.mark.parametrize(
+    "failure", ["error", "hang", "malformed", "rate_limited", "context_too_long", "error_choice"]
+)
 async def test_a_failure_falls_to_the_next_entry(rig: Rig, failure: str) -> None:
     with_limits(rig, timeout_answer=0.3)
     rig.fake.script(A, failure)
@@ -140,19 +152,37 @@ async def test_a_cooled_entry_is_tried_again_after_the_cooldown(rig: Rig) -> Non
     assert rig.fake.models_called() == [A, B, B, A]
 
 
+async def test_a_cooled_entry_is_skipped_and_the_next_gets_one_request(rig: Rig) -> None:
+    rig.fake.script(A, "rate_limited")
+    await rig.complete()  # A cools
+    rig.fake.script(B, "error")
+    assert (await rig.complete()).model == PAID
+    assert rig.fake.models_called() == [A, B, B, PAID]  # B once per question: no retry on it
+
+
+async def test_repeated_failures_cool_an_entry(rig: Rig) -> None:
+    rig.fake.always(A, "error")
+    for _ in range(FAILS_BEFORE_COOLDOWN + 1):
+        await rig.complete()
+    assert f"answer:openrouter/{A}" in await rig.gateway.models.cooldowns()
+    calls = len(rig.fake.models_called())
+    assert (await rig.complete()).model == B
+    assert rig.fake.models_called()[calls:] == [B]  # A cooling: no request
+
+
 class Verdict(BaseModel):
     supported: bool
 
 
-async def test_a_model_miss_is_retried_once_then_the_paid_entry_answers(rig: Rig) -> None:
+async def test_a_model_miss_is_retried_once_on_the_entry_then_the_chain_moves_on(rig: Rig) -> None:
     rig.fake.script(A, Reply(text="not json"), Reply(text='{"supported": true}'))
     result = await rig.complete(schema=Verdict)
     assert result.parsed == Verdict(supported=True)
     assert rig.fake.models_called() == [A, A]
     assert rig.fake.requests[0].body["response_format"]["type"] == "json_schema"
     rig.fake.script(A, Reply(text=""), Reply(text="{}"))  # an empty answer, then a schema miss
-    rig.fake.script(PAID, Reply(text='{"supported": false}'))
-    assert (await rig.complete(schema=Verdict)).model == PAID
+    rig.fake.script(B, Reply(text='{"supported": false}'))
+    assert (await rig.complete(schema=Verdict)).model == B
     assert not await rig.gateway.models.cooldowns()  # misses are the model's: no entry cools
 
 
@@ -166,7 +196,8 @@ async def test_pays_when_the_free_entries_fail(rig: Rig) -> None:
     spend = RequestSpend(LIMITS.request_cost_cap_usd)
     result = await rig.complete(spend)
     assert result.model == PAID
-    assert result.cost_usd == pytest.approx(1000 * 1.0 / 1e6 + 100 * 4.0 / 1e6)  # usage at the price
+    price = (1000 * PAID_PRICE.input_per_mtok + 100 * PAID_PRICE.output_per_mtok) / 1e6
+    assert result.cost_usd == pytest.approx(price)  # usage at the configured price
     assert spend.spent == pytest.approx(result.cost_usd)
     assert rig.spent_today() == pytest.approx(result.cost_usd, abs=1e-6)
     assert rig.fake.models_called() == [A, B, PAID]
@@ -179,6 +210,15 @@ async def test_settles_to_the_reported_cost(rig: Rig) -> None:
     result = await rig.complete()
     assert result.cost_usd == pytest.approx(0.000321)
     assert rig.spent_today() == pytest.approx(0.000321, abs=1e-6)
+
+
+async def test_a_negative_reported_cost_is_ignored(rig: Rig) -> None:
+    rig.fake.script(A, "error")
+    rig.fake.script(B, "error")
+    rig.fake.script(PAID, Reply(tokens_in=1000, tokens_out=100, cost=-0.5))
+    result = await rig.complete()
+    price = (1000 * PAID_PRICE.input_per_mtok + 100 * PAID_PRICE.output_per_mtok) / 1e6
+    assert result.cost_usd == pytest.approx(price)  # never less than spent, never a broken number
 
 
 async def test_skips_a_paid_entry_the_budget_cant_cover(rig: Rig) -> None:
@@ -265,11 +305,11 @@ async def test_stream_falls_back_only_before_the_first_token(rig: Rig) -> None:
     assert rig.fake.models_called() == [A, B, A]  # no fallback after the first token
 
 
-async def test_a_stream_without_real_text_is_retried_then_paid(rig: Rig) -> None:
+async def test_a_stream_without_real_text_is_retried_then_the_chain_moves_on(rig: Rig) -> None:
     rig.fake.script(A, "no_text", "no_text")
     *tokens, final = await rig.stream()
     assert tokens[0] == "Hello"  # nothing of the empty streams reached the visitor
-    assert isinstance(final, Completion) and final.model == PAID
+    assert isinstance(final, Completion) and final.model == B
 
 
 async def test_a_paid_stream_that_breaks_after_text_keeps_its_estimate(rig: Rig) -> None:
@@ -281,13 +321,14 @@ async def test_a_paid_stream_that_breaks_after_text_keeps_its_estimate(rig: Rig)
     assert rig.spent_today() == pytest.approx(ESTIMATE, abs=1e-6)  # the provider ran: no refund
 
 
-async def test_a_paid_empty_stream_is_settled_from_its_usage(rig: Rig) -> None:
-    rig.fake.always(A, "error")
-    rig.fake.always(B, "error")
-    rig.fake.script(PAID, "no_text")
-    with pytest.raises(ModelsUnavailableError):
-        await rig.stream()
-    assert rig.spent_today() == pytest.approx(800 * 1.0 / 1e6, abs=1e-6)  # its 800 input tokens, as reported
+async def test_a_paid_stream_settles_at_its_estimate_without_a_reported_cost(rig: Rig) -> None:
+    rig.fake.script(A, "error")
+    rig.fake.script(B, "error")
+    *_, final = await rig.stream()
+    assert isinstance(final, Completion) and final.model == PAID
+    # A stream's counts may be LiteLLM's own tokenizer's, not the provider's: never billed from them.
+    assert final.cost_usd == pytest.approx(ESTIMATE)
+    assert rig.spent_today() == pytest.approx(ESTIMATE, abs=1e-6)
 
 
 async def test_stops_at_the_deadline(rig: Rig) -> None:
@@ -316,10 +357,12 @@ async def test_reranks_remotely(rig: Rig) -> None:
     assert scores == [3.0, 2.0, 1.0]
     request = rig.fake.requests[0]
     assert request.path == "/rerank"
-    assert (request.body["model"], request.body["query"], request.body["documents"]) == (
+    body = request.body
+    assert (body["model"], body["query"], body["documents"], body["top_n"]) == (
         RERANK,
         "q",
         ["a", "b", "c"],
+        3,
     )
 
 
@@ -362,6 +405,7 @@ async def test_cooldown_starts_and_ends_are_logged(rig: Rig) -> None:
     with_limits(rig, breaker_cooldown=0.3)
     rig.fake.script(A, "unauthorized")
     await rig.complete()
+    await rig.gateway.drain()  # the start's row first: rows are written in the background
     await asyncio.sleep(0.4)
     await rig.gateway.mode()
     await rig.gateway.drain()
@@ -370,6 +414,22 @@ async def test_cooldown_starts_and_ends_are_logged(rig: Rig) -> None:
         ("gateway", "cooldown_started", {"entry": entry, "status": "401", "seconds": 0.3}),
         ("gateway", "cooldown_ended", {"entry": entry}),
     ]
+
+
+async def test_a_cooldown_that_restarts_between_looks_is_logged_as_both(rig: Rig) -> None:
+    entry = f"answer:openrouter/{A}"
+    looks = iter([{entry: Cooldown("429", 1.0, 30.0)}, {entry: Cooldown("401", 40.0, 60.0)}])
+
+    async def cooldowns() -> dict[str, Cooldown]:
+        return next(looks)
+
+    rig.gateway.models.cooldowns = cooldowns  # type: ignore[method-assign]
+    await rig.gateway._note_cooldowns()
+    await rig.gateway._note_cooldowns()
+    await rig.gateway.drain()
+    # The rows are written in the background, so in no fixed order.
+    events = sorted((event, fields.get("status")) for _, event, fields in rig.log_events())
+    assert events == [("cooldown_ended", None), ("cooldown_started", "401"), ("cooldown_started", "429")]
 
 
 async def test_the_budget_alert_opens_at_the_paid_cutoff(rig: Rig) -> None:

@@ -1,19 +1,22 @@
-"""The model calls on LiteLLM (ADR 0016, LLD "6.6 Circuit breaker"): one Router for the free entries of every
-stage, `acompletion` for each stage's paid entry.
+"""The model calls on LiteLLM (ADR 0016, LLD "6.6 Circuit breaker"): one Router, one model group per chain
+entry, called by the gateway entry by entry.
 
-Each stage is one Router model group; its free entries are deployments tried in chain order (`order`), with no
-same-entry retry (`num_retries=0`: the next entry is the retry, and a retry would wait out a 429's
-`Retry-After`). The Router's cooldowns replace a breaker of our own. Failures come out as `ProviderError`
-(`refused` when the provider turned the call down) or `TimeoutError`; the message names the kind, never the
-request or the response.
+The Router makes each call (timeouts, the provider's quirks, the cost OpenRouter reports) and keeps the
+cooldowns: a 429, a 401 or a 404 cools an entry at once, for `Retry-After` when the provider sends one;
+any other failure cools it on the `FAILS_BEFORE_COOLDOWN + 1`-th within the cooldown time. There is no
+same-entry retry (`num_retries=0`: the next entry is the retry) and no Router fallback (the gateway walks
+the chain). Failures come out as `ProviderError` (`refused` when the provider turned the call down) or
+`TimeoutError`; the message names the kind, never the request or the response.
 """
 
+import math
 import os
 
 # Set before LiteLLM is imported: otherwise the import fetches the model cost map from GitHub.
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
+from http import HTTPStatus
 from typing import Any, cast
 
 import litellm
@@ -26,25 +29,19 @@ from litellm.exceptions import (
 )
 from litellm.llms.custom_httpx.async_client_cleanup import close_litellm_async_clients
 from litellm.router import Router
-from litellm.router_utils.cooldown_handlers import (
-    async_get_cooldown_deployments_with_debug_info,
-)
-from litellm.types.router import RouterRateLimitError
+from litellm.router_utils.cooldown_handlers import async_get_cooldown_deployments_with_debug_info
+from litellm.types.router import AllowedFailsPolicy, RouterRateLimitError
 
 from rag_core.models_config import Entry, ModelsConfig, Provider, StageName, entry_id
-from rag_core.ports import (
-    ChatResult,
-    ContextTooLongError,
-    Cooldown,
-    ProviderError,
-    RateLimitedError,
-)
+from rag_core.ports import ChatResult, ContextTooLongError, Cooldown, ProviderError, RateLimitedError
 
 # LiteLLM prints a "Give Feedback / Get Help" banner to stdout on every error unless told not to.
 litellm.suppress_debug_info = True
 
 STAGES: tuple[StageName, ...] = ("route", "rerank", "answer", "judge")
 KEYLESS = "unused"  # the OpenAI client needs some key; a keyless endpoint (Ollama) ignores it
+FAILS_BEFORE_COOLDOWN = 2  # a timeout, a 5xx or a dropped connection cools an entry on the third
+MAX_TOKEN_COUNT = 10_000_000  # far past any context: a larger count is a provider bug, not a bill
 _CONTEXT_MARKERS = (
     "context length",
     "context_length",
@@ -52,85 +49,83 @@ _CONTEXT_MARKERS = (
     "too many tokens",
     "context window",
 )
+_CONTEXT_STATUSES = (HTTPStatus.BAD_REQUEST, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+_ERROR_FINISH = "error"  # OpenRouter's `finish_reason` when the upstream model failed mid-answer
 _LIBRARY_ERRORS = (openai.OpenAIError, RouterRateLimitError)
 
 
 class LiteLLMModels:
     def __init__(self, config: ModelsConfig, keys: Mapping[str, str | None], cooldown_s: float) -> None:
         """`keys` maps each provider's name to its key (None for a keyless one)."""
-        self._paid: dict[str, tuple[str, dict[str, Any]]] = {}  # stage → (entry id, LiteLLM params)
-        deployments: list[dict[str, Any]] = []
-        for stage in STAGES:
-            chain = config.stage(stage)
-            for order, entry in enumerate(chain.free, start=1):
-                params = _params(stage, entry, config.providers[entry.provider], keys.get(entry.provider))
-                deployments.append(
-                    {
-                        "model_name": stage,
-                        "litellm_params": {**params, "order": order},
-                        "model_info": {"id": entry_id(stage, entry)},
-                    }
-                )
-            if chain.paid is not None:
-                paid = chain.paid
-                params = _params(stage, paid, config.providers[paid.provider], keys.get(paid.provider))
-                self._paid[stage] = (entry_id(stage, paid), params)
-        self._router = Router(model_list=deployments, num_retries=0, cooldown_time=cooldown_s)
+        deployments = [
+            {
+                "model_name": entry_id(stage, entry),
+                "litellm_params": _params(
+                    stage, entry, config.providers[entry.provider], keys.get(entry.provider)
+                ),
+                "model_info": {"id": entry_id(stage, entry)},
+            }
+            for stage in STAGES
+            for entry in config.stage(stage).chain
+        ]
+        self._router = Router(
+            model_list=deployments,
+            num_retries=0,
+            cooldown_time=cooldown_s,
+            allowed_fails=FAILS_BEFORE_COOLDOWN,
+            allowed_fails_policy=AllowedFailsPolicy(
+                RateLimitErrorAllowedFails=0, AuthenticationErrorAllowedFails=0, NotFoundErrorAllowedFails=0
+            ),
+            # LiteLLM spares a group with one deployment and no fallback from the fail count for any error
+            # its policy doesn't name (a 500 comes as a generic `APIError`). Naming each entry its own
+            # fallback lifts that; every call passes `disable_fallbacks`, so the fallback itself never runs.
+            fallbacks=[{d["model_name"]: [d["model_name"]]} for d in deployments],
+        )
 
     async def complete(
         self,
-        stage: str,
+        entry_id: str,
         messages: list[dict[str, str]],
         *,
         max_tokens: int,
         schema: dict[str, Any] | None,
         timeout: float,
     ) -> ChatResult:
-        call = self._router.acompletion(
-            model=stage, **_request(messages, max_tokens, timeout), **_format(schema)
-        )
-        return await _complete(call, entry=None)
+        try:
+            response = await self._router.acompletion(
+                model=entry_id, **_request(messages, max_tokens, timeout), **_format(schema)
+            )
+        except _LIBRARY_ERRORS as exc:
+            raise _provider_error(exc) from None
+        choice = response.choices[0] if response.choices else None
+        if _failed_choice(choice):
+            raise ProviderError("error choice")
+        content = choice.message.content if choice is not None else None
+        if content is not None and not isinstance(content, str):
+            raise ProviderError("unreadable content")
+        usage = getattr(response, "usage", None)
+        tokens_in, tokens_out = _counts(usage)
+        return ChatResult(content or "", tokens_in, tokens_out, entry_id, _cost(usage))
 
     def stream(
-        self, stage: str, messages: list[dict[str, str]], *, max_tokens: int, timeout: float
+        self, entry_id: str, messages: list[dict[str, str]], *, max_tokens: int, timeout: float
     ) -> AsyncIterator[str | ChatResult]:
         return _stream(
             lambda: self._router.acompletion(
-                model=stage, **_request(messages, max_tokens, timeout, stream=True)
+                model=entry_id, **_request(messages, max_tokens, timeout, stream=True)
             ),
-            entry=None,
+            entry_id,
         )
 
-    async def complete_paid(
-        self,
-        stage: str,
-        messages: list[dict[str, str]],
-        *,
-        max_tokens: int,
-        schema: dict[str, Any] | None,
-        timeout: float,
-    ) -> ChatResult:
-        entry, params = self._paid_entry(stage)
-        call = litellm.acompletion(
-            **params, num_retries=0, **_request(messages, max_tokens, timeout), **_format(schema)
-        )
-        return await _complete(call, entry)
-
-    def stream_paid(
-        self, stage: str, messages: list[dict[str, str]], *, max_tokens: int, timeout: float
-    ) -> AsyncIterator[str | ChatResult]:
-        entry, params = self._paid_entry(stage)
-        return _stream(
-            lambda: litellm.acompletion(
-                **params, num_retries=0, **_request(messages, max_tokens, timeout, stream=True)
-            ),
-            entry,
-        )
-
-    async def rerank(self, query: str, documents: list[str], *, timeout: float) -> list[float]:
+    async def rerank(self, entry_id: str, query: str, documents: list[str], *, timeout: float) -> list[float]:
         try:
             response = await self._router.arerank(
-                model="rerank", query=query, documents=documents, timeout=timeout
+                model=entry_id,
+                query=query,
+                documents=documents,
+                top_n=len(documents),  # every document back: providers default to fewer
+                timeout=timeout,
+                disable_fallbacks=True,
             )
         except _LIBRARY_ERRORS as exc:
             raise _provider_error(exc) from None
@@ -154,11 +149,6 @@ class LiteLLMModels:
         self._router.discard()  # type: ignore[no-untyped-call]
         await close_litellm_async_clients()  # type: ignore[no-untyped-call]
 
-    def _paid_entry(self, stage: str) -> tuple[str, dict[str, Any]]:
-        if stage not in self._paid:
-            raise ProviderError("no paid entry")
-        return self._paid[stage]
-
 
 def _params(stage: StageName, entry: Entry, provider: Provider, key: str | None) -> dict[str, Any]:
     """LiteLLM's model string and endpoint for an entry; a rerank is a Cohere-style `/rerank` on the base
@@ -167,6 +157,21 @@ def _params(stage: StageName, entry: Entry, provider: Provider, key: str | None)
     if stage == "rerank":
         return {"model": f"cohere/{entry.model}", "api_base": f"{base}/rerank", "api_key": key or KEYLESS}
     return {"model": f"{provider.kind}/{entry.model}", "api_base": base, "api_key": key or KEYLESS}
+
+
+def _request(
+    messages: list[dict[str, str]], max_tokens: int, timeout: float, stream: bool = False
+) -> dict[str, Any]:
+    """The arguments every call shares; `messages` as LiteLLM types them (a union of TypedDicts)."""
+    request: dict[str, Any] = {
+        "messages": cast(Any, messages),
+        "max_tokens": max_tokens,
+        "timeout": timeout,
+        "disable_fallbacks": True,
+    }
+    if stream:
+        request |= {"stream": True, "stream_timeout": timeout, "stream_options": {"include_usage": True}}
+    return request
 
 
 def _format(schema: dict[str, Any] | None) -> dict[str, Any]:
@@ -180,45 +185,24 @@ def _format(schema: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def _request(
-    messages: list[dict[str, str]], max_tokens: int, timeout: float, stream: bool = False
-) -> dict[str, Any]:
-    """The arguments every call shares; `messages` as LiteLLM types them (a union of TypedDicts)."""
-    request: dict[str, Any] = {"messages": cast(Any, messages), "max_tokens": max_tokens, "timeout": timeout}
-    if stream:
-        request |= {"stream": True, "stream_timeout": timeout, "stream_options": {"include_usage": True}}
-    return request
-
-
-async def _complete(call: Awaitable[Any], entry: str | None) -> ChatResult:
-    """One answer; `entry` is the paid entry's id, or None to take the free entry the Router chose."""
-    try:
-        response = await call
-    except _LIBRARY_ERRORS as exc:
-        raise _provider_error(exc) from None
-    content = response.choices[0].message.content if response.choices else None
-    if content is not None and not isinstance(content, str):
-        raise ProviderError("unreadable content")
-    usage = getattr(response, "usage", None)
-    return ChatResult(
-        content or "",
-        getattr(usage, "prompt_tokens", 0) or 0,
-        getattr(usage, "completion_tokens", 0) or 0,
-        entry or str(response._hidden_params.get("model_id") or ""),
-        _cost(usage),
-    )
-
-
-async def _stream(call: Callable[[], Awaitable[Any]], entry: str | None) -> AsyncIterator[str | ChatResult]:
+async def _stream(
+    call: Callable[[], Coroutine[Any, Any, Any]], entry_id: str
+) -> AsyncIterator[str | ChatResult]:
     """The text as it comes, then the `ChatResult`. A break after text is a failure that ran (and billed),
-    whatever LiteLLM makes of it: this code knows text went out, the library's wrapper may not say so."""
+    whatever LiteLLM makes of it: this code knows text went out, the library's wrapper may not say so.
+
+    The counts are reported but not billable: without a usage frame from the provider, LiteLLM fills them in
+    from its own tokenizer, and nothing on the stream tells the two apart."""
     parts: list[str] = []
     usage: Any = None
     try:
         response = await call()
         async for piece in response:
             usage = getattr(piece, "usage", None) or usage
-            text = piece.choices[0].delta.content if piece.choices else None
+            choice = piece.choices[0] if piece.choices else None
+            if _failed_choice(choice):
+                raise ProviderError("error frame")
+            text = choice.delta.content if choice is not None else None
             if text is not None and not isinstance(text, str):
                 raise ProviderError("unreadable content")
             if text:
@@ -228,27 +212,43 @@ async def _stream(call: Callable[[], Awaitable[Any]], entry: str | None) -> Asyn
         if parts:
             raise ProviderError("stream broke") from None
         raise _provider_error(exc) from None
-    yield ChatResult(
-        "".join(parts),
-        getattr(usage, "prompt_tokens", 0) or 0,
-        getattr(usage, "completion_tokens", 0) or 0,
-        entry or str((getattr(response, "_hidden_params", {}) or {}).get("model_id") or ""),
-        _cost(usage),
-    )
+    tokens_in, tokens_out = _counts(usage)
+    yield ChatResult("".join(parts), tokens_in, tokens_out, entry_id, _cost(usage), billable_counts=False)
+
+
+def _failed_choice(choice: Any) -> bool:
+    """OpenRouter's sign that the upstream model failed mid-answer. LiteLLM maps `finish_reason: "error"` to
+    "stop", keeping the original in `provider_specific_fields`."""
+    if choice is None:
+        return False
+    native = (getattr(choice, "provider_specific_fields", None) or {}).get("native_finish_reason")
+    return _ERROR_FINISH in (choice.finish_reason, native)
+
+
+def _counts(usage: Any) -> tuple[int, int]:
+    """The token counts, or (0, 0) unless both are plausible: whole, non-negative and at most
+    `MAX_TOKEN_COUNT` (0 makes a paid call settle at its estimate)."""
+    prompt, completion = getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None)
+    if _plausible(prompt) and _plausible(completion):
+        return cast(int, prompt), cast(int, completion)
+    return 0, 0
+
+
+def _plausible(count: object) -> bool:
+    return isinstance(count, int) and not isinstance(count, bool) and 0 <= count <= MAX_TOKEN_COUNT
 
 
 def _cost(usage: Any) -> float | None:
-    """What OpenRouter reported it billed (`usage.cost`); None when it reported nothing."""
+    """What OpenRouter reported it billed (`usage.cost`), when it is a finite, non-negative amount."""
     reported = getattr(usage, "cost", None)
-    try:
-        return float(reported) if reported is not None else None
-    except (TypeError, ValueError):
+    if isinstance(reported, bool) or not isinstance(reported, int | float):
         return None
+    return float(reported) if math.isfinite(reported) and reported >= 0 else None
 
 
 def _provider_error(exc: BaseException) -> Exception:
-    """LiteLLM's error as ours: a timeout, a 429, a prompt too long, or a failure that was refused or may have
-    run (LLD "6.2 Daily budget": only a refused call releases its reservation)."""
+    """LiteLLM's error as ours: a timeout, a 429, a prompt too long, or a failure that was refused or may
+    have run (LLD "6.2 Daily budget": only a refused call releases its reservation)."""
     if isinstance(exc, MidStreamFallbackError) and exc.original_exception is not None:
         # LiteLLM wraps a stream's failure, with status 503 when the original had none; the original says
         # what happened (a break after text is classified by `_stream`, which knows text went out).
@@ -259,12 +259,18 @@ def _provider_error(exc: BaseException) -> Exception:
         return RateLimitedError()
     status = getattr(exc, "status_code", None)
     if isinstance(exc, ContextWindowExceededError) or (
-        status in (400, 413) and any(m in str(exc).lower() for m in _CONTEXT_MARKERS)
+        status in _CONTEXT_STATUSES and any(m in str(exc).lower() for m in _CONTEXT_MARKERS)
     ):
         return ContextTooLongError(f"http {status}")
-    if isinstance(status, int) and status != 200:
-        # Refused up front: a redirect or a 4xx (but a 408 timeout), or a 503 (no provider available). A 500,
-        # 502 or 504 may come after the upstream model ran, and billed.
-        refused = (300 <= status < 500 and status != 408) or status == 503
-        return ProviderError(f"http {status}", refused=refused)
+    if isinstance(status, int) and status != HTTPStatus.OK:
+        return ProviderError(f"http {status}", refused=_refused(status))
     return ProviderError(type(exc).__name__)
+
+
+def _refused(status: int) -> bool:
+    """Turned down before the model ran: a redirect or a 4xx (but a 408 timeout), or a 503 (no provider
+    available). A 500, 502 or 504 may come after the upstream model ran, and billed."""
+    if status == HTTPStatus.SERVICE_UNAVAILABLE:
+        return True
+    redirect_or_client = HTTPStatus.MULTIPLE_CHOICES <= status < HTTPStatus.INTERNAL_SERVER_ERROR
+    return redirect_or_client and status != HTTPStatus.REQUEST_TIMEOUT

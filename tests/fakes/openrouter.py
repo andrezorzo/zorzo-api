@@ -8,8 +8,8 @@ normally. It records every request (path, model, body), so a test can assert whi
 - `/rerank`, scoring the documents in their given order unless `rerank_scores` says otherwise;
 - failures: "rate_limited" (429 with `Retry-After`), "error" (500), "bad_gateway" (502), "unavailable"
   (503), "bad_request" (400), "unauthorized" (401), "hang", "malformed" (a 200 that isn't the expected
-  JSON), "context_too_long" (400), "no_text" (a stream that ends with no text), "break_after_first_token" (a
-  stream that dies mid-way);
+  JSON), "error_choice" (a 200 whose choice says the model failed), "context_too_long" (400), "no_text" (a
+  stream that ends with no text), "break_after_first_token" (a stream that dies mid-way);
 - `Reply(...)` for a given text, token counts or reported cost.
 """
 
@@ -90,6 +90,14 @@ class FakeOpenRouter:
             await asyncio.sleep(60)
         if behavior == "malformed":
             return httpx.Response(200, text="<html>")
+        if behavior == "error_choice":  # the upstream model died mid-answer: a 200 with an error choice
+            choice = {
+                "index": 0,
+                "message": {"role": "assistant", "content": "half an"},
+                "finish_reason": "error",
+            }
+            return httpx.Response(200, json={"id": GEN_ID, "object": "chat.completion", "created": CREATED,
+                                             "model": model, "choices": [choice]})  # fmt: skip
         if behavior == "context_too_long":
             message = "This endpoint's maximum context length is 8192 tokens."
             return httpx.Response(400, json={"error": {"code": 400, "message": message}})

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 from rag_core.adapters.litellm_models import LiteLLMModels
-from rag_core.models_config import load_models
+from rag_core.models_config import entry_id, load_models
 
 pytestmark = pytest.mark.network
 
@@ -31,7 +31,8 @@ async def test_the_rerank_endpoint_answers_the_expected_shape() -> None:
         "The site answers only from reviewed sources and shows citations.",
     ]
     try:
-        scores = await router.rerank("Quais serviços da AWS o André usou?", documents, timeout=TIMEOUT_S)
+        question = "Quais serviços da AWS o André usou?"
+        scores = await router.rerank(entry_id("rerank", entry), question, documents, timeout=TIMEOUT_S)
     finally:
         await router.close()
     assert len(scores) == 3
