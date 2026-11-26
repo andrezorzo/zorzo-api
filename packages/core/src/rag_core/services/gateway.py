@@ -44,6 +44,9 @@ RATE_LIMITED = "429"
 # much past it, so the gateway's guard cuts the call at the deadline as a cancellation: running out of the
 # request's time is never the entry's failure. A stage timeout fires first and counts.
 DEADLINE_MARGIN_S = 1.0
+# A rerank entry's own timeout ends with the stage's window; the window's guard ends this much later, so the
+# entry's timeout fires first and counts, and the stage overruns its window by at most this much.
+WINDOW_GRACE_S = 0.05
 # The estimate already assumes the longest answer, so a settle past this multiple of it is a provider's bug
 # (a unit change, a broken count): it settles at the multiple (LLD "6.2 Daily budget").
 MAX_COST_OVER_ESTIMATE = 2
@@ -242,17 +245,27 @@ class ModelGateway:
     async def rerank(self, query: str, documents: list[str], *, deadline_at: float = math.inf) -> list[float]:
         """Scores per document from the `rerank` stage; `ModelsUnavailableError` sends the caller to local.
 
-        The whole stage gets one `TIMEOUT_RERANK`: the local level must still have time after it.
+        The whole stage gets one `TIMEOUT_RERANK`, from its first call: the local level must still have time
+        after it. Only that first call can time out on its own and count toward its entry's cooldown; a later
+        entry runs in what is left, and the window's guard cuts it uncounted (the time was spent before it).
         """
         loop = asyncio.get_running_loop()
-        window_ends_at = loop.time() + self._timeouts["rerank"]
+        stage_timeout = self._timeouts["rerank"]
+        window_ends_at: float | None = None
         await self._note_cooldowns()
         for entry in self.config.stage("rerank").free:
-            if not self._callable("rerank", entry, min(deadline_at, window_ends_at)):
+            first = window_ends_at is None
+            if window_ends_at is None:
+                window_ends_at = loop.time() + stage_timeout
+            ends_at = min(deadline_at, window_ends_at)
+            if not self._callable("rerank", entry, ends_at):
                 continue
-            timeout = self._time_for("rerank", deadline_at, window_ends_at - loop.time())
+            if first and window_ends_at <= deadline_at:
+                timeout, guard_at = stage_timeout, ends_at + WINDOW_GRACE_S
+            else:
+                timeout, guard_at = ends_at - loop.time() + DEADLINE_MARGIN_S, ends_at
             try:
-                async with asyncio.timeout_at(deadline_at if math.isfinite(deadline_at) else None):
+                async with asyncio.timeout_at(guard_at):
                     return await self.models.rerank(
                         entry_id("rerank", entry), query, documents, timeout=timeout
                     )
@@ -426,13 +439,12 @@ class ModelGateway:
         else:
             log.warning("model_call_failed", stage=stage, error=str(exc) or type(exc).__name__)
 
-    def _time_for(self, stage: StageName, deadline_at: float, stage_left: float | None = None) -> float:
-        """The call's own timeout: what the stage allows (`TIMEOUT_<STAGE>`, or `stage_left` of a window the
-        stage shares) when that ends before the deadline; otherwise past the deadline by
-        `DEADLINE_MARGIN_S`, so the deadline's guard ends the call (see `DEADLINE_MARGIN_S`)."""
+    def _time_for(self, stage: StageName, deadline_at: float) -> float:
+        """The call's own timeout: `TIMEOUT_<STAGE>` when it ends before the deadline; otherwise past the
+        deadline by `DEADLINE_MARGIN_S`, so the deadline's guard ends the call (see `DEADLINE_MARGIN_S`)."""
         left = deadline_at - asyncio.get_running_loop().time()
-        allowed = self._timeouts[stage] if stage_left is None else stage_left
-        return allowed if allowed <= left else left + DEADLINE_MARGIN_S
+        stage_timeout = self._timeouts[stage]
+        return stage_timeout if stage_timeout <= left else left + DEADLINE_MARGIN_S
 
     def _out_of_time(self, deadline_at: float) -> bool:
         return deadline_at - asyncio.get_running_loop().time() <= 0

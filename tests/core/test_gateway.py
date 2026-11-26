@@ -15,7 +15,7 @@ from rag_core.adapters.factory import build_gateway
 from rag_core.adapters.litellm_models import FAILS_BEFORE_COOLDOWN
 from rag_core.adapters.postgres import Database
 from rag_core.limits import Limits, load_limits
-from rag_core.models_config import Price, load_models
+from rag_core.models_config import Entry, Price, load_models
 from rag_core.ports import Cooldown
 from rag_core.services.gateway import (
     CHARS_PER_TOKEN,
@@ -213,6 +213,23 @@ async def test_a_hanging_remote_rerank_cools_on_the_third(rig: Rig) -> None:
             await rig.gateway.rerank("q", ["a", "b"])
     await settle_litellm()
     assert f"rerank:openrouter/{RERANK}" in await rig.gateway.models.cooldowns()
+
+
+async def test_a_later_rerank_entry_cut_by_the_shared_window_is_not_counted(rig: Rig) -> None:
+    second = Entry(provider="openrouter", model="test/rerank-b:free")
+    stage = CONFIG.stage("rerank").model_copy(update={"chain": [*CONFIG.stage("rerank").chain, second]})
+    config = CONFIG.model_copy(update={"stages": CONFIG.stages.model_copy(update={"rerank": stage})})
+    limits = LIMITS.model_copy(update={"timeout_rerank": 0.3})
+    rig.gateway = build_gateway(served(config, rig.fake), {"openrouter": "k"}, rig.db, rig.alerter, limits)
+    rig.fake.always(RERANK, "error")
+    rig.fake.always(second.model, "hang")  # A fails at once, then B hangs in what is left of the window
+    started = time.monotonic()
+    for _ in range(FAILS_BEFORE_COOLDOWN + 1):
+        with pytest.raises(ModelsUnavailableError):
+            await rig.gateway.rerank("q", ["a"])
+    assert time.monotonic() - started < 3 * 0.3 + 1  # each question within its window
+    await settle_litellm()
+    assert f"rerank:openrouter/{second.model}" not in await rig.gateway.models.cooldowns()
 
 
 async def test_running_out_of_the_requests_time_never_cools_an_entry(rig: Rig) -> None:
