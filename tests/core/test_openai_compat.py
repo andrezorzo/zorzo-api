@@ -190,6 +190,8 @@ async def test_an_odd_part_type_is_skipped_not_a_crash() -> None:
         ([{"type": ["text"], "text": "x"}], True),
         ({}, True),
         ([{"type": "reasoning", "text": "x"}], False),
+        ([{"type": "text", "text": 7}], True),
+        ({"type": "text", "text": {"value": "hi"}}, True),
     ],
 )
 async def test_parts_with_nothing_recognizable_are_unreadable(content: object, unreadable: bool) -> None:
@@ -200,9 +202,25 @@ async def test_parts_with_nothing_recognizable_are_unreadable(content: object, u
     provider = OpenAICompatProvider("https://provider.test/v1", "k", transport=transport)
     try:
         _ = [c async for c in provider.chat_stream("m", [{"role": "user", "content": "q"}], max_tokens=5)]
-    except ProviderError:
+    except ProviderError as exc:
+        assert str(exc) == "unreadable stream"
         failed = True
     else:
         failed = False
     await provider.close()
     assert failed is unreadable
+
+
+@pytest.mark.parametrize(
+    ("content", "text"), [([{"type": "reasoning", "text": "x"}], ""), ([7], None), ({}, None)]
+)
+async def test_chat_reads_parts_the_same_way(content: object, text: str | None) -> None:
+    body = {"choices": [{"message": {"content": content}}]}
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=body))
+    provider = OpenAICompatProvider("https://provider.test/v1", "k", transport=transport)
+    try:
+        result = await provider.chat("m", [{"role": "user", "content": "q"}], max_tokens=5, schema=None)
+        assert result.text == text
+    except ProviderError:
+        assert text is None  # unreadable: the provider's failure
+    await provider.close()
