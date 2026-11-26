@@ -27,7 +27,7 @@ class EventLog:
     def write(self, level: str, component: str, event: str, fields: dict[str, Any]) -> None:
         self.rows.append((level, component, event, fields))
 
-    async def drain(self) -> None:
+    async def drain(self, timeout: float | None = None) -> None:
         pass
 
 

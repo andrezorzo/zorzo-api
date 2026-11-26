@@ -7,7 +7,7 @@ import httpx
 import structlog
 from sqlalchemy import text
 
-from rag_core.adapters.postgres import Database, store_errors
+from rag_core.adapters.postgres import Database
 from rag_core.ports import AlertKind
 
 log = structlog.get_logger()
@@ -40,14 +40,14 @@ class PostgresAlertStore:
         self, kind: AlertKind, now: datetime, remind_before: datetime
     ) -> Literal["opened", "remind"] | None:
         params = {"kind": kind, "now": now, "remind_before": remind_before}
-        async with store_errors(), self.db.engine.begin() as conn:
+        async with self.db.short_transaction() as conn:
             found = (await conn.execute(OPEN, params)).first()
         if found is None:
             return None
         return "opened" if found[0] else "remind"
 
     async def close(self, kind: AlertKind, now: datetime) -> bool:
-        async with store_errors(), self.db.engine.begin() as conn:
+        async with self.db.short_transaction() as conn:
             return (await conn.execute(CLOSE, {"kind": kind, "now": now})).first() is not None
 
 

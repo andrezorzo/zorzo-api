@@ -342,15 +342,17 @@ async def test_a_hanging_remote_rerank_opens_its_breaker(rig: Rig) -> None:
     assert not rig.gateway.breakers.callable(("openrouter", "test/rerank:free"))
 
 
-async def test_the_alert_says_at_once_when_the_cutoff_becomes_search_only(rig: Rig) -> None:
+async def test_the_alert_says_when_the_cutoff_becomes_search_only(rig: Rig) -> None:
+    ticks = [0.0]
+    rig.gateway.alerts.monotonic = lambda: ticks[0]
     rig.seed_budget(0.08, paid_disabled=True)
     await rig.gateway.mode()
     await rig.gateway.drain()
     rig.seed_budget(0.10, paid_disabled=True, degraded=True)
-    await rig.gateway.mode()
-    await rig.gateway.drain()
-    await rig.gateway.mode()  # still search-only: nothing new to tell
-    await rig.gateway.drain()
+    for _ in range(2):  # the next check, a minute later; then another, with nothing new to tell
+        ticks[0] += 61
+        await rig.gateway.mode()
+        await rig.gateway.drain()
     messages = [m for _, m in rig.alerter.sent]
     assert len(messages) == 2
     assert "cutoff" in messages[0]
@@ -398,3 +400,17 @@ async def test_a_later_rerank_entry_cut_by_the_chain_limit_is_not_blamed(rig: Ri
     with pytest.raises(ModelsUnavailable):
         await rig.gateway.rerank("q", ["a"])
     assert rig.gateway.breakers.callable(("openrouter", "test/rerank-b:free"))
+
+
+async def test_a_later_rerank_entry_with_most_of_the_time_is_blamed(rig: Rig) -> None:
+    rig = with_limits(rig, timeout_rerank=0.3, breaker_failures=1)
+    second = Entry(provider="openrouter", model="test/rerank-b:free")
+    stage = CONFIG.stage("rerank").model_copy(update={"chain": [*CONFIG.stage("rerank").chain, second]})
+    rig.gateway.config = CONFIG.model_copy(
+        update={"stages": CONFIG.stages.model_copy(update={"rerank": stage})}
+    )
+    rig.fake.script("test/rerank:free", "error")  # fails at once
+    rig.fake.script("test/rerank-b:free", "hang")
+    with pytest.raises(ModelsUnavailable):
+        await rig.gateway.rerank("q", ["a"])
+    assert not rig.gateway.breakers.callable(("openrouter", "test/rerank-b:free"))

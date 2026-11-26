@@ -229,8 +229,8 @@ class EventLog(Protocol):
     def write(self, level: str, component: str, event: str, fields: dict[str, Any]) -> None:
         """Never blocks: the row is written in the background, and a failure is only logged."""
 
-    async def drain(self) -> None:
-        """Wait for the pending writes, at shutdown and in tests."""
+    async def drain(self, timeout: float | None = None) -> None:
+        """Wait for the pending writes, at shutdown and in tests; with `timeout`, cancel what still runs."""
 
 
 @dataclass(frozen=True)

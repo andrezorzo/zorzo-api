@@ -10,7 +10,7 @@ from decimal import Decimal
 
 from sqlalchemy import text
 
-from rag_core.adapters.postgres import Database, store_errors
+from rag_core.adapters.postgres import Database
 from rag_core.ports import BudgetState
 
 STATE = text("""
@@ -48,16 +48,16 @@ class PostgresBudget:
         self.db = db
 
     async def state(self, day: date) -> BudgetState:
-        async with store_errors(), self.db.engine.connect() as conn:
+        async with self.db.short_transaction() as conn:
             found = (await conn.execute(STATE, {"day": day})).scalar()
         return found or "normal"
 
     async def reserve(self, day: date, estimate: float, cap: float) -> bool:
         params = {"day": day, "estimate": _usd(estimate), "cap": _usd(cap)}
-        async with store_errors(), self.db.engine.begin() as conn:
+        async with self.db.short_transaction() as conn:
             return (await conn.execute(RESERVE, params)).first() is not None
 
     async def settle(self, day: date, delta: float, cutoff: float, cap: float, now: datetime) -> None:
         params = {"day": day, "delta": _usd(delta), "cutoff": _usd(cutoff), "cap": _usd(cap), "now": now}
-        async with store_errors(), self.db.engine.begin() as conn:
+        async with self.db.short_transaction() as conn:
             await conn.execute(SETTLE, params)

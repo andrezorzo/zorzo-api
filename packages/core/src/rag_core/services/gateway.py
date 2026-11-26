@@ -38,6 +38,10 @@ from rag_core.services.quota import Quota
 log = structlog.get_logger()
 
 CHARS_PER_TOKEN = 3  # conservative for English and Portuguese, no tokenizer (LLD "6.2 Daily budget")
+# A timeout counts toward the breaker only when the entry had at least this share of its stage timeout: with
+# less, the caller's deadline or the earlier entries of the chain ran it out, not the provider.
+FAIR_SHARE = 0.5
+SHUTDOWN_DRAIN_S = 10.0  # each kind of background work gets this long at shutdown
 
 
 class ModelsUnavailable(Exception):
@@ -83,9 +87,8 @@ class _Ticket:
     deadline_at: float  # the caller's (inf when the caller bounds the call itself)
     chain_ends_at: float = math.inf  # a limit the gateway sets on the whole chain (rerank)
     trial: bool = False  # the breaker's half-open trial call
-    chain_first: bool = True  # the first entry called in this chain walk: it had the whole chain limit
-    # False when the call's time ran out for a reason that says nothing about the provider: the caller's
-    # deadline came before the gateway's own limits, or a slow consumer of the stream held the time.
+    # False when the call's time ran out for a reason that says nothing about the provider: it had less than
+    # `FAIR_SHARE` of its stage timeout, or a slow consumer of the stream held the time.
     blame_timeout: bool = True
 
 
@@ -222,12 +225,10 @@ class ModelGateway:
         chain_ends_at = asyncio.get_running_loop().time() + self._timeouts["rerank"]
         chars = len(query) + sum(len(d) for d in documents)
         spend = RequestSpend(self.limits.request_cost_cap_usd)
-        first = True
         for entry in self.config.stage("rerank").chain:
             ticket = await self._take("rerank", entry, chars, deadline_at, spend, chain_ends_at)
             if ticket is None:
                 continue
-            ticket.chain_first, first = first, False
             try:
                 async with asyncio.timeout(self._time_for(ticket)):
                     result = await self.providers[entry.provider].rerank(entry.model, query, documents)
@@ -257,7 +258,7 @@ class ModelGateway:
                 f"today's paid budget (US${cap}) reached the cutoff; paid entries are off until 00:00 UTC"
                 if state == "paid_disabled"
                 else f"today's budget of US${cap} is spent; questions go search-only",
-                severity=0 if state == "paid_disabled" else 1,  # search-only is told at once
+                severity=0 if state == "paid_disabled" else 1,  # search-only: told within a minute
             )
         if state == "degraded":
             return "budget_exhausted"
@@ -277,15 +278,15 @@ class ModelGateway:
             return "quota_exhausted"
         return None
 
-    async def drain(self) -> None:
+    async def drain(self, timeout: float | None = None) -> None:
         """Wait for the background work (settles of cancelled calls, alerts, breaker rows)."""
-        await self._background.drain()
-        await self.alerts.drain()
-        await self.breakers.event_log.drain()
+        await self._background.drain(timeout)
+        await self.alerts.drain(timeout)
+        await self.breakers.event_log.drain(timeout)
 
     async def close(self) -> None:
         """At shutdown: the background work, then every client the gateway owns (providers, alerter)."""
-        await self.drain()
+        await self.drain(SHUTDOWN_DRAIN_S)
         clients: list[ModelProvider | Alerter] = [*self.providers.values(), self.alerts.alerter]
         for client in clients:
             try:  # one client failing to close doesn't keep the others open
@@ -296,18 +297,12 @@ class ModelGateway:
     # -- one entry ----------------------------------------------------------------------------------------
 
     def _time_for(self, ticket: _Ticket) -> float:
-        """`min(TIMEOUT_<STAGE>, time left)`; notes on the ticket whether the caller's deadline binds.
-
-        The gateway's own limits (the stage timeout, the rerank chain's) blame the provider when they end the
-        call; the caller's deadline doesn't.
-        """
+        """`min(TIMEOUT_<STAGE>, time left)`; notes on the ticket whether its timeout is the provider's."""
         now = asyncio.get_running_loop().time()
-        stage_end = now + self._timeouts[ticket.stage]
-        own_end = min(stage_end, ticket.chain_ends_at)
-        # A later entry cut by the chain limit had only what the earlier ones left: not its fault.
-        chain_cut_later = ticket.chain_ends_at < stage_end and not ticket.chain_first
-        ticket.blame_timeout = own_end < ticket.deadline_at and not chain_cut_later
-        return min(own_end, ticket.deadline_at) - now
+        timeout = self._timeouts[ticket.stage]
+        granted = min(now + timeout, ticket.chain_ends_at, ticket.deadline_at) - now
+        ticket.blame_timeout = granted >= FAIR_SHARE * timeout
+        return granted
 
     def _out_of_time(self, deadline_at: float) -> bool:
         return deadline_at - asyncio.get_running_loop().time() <= 0

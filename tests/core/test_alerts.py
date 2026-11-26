@@ -128,15 +128,18 @@ async def test_raise_soon_asks_the_store_at_most_once_a_minute(db: Database) -> 
     assert [m for _, m in alerter.sent] == ["spent", "resolved: budget_exhausted", "spent again"]
 
 
-async def test_a_worse_state_is_told_once_and_not_again_after_a_restart(db: Database) -> None:
+async def test_a_worse_state_is_told_without_waiting_for_the_reminder(db: Database) -> None:
     alerter = RecordingAlerter()
-    alerts = Alerts(PostgresAlertStore(db), alerter, LIMITS, monotonic=lambda: 0.0)  # the real clock
+    ticks = [0.0]
+    # The wall clock is real (the store compares times); the monotonic one drives the per-minute throttle.
+    alerts = Alerts(PostgresAlertStore(db), alerter, LIMITS, monotonic=lambda: ticks[0])
     alerts.raise_soon("budget_exhausted", "paid off", severity=0)
-    alerts.raise_soon("budget_exhausted", "search-only", severity=1)
+    alerts.raise_soon("budget_exhausted", "search-only", severity=1)  # within the minute: skipped
+    await alerts.drain()
+    ticks[0] += 61
     alerts.raise_soon("budget_exhausted", "search-only", severity=1)
     await alerts.drain()
+    ticks[0] += 61
+    alerts.raise_soon("budget_exhausted", "search-only", severity=1)  # told already
+    await alerts.drain()
     assert [m for _, m in alerter.sent] == ["paid off", "still open: search-only"]
-    restarted = Alerts(PostgresAlertStore(db), alerter, LIMITS, monotonic=lambda: 0.0)  # the real clock
-    restarted.raise_soon("budget_exhausted", "search-only", severity=1)
-    await restarted.drain()
-    assert len(alerter.sent) == 2  # told minutes ago: a restart sends nothing new

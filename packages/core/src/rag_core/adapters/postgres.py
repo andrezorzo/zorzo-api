@@ -11,12 +11,17 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import MetaData, make_url, text
 from sqlalchemy.dialects.postgresql.base import ischema_names
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from rag_core.ports import StoreUnavailable
 
 CONNECT_TIMEOUT_S = 5
 PROBE_TIMEOUT_S = 2.0
+# A short statement (a budget row, an alert row, a log row) that takes seconds is stuck: Postgres ends a
+# statement or lock wait past this, and the whole call, connection included, gets one second more.
+SHORT_STATEMENT_S = 2.0
+
+BOUNDS = text("SELECT set_config('statement_timeout', :ms, true), set_config('lock_timeout', :ms, true)")
 
 
 @asynccontextmanager
@@ -49,6 +54,17 @@ class Database:
 
     async def close(self) -> None:
         await self.engine.dispose()
+
+    @asynccontextmanager
+    async def short_transaction(self) -> AsyncIterator[AsyncConnection]:
+        """A transaction for a few short statements, bounded by `SHORT_STATEMENT_S`; a failure (a timeout
+        included) is `StoreUnavailable`."""
+        try:
+            async with asyncio.timeout(SHORT_STATEMENT_S + 1), self.engine.begin() as conn:
+                await conn.execute(BOUNDS, {"ms": str(int(SHORT_STATEMENT_S * 1000))})
+                yield conn
+        except (OSError, SQLAlchemyError, TimeoutError) as exc:
+            raise StoreUnavailable(type(exc).__name__) from exc
 
     async def ping(self) -> None:
         async with asyncio.timeout(PROBE_TIMEOUT_S), self.engine.connect() as conn:

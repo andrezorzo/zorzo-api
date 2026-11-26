@@ -28,10 +28,10 @@ class PostgresEventLog:
     async def _insert(self, level: str, component: str, event: str, fields: dict[str, Any]) -> None:
         params = {"level": level, "component": component, "event": event, "fields": json.dumps(fields)}
         try:
-            async with self.db.engine.begin() as conn:
+            async with self.db.short_transaction() as conn:
                 await conn.execute(INSERT, params)
         except Exception as exc:
             log.error("event_log_failed", component=component, event_name=event, error=type(exc).__name__)
 
-    async def drain(self) -> None:
-        await self._background.drain()
+    async def drain(self, timeout: float | None = None) -> None:
+        await self._background.drain(timeout)

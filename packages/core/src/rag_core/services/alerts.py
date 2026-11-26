@@ -44,33 +44,29 @@ class Alerts:
         self.monotonic = monotonic
         self._background = BackgroundTasks()
         self._raise_checked: dict[AlertKind, float] = {}  # when `raise_soon` last asked the store, per kind
-        # The severity last asked for per kind, while its incident may be open: a worse state is told at once.
-        # Unknown after a restart, so a restart never counts as worse.
-        self._severity: dict[AlertKind, int] = {}
+        # The severity last told per kind while its incident is open, written only when a message went out and
+        # removed only when the incident closed, both under the kind's lock. A higher one is a worse state,
+        # told without waiting for the reminder. A restart forgets it (0), so a restart during a severe state
+        # tells it once more.
+        self._told: dict[AlertKind, int] = {}
         # One kind's raises and clears run in the order they were asked for (asyncio.Lock is first come,
         # first served), so a late clear can't close the incident a later raise opened.
         self._locks: dict[AlertKind, asyncio.Lock] = defaultdict(asyncio.Lock)
 
-    async def raise_(
-        self, kind: AlertKind, message: str, worse: bool = False, before: int | None = None
-    ) -> None:
-        """Open the incident, or remind; `worse` (the incident got worse) sends the message now.
-
-        `before` is the severity known before a worse raise, put back when the store fails so the next check
-        tries again.
-        """
+    async def raise_(self, kind: AlertKind, message: str, severity: int = 0) -> None:
+        """Open the incident; remind after `ALERT_REPEAT_AFTER`, or at once when `severity` is worse."""
         self._maybe_open.add(kind)
         async with self._locks[kind]:
             now = self.clock()
+            worse = severity > self._told.get(kind, 0)
             remind_before = now if worse else now - timedelta(seconds=self.limits.alert_repeat_after)
             try:
                 outcome = await self.store.open(kind, now, remind_before)
             except StoreUnavailable as exc:  # `raise_soon` asks again after its interval
-                if worse and before is not None:
-                    self._severity[kind] = before
                 log.error("alert_store_failed", kind=kind, error=str(exc))
                 return
             if outcome is not None:
+                self._told[kind] = severity
                 # A reminder carries the current message, so an incident that got worse says so.
                 await self._send(kind, message if outcome == "opened" else f"still open: {message}")
 
@@ -79,32 +75,25 @@ class Alerts:
             await self._clear(kind)
 
     def raise_soon(self, kind: AlertKind, message: str, severity: int = 0) -> None:
-        """`raise_` in the background: the caller never waits on the store or the alerter.
-
-        While an incident lasts the store is asked once per `RAISE_CHECK_EVERY_S` (after a store failure too),
-        except when `severity` is higher than last asked for, which is told at once.
-        """
+        """`raise_` in the background, at most once per `RAISE_CHECK_EVERY_S` per kind: the caller never waits
+        on the store or the alerter, and a long incident (or a failing store) is asked once a minute."""
         now = self.monotonic()
         last = self._raise_checked.get(kind)
-        before = self._severity.get(kind)
-        worse = before is not None and severity > before
-        if last is not None and now - last < RAISE_CHECK_EVERY_S and not worse:
+        if last is not None and now - last < RAISE_CHECK_EVERY_S:
             return
         self._raise_checked[kind] = now
-        self._severity[kind] = max(severity, before or 0)
-        self._background.spawn(self.raise_(kind, message, worse, before))
+        self._background.spawn(self.raise_(kind, message, severity))
 
     def clear_soon(self, kind: AlertKind) -> None:
         if self._claim_clear(kind):
             self._background.spawn(self._clear(kind))
 
     def _claim_clear(self, kind: AlertKind) -> bool:
-        """Whether a clear must ask the store; a new incident is then raised at once, at any severity."""
+        """Whether a clear must ask the store; a new incident is then raised at once."""
         if kind not in self._maybe_open:
             return False
         self._maybe_open.discard(kind)
         self._raise_checked.pop(kind, None)
-        self._severity.pop(kind, None)
         return True
 
     async def _clear(self, kind: AlertKind) -> None:
@@ -115,12 +104,13 @@ class Alerts:
                 self._maybe_open.add(kind)  # try again on the next check
                 log.error("alert_store_failed", kind=kind, error=str(exc))
                 return
+            self._told.pop(kind, None)
             if closed:
                 await self._send(kind, f"resolved: {kind}")
 
-    async def drain(self) -> None:
+    async def drain(self, timeout: float | None = None) -> None:
         """Wait for the background work, at shutdown and in tests."""
-        await self._background.drain()
+        await self._background.drain(timeout)
 
     async def _send(self, kind: AlertKind, message: str) -> None:
         try:
