@@ -6,7 +6,8 @@ normally. It records every request (path, model, body), so a test can assert whi
 - chat completions, as JSON or SSE (`stream: true`), with usage;
 - `/rerank`, scoring the documents in their given order unless `rerank_scores` says otherwise;
 - failures: "rate_limited" (429 with `Retry-After`), "error" (500), "bad_gateway" (502), "unavailable"
-  (503), "bad_request" (400), "slow_error" (500 after 0.25 s), "hang", "malformed" (a 200 that isn't
+  (503), "bad_request" (400), "slow_error" (500 after 0.25 s), "hang", "stall_after_first_token" and "drip"
+  (a stream that goes silent, or sends a word every 50 ms), "malformed" (a 200 that isn't
   the expected JSON), "context_too_long" (400), "break_after_first_token" (a stream that dies mid-way);
 - `Reply(...)` for a given text, token counts or rate-limit headers.
 """
@@ -86,7 +87,7 @@ class FakeOpenRouter:
         if path == "/rerank":
             return self._rerank(body, reply)
         if body.get("stream"):
-            return self._stream(reply, broken=behavior == "break_after_first_token")
+            return self._stream(reply, broken=behavior == "break_after_first_token", pace=behavior)
         return httpx.Response(
             200,
             headers=reply.headers,
@@ -111,7 +112,7 @@ class FakeOpenRouter:
             json={"model": body["model"], "results": results, "usage": {"total_tokens": 10, "cost": 0}},
         )
 
-    def _stream(self, reply: Reply, broken: bool) -> httpx.Response:
+    def _stream(self, reply: Reply, broken: bool, pace: Behavior) -> httpx.Response:
         words = reply.text.split(" ")
 
         async def frames() -> AsyncIterator[bytes]:
@@ -122,6 +123,10 @@ class FakeOpenRouter:
                 yield f"data: {json.dumps(frame)}\n\n".encode()
                 if broken:
                     raise httpx.ReadError("connection reset")
+                if pace == "stall_after_first_token":
+                    await asyncio.sleep(60)
+                if pace == "drip":  # one word every 50 ms
+                    await asyncio.sleep(0.05)
             usage = {"prompt_tokens": reply.tokens_in, "completion_tokens": reply.tokens_out}
             yield f"data: {json.dumps({'choices': [], 'usage': usage})}\n\n".encode()
             yield b"data: [DONE]\n\n"

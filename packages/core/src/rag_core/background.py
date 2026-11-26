@@ -26,7 +26,7 @@ class BackgroundTasks:
         self._tasks.discard(task)
         if not task.cancelled() and (exc := task.exception()) is not None:
             # A bug in background work: logged by type (its text may quote a query), never lost.
-            log.error("background_task_failed", task=task.get_coro().__qualname__, error=type(exc).__name__)  # type: ignore[union-attr]
+            log.error("background_task_failed", task=_name(task), error=type(exc).__name__)
 
     async def drain(self, timeout: float | None = None) -> None:
         """Wait until nothing runs, including work spawned meanwhile; at shutdown and in tests.
@@ -44,7 +44,11 @@ class BackgroundTasks:
         if not self._tasks:
             return
         stuck = list(self._tasks)
-        log.error("background_tasks_stuck", tasks=sorted(t.get_coro().__qualname__ for t in stuck))  # type: ignore[union-attr]
+        log.error("background_tasks_stuck", tasks=sorted(_name(t) for t in stuck))
         for task in stuck:
             task.cancel()
         await asyncio.wait(stuck, timeout=CANCEL_WAIT_S)
+
+
+def _name(task: "asyncio.Task[None]") -> str:
+    return getattr(task.get_coro(), "__qualname__", task.get_name())

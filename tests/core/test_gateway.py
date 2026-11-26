@@ -446,10 +446,21 @@ async def test_a_reservation_its_caller_left_is_given_back(rig: Rig) -> None:
 
 async def test_a_stream_still_sending_when_cut_is_not_blamed(rig: Rig) -> None:
     rig = with_limits(rig, timeout_answer=0.2, breaker_failures=1)
-    rig.fake.script(A, Reply(text="one two three"))
+    rig.fake.script(A, "drip")  # five words, one every 50 ms: still coming when 0.15 s runs out
     with pytest.raises(ModelsUnavailable):
         async for _ in rig.gateway.stream(
             "answer", MESSAGES, deadline_at=rig.deadline(0.15), spend=RequestSpend(0)
         ):
-            await asyncio.sleep(0.1)  # the time runs out while the answer is still coming
+            pass  # the consumer reads at once; the provider is the slow one
     assert rig.gateway.breakers.closed(("openrouter", A))
+
+
+async def test_a_stream_that_goes_silent_after_a_token_is_blamed(rig: Rig) -> None:
+    rig = with_limits(rig, timeout_answer=0.2, breaker_failures=1)
+    rig.fake.script(A, "stall_after_first_token")
+    with pytest.raises(ModelsUnavailable):
+        async for _ in rig.gateway.stream(
+            "answer", MESSAGES, deadline_at=rig.deadline(), spend=RequestSpend(0)
+        ):
+            pass
+    assert not rig.gateway.breakers.callable(("openrouter", A))

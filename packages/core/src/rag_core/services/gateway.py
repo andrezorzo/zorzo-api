@@ -185,7 +185,9 @@ class ModelGateway:
                 continue
             parts: list[str] = []
             tokens_in = tokens_out = 0
-            ends_at = asyncio.get_running_loop().time() + self._time_for(ticket)
+            loop = asyncio.get_running_loop()
+            ends_at = loop.time() + self._time_for(ticket)
+            last_chunk_at = loop.time()  # the provider's silence is measured from here
             chunks: AsyncIterator[ChatChunk] | None = None
             try:
                 chunks = aiter(
@@ -199,6 +201,7 @@ class ModelGateway:
                         raise TimeoutError
                     async with asyncio.timeout_at(ends_at):
                         chunk = await anext(chunks, None)
+                    last_chunk_at = loop.time()
                     if chunk is None:
                         break
                     if chunk.tokens_in is not None:
@@ -207,8 +210,8 @@ class ModelGateway:
                         parts.append(chunk.text)
                         yield chunk.text
             except BaseException as exc:
-                if parts:
-                    ticket.blame_timeout = False  # the provider was sending: alive, only long
+                if parts and loop.time() - last_chunk_at < FAIR_SHARE * self._timeouts[stage]:
+                    ticket.blame_timeout = False  # the provider was still sending: alive, only long
                 if chunks is not None:
                     await _aclose(chunks)  # the provider's response, not left to the garbage collector
                 await self._close(ticket, exc)
@@ -289,9 +292,11 @@ class ModelGateway:
         `timeout`."""
         loop = asyncio.get_running_loop()
         ends_at = None if timeout is None else loop.time() + timeout
-        # The quick ones first (alerts, breaker rows): a settle stuck on the database can't take their time.
-        for drain in (self.alerts.drain, self.breakers.event_log.drain, self._background.drain):
-            await drain(None if ends_at is None else max(0.0, ends_at - loop.time()))
+        # Money first (settles, refunds), then alerts and breaker rows; each gets an even share of what is
+        # left, so one kind stuck on the database can't take all the others' time.
+        drains = (self._background.drain, self.alerts.drain, self.breakers.event_log.drain)
+        for n, drain in enumerate(drains):
+            await drain(None if ends_at is None else max(0.0, ends_at - loop.time()) / (len(drains) - n))
 
     async def close(self) -> None:
         """At shutdown: the background work, then every client the gateway owns (providers, alerter)."""
@@ -438,6 +443,11 @@ class ModelGateway:
             reserved = await asyncio.shield(reserving)  # a shutdown cancelling this must not cut the commit
         except StoreUnavailable:
             return
+        except asyncio.CancelledError:
+            # Shutdown ran out of time: the day's row may keep this estimate. Said, so the gap is explained.
+            log.warning("reservation_release_abandoned", day=str(day), estimate=estimate)
+            reserving.add_done_callback(lambda f: f.cancelled() or f.exception())
+            raise
         if reserved:
             await self._settle_row(day, -estimate)
 
