@@ -12,6 +12,7 @@ from sqlalchemy.dialects.postgresql import ARRAY, DOUBLE_PRECISION, TEXT
 
 from rag_core.adapters.postgres import BOUNDS, Database, store_errors
 from rag_core.ports import Bucket
+from rag_core.units import MS_PER_S
 
 # The refilled level of a stored bucket at :now; `i` is the bucket's input row.
 _LEVEL = """least(i.capacity, b.tokens
@@ -64,7 +65,7 @@ class PostgresRateLimiter:
             "refills": [b.refill_per_s for b in buckets],
             "now": now,
         }
-        bounds = {"ms": str(int(LOCK_TIMEOUT_S * 1000))}
+        bounds = {"ms": str(int(LOCK_TIMEOUT_S * MS_PER_S))}
         async with self.db.engine.connect() as conn:
             async with conn.begin() as tx:
                 await conn.execute(BOUNDS, bounds)

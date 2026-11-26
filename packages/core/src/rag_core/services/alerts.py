@@ -15,7 +15,7 @@ import structlog
 
 from rag_core.background import BackgroundTasks
 from rag_core.limits import Limits
-from rag_core.ports import Alerter, AlertKind, AlertStore, StoreUnavailable
+from rag_core.ports import Alerter, AlertKind, AlertStore, StoreUnavailableError
 
 log = structlog.get_logger()
 
@@ -62,7 +62,7 @@ class Alerts:
             remind_before = now if worse else now - timedelta(seconds=self.limits.alert_repeat_after)
             try:
                 outcome = await self.store.open(kind, now, remind_before)
-            except StoreUnavailable as exc:  # `raise_soon` asks again after its interval
+            except StoreUnavailableError as exc:  # `raise_soon` asks again after its interval
                 log.error("alert_store_failed", kind=kind, error=str(exc))
                 return
             if outcome is not None:
@@ -100,7 +100,7 @@ class Alerts:
         async with self._locks[kind]:
             try:
                 closed = await self.store.close(kind, self.clock())
-            except StoreUnavailable as exc:
+            except StoreUnavailableError as exc:
                 self._maybe_open.add(kind)  # try again on the next check
                 log.error("alert_store_failed", kind=kind, error=str(exc))
                 return

@@ -3,7 +3,8 @@
 Each chain entry is tried in order, within `min(TIMEOUT_<STAGE>, time left)`; an entry is skipped when its
 breaker is open (LLD "6.6 Circuit breaker"), when it is free and its provider passed the quota warning (LLD
 "6.8 Free quota"), or when it is paid and its estimate doesn't fit in what the day or the request has left
-(LLD "6.2 Daily budget"). A failure falls to the next entry; an exhausted chain raises `ModelsUnavailable`.
+(LLD "6.2 Daily budget"). A failure falls to the next entry; an exhausted chain raises
+`ModelsUnavailableError`.
 """
 
 import asyncio
@@ -24,12 +25,12 @@ from rag_core.ports import (
     Alerter,
     Budget,
     ChatChunk,
-    ContextTooLong,
+    ContextTooLongError,
     ModelProvider,
     ProviderError,
     RateInfo,
-    RateLimited,
-    StoreUnavailable,
+    RateLimitedError,
+    StoreUnavailableError,
 )
 from rag_core.services.alerts import Alerts
 from rag_core.services.breaker import Breakers
@@ -49,7 +50,7 @@ FAIR_SHARE = 0.5
 SHUTDOWN_DRAIN_S = 6.0
 
 
-class ModelsUnavailable(Exception):
+class ModelsUnavailableError(Exception):
     """The stage's chain is exhausted: every entry failed or was skipped."""
 
 
@@ -171,7 +172,7 @@ class ModelGateway:
                 return Completion(result.text, parsed, usage, cost, entry.provider, entry.model)
             if self._out_of_time(deadline_at):
                 break
-        raise ModelsUnavailable(stage)
+        raise ModelsUnavailableError(stage)
 
     async def stream(
         self, stage: StageName, messages: list[dict[str, str]], *, deadline_at: float, spend: RequestSpend
@@ -180,7 +181,7 @@ class ModelGateway:
 
         The answer starts with the model's first real text (leading whitespace is held back until then). A
         failure, or a stream that ends with no text, before it falls to the next entry; a failure after it
-        raises `ModelsUnavailable`, and the caller keeps the text it was given.
+        raises `ModelsUnavailableError`, and the caller keeps the text it was given.
         """
         chars = _prompt_chars(messages)
         max_tokens = self.config.stage(stage).max_tokens
@@ -232,7 +233,7 @@ class ModelGateway:
                 await self._close(ticket, exc)
                 if _failed(exc):
                     if wrote:
-                        raise ModelsUnavailable(f"{stage} failed after the first token") from exc
+                        raise ModelsUnavailableError(f"{stage} failed after the first token") from exc
                     continue
                 raise
             usage = Usage(tokens_in, tokens_out)
@@ -244,10 +245,10 @@ class ModelGateway:
                 continue
             yield Completion("".join(parts), None, usage, cost, entry.provider, entry.model)
             return
-        raise ModelsUnavailable(stage)
+        raise ModelsUnavailableError(stage)
 
     async def rerank(self, query: str, documents: list[str], *, deadline_at: float = math.inf) -> list[float]:
-        """Scores per document from the `rerank` stage; `ModelsUnavailable` sends the caller to local.
+        """Scores per document from the `rerank` stage; `ModelsUnavailableError` sends the caller to local.
 
         The whole chain gets one `TIMEOUT_RERANK`: the local level must still have time after it.
         """
@@ -268,12 +269,12 @@ class ModelGateway:
                 raise
             await self._close(ticket, None, Usage(math.ceil(chars / CHARS_PER_TOKEN), 0), result.rate)
             return result.scores
-        raise ModelsUnavailable("rerank")
+        raise ModelsUnavailableError("rerank")
 
     async def mode(self) -> DegradedReason | None:
         """None when questions can be answered by the models now; otherwise why they go search-only.
 
-        Raises `StoreUnavailable` when the budget row can't be read.
+        Raises `StoreUnavailableError` when the budget row can't be read.
         """
         state = await self.budget.state(self.clock().date())
         # The alert opens when the day's paid entries stop (the cutoff), since reservations keep the spend
@@ -390,7 +391,7 @@ class ModelGateway:
         except asyncio.CancelledError:
             self._background.spawn(self._release_if_reserved(reserving, day, estimate))
             raise
-        except StoreUnavailable as exc:  # no reservation, no paid call
+        except StoreUnavailableError as exc:  # no reservation, no paid call
             log.error("budget_reserve_failed", error=str(exc))
             return False
         if not reserved:
@@ -413,9 +414,9 @@ class ModelGateway:
         # A timeout counts toward the breaker only when `_time_for` said it is the provider's (LLD "6.6").
         if exc is None:
             self.breakers.success(key, trial)
-        elif isinstance(exc, RateLimited):
+        elif isinstance(exc, RateLimitedError):
             self.breakers.failure(key, rate_limited=True, trial=trial)
-        elif isinstance(exc, ContextTooLong):
+        elif isinstance(exc, ContextTooLongError):
             log.error("context_too_long", stage=ticket.stage, model=entry.model)
             self.breakers.release(key, trial)
         elif _failed(exc) and not (isinstance(exc, TimeoutError) and not ticket.blame_timeout):
@@ -462,7 +463,7 @@ class ModelGateway:
             # Shielded: a shutdown cancelling this must not cut the reserve's commit.
             if await asyncio.shield(reserving):
                 await self._settle_row(day, -estimate)
-        except StoreUnavailable:
+        except StoreUnavailableError:
             return
         except asyncio.CancelledError:
             # Shutdown ran out of time: the day's row may keep this estimate. Said, so the gap is explained.
@@ -484,7 +485,7 @@ class ModelGateway:
             await self.budget.settle(
                 day, delta, lim.budget_paid_cutoff * lim.daily_budget_usd, lim.daily_budget_usd, self.clock()
             )
-        except StoreUnavailable as exc:
+        except StoreUnavailableError as exc:
             log.error("budget_settle_failed", error=str(exc))
 
 

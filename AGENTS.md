@@ -93,6 +93,8 @@ adds it there.
   touches logs, secrets, configuration, errors or authentication. Fixes from a review are new code and go
   through the same loop. When a library default affects security (logging, tracebacks, error rendering), check
   it in the installed source, not from memory.
+- **PEP 8:** ruff enforces what it can (`E`, `W`, `N`); the `code-review` pass also checks what it can't:
+  module constants after the imports and named instead of bare numbers, names that say what a thing is.
 - **Pull request description:** follows `.github/pull_request_template.md`. A task PR has the task title, a
   summary, the plan path, a "Criteria" section with one item per `AC<n>` (the test that proves it, or what
   a human reviewer checks and where) and optional "Notes". Any other PR has "What", "Why" (where it came

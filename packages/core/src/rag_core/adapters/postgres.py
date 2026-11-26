@@ -13,10 +13,16 @@ from sqlalchemy.dialects.postgresql.base import ischema_names
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
-from rag_core.ports import StoreUnavailable
+from rag_core.ports import StoreUnavailableError
+from rag_core.units import MS_PER_S
 
 CONNECT_TIMEOUT_S = 5
 DEAD_SOCKET_MS = 10_000  # unacknowledged data for this long ends the connection
+# An idle connection is probed after KEEPALIVE_IDLE_S, then every KEEPALIVE_INTERVAL_S; KEEPALIVE_PROBES
+# unanswered probes end it.
+KEEPALIVE_IDLE_S = 5
+KEEPALIVE_INTERVAL_S = 2
+KEEPALIVE_PROBES = 2
 POOL_WAIT_S = 5
 PROBE_TIMEOUT_S = 2.0
 # A short statement (a budget row, an alert row, a log row) that takes seconds is stuck: Postgres ends a
@@ -28,11 +34,12 @@ BOUNDS = text("SELECT set_config('statement_timeout', :ms, true), set_config('lo
 
 @asynccontextmanager
 async def store_errors() -> AsyncIterator[None]:
-    """A failing database becomes `StoreUnavailable`, named by the error type (its text may quote SQL)."""
+    """A failing database becomes `StoreUnavailableError`, named by the error type (its text may quote
+    SQL)."""
     try:
         yield
     except (OSError, SQLAlchemyError) as exc:
-        raise StoreUnavailable(type(exc).__name__) from exc
+        raise StoreUnavailableError(type(exc).__name__) from exc
 
 
 # Reflection must know pgvector's `vector` type to build the chunk and cache tables.
@@ -52,9 +59,9 @@ class Database:
             connect_args={
                 "connect_timeout": CONNECT_TIMEOUT_S,
                 "keepalives": 1,
-                "keepalives_idle": 5,
-                "keepalives_interval": 2,
-                "keepalives_count": 2,
+                "keepalives_idle": KEEPALIVE_IDLE_S,
+                "keepalives_interval": KEEPALIVE_INTERVAL_S,
+                "keepalives_count": KEEPALIVE_PROBES,
                 "tcp_user_timeout": DEAD_SOCKET_MS,
             },
             pool_timeout=POOL_WAIT_S,
@@ -71,13 +78,13 @@ class Database:
     @asynccontextmanager
     async def short_transaction(self) -> AsyncIterator[AsyncConnection]:
         """A transaction whose statements Postgres ends past `SHORT_STATEMENT_S`; a failure (such a timeout
-        included) is `StoreUnavailable`."""
+        included) is `StoreUnavailableError`."""
         try:
             async with self.engine.begin() as conn:
-                await conn.execute(BOUNDS, {"ms": str(int(SHORT_STATEMENT_S * 1000))})
+                await conn.execute(BOUNDS, {"ms": str(int(SHORT_STATEMENT_S * MS_PER_S))})
                 yield conn
         except (OSError, SQLAlchemyError) as exc:
-            raise StoreUnavailable(type(exc).__name__) from exc
+            raise StoreUnavailableError(type(exc).__name__) from exc
 
     async def ping(self) -> None:
         async with asyncio.timeout(PROBE_TIMEOUT_S), self.engine.connect() as conn:

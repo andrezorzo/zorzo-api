@@ -44,7 +44,7 @@ line-length = 110
 target-version = "py313"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+select = ["E", "W", "F", "I", "N", "B", "UP", "SIM", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
 "apps/dashboard/data/migrations/*" = ["E501", "RUF012"]

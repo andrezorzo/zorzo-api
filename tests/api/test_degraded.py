@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from rag_core.services.gateway import ModelsUnavailable, RequestSpend
+from rag_core.services.gateway import ModelsUnavailableError, RequestSpend
 
 from tests.api.test_ask import QUESTION, ask
 from tests.conftest import api_settings, build_app, reset_tables, seed_budget
@@ -35,7 +35,7 @@ def open_every_answer_entry(client: TestClient) -> None:
 
     async def call() -> None:
         loop_time = asyncio.get_running_loop().time()
-        with pytest.raises(ModelsUnavailable):
+        with pytest.raises(ModelsUnavailableError):
             await app.state.gateway.complete(
                 "answer",
                 [{"role": "user", "content": "q"}],
