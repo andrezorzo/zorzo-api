@@ -15,6 +15,3 @@ and one apex domain).
 Cost accepted: CloudFront sits in the stream path, so SSE must survive it (ADR 0005, M1 test); its origin
 timeout counts time between bytes, so quiet steps need a heartbeat; the Free plan allows five cache
 behaviors, which puts every dashboard page under one `/dash/*` prefix.
-
-Interview answer: "One origin for the browser: no CORS, the WAF in front of the API, and the server never
-reachable around the CDN. The price is that the stream goes through CloudFront, so I test that first."

@@ -16,6 +16,3 @@ dependency, but likely weaker, also measured at M5).
 
 Cost accepted: another external dependency with its own quota; a fallback adds latency to the request;
 Portuguese quality of each reranker is unknown until measured.
-
-Interview answer: "Reranking degrades in steps: a free hosted reranker, a local cross-encoder, then none.
-The leader is picked by numbers at M5: the cheapest variant that's within noise of the best."

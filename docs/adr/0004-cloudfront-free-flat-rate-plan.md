@@ -18,7 +18,3 @@ or stacks two CDNs in front of S3; kept as the fallback); pay-as-you-go CloudFro
 Cost accepted: the plan's limits shape the design (five cache behaviors, managed origin request policies
 only, no CAPTCHA, so Turnstile does that job); sustained traffic above the allowance degrades delivery
 instead of billing; AWS can change the plan.
-
-Interview answer: "The free flat-rate plan gives me CDN, WAF and DNS for zero dollars with no surprise
-bill. I designed around its limits: one dashboard prefix, Turnstile instead of CAPTCHA. If AWS changes
-it, Cloudflare's free plan is the way out."

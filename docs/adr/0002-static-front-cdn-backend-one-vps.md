@@ -19,7 +19,3 @@ ADR 0004 is lost).
 
 Cost accepted: one machine is a single point of failure (non-goal 2); a shared-CPU VPS adds latency
 variance; the VPS leaves about US$1.50/month of margin under the cap.
-
-Interview answer: "Static files on a CDN for free, and one always-on VPS for everything stateful. No cold
-starts for a recruiter's first question, and it fits under ten dollars a month. Serverless with a warm
-instance would cost more than the whole server before adding a database."

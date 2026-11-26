@@ -17,7 +17,3 @@ saves); no cache (every answer is a live demo and there is less code, but repeat
 Cost accepted: one more table and a retention rule; a cached answer doesn't show the pipeline running live;
 a near-duplicate threshold that is too loose could serve an answer to a slightly different question
 (calibrated on the eval set).
-
-Interview answer: "The cache is semantic, a nearest-neighbor lookup on the question's embedding, so plain
-Redis can't do it. Postgres already has pgvector: one more indexed query, filtered by corpus and model
-version. The cache saves seconds of LLM calls and free quota; the store's milliseconds don't matter."

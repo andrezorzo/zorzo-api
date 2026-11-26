@@ -17,6 +17,3 @@ every corpus version).
 
 Cost accepted: more ceremony (a versioned contract, two CI pipelines) and a scoped AWS credential on the
 VPS so it can write to the `data/` prefix.
-
-Interview answer: "Two repos with an explicit contract: a JSON Schema for the stream and a manifest for
-the data. The front deploys on its own and never needs a commit when the corpus changes."

@@ -19,7 +19,3 @@ an adaptation path).
 Cost accepted: quality varies across providers and over time, so evals run nightly per provider;
 free-tier terms and limits can change; visitor questions reach third-party providers, which the notice
 under the input box states.
-
-Interview answer: "A per-stage fallback chain across free tiers, then paid with a hard daily cap. Each
-link is a pinned model-and-provider pair, because the same model differs by provider, and evals tell me
-when one drifts. I didn't open extra accounts to stretch quotas."

@@ -58,7 +58,7 @@ Features that weigh most on the design:
 
 | Role | What they need from the architecture | Where they find it |
 | --- | --- | --- |
-| André (owner, maintainer) | The reasons behind each decision, to explain them in interviews | ADRs ("Interview answer"), this HLD |
+| André (owner, maintainer) | The reasons behind each decision, to explain them in interviews | The ADRs, this HLD |
 | AI coding agents (skills workflow) | Boundaries between parts, contracts, what not to change | This HLD, the LLD, `AGENTS.md` |
 | Engineers evaluating André | A fast picture of the system and proof that it works | Sections 1 and 5 of this HLD, public dashboards and traces |
 | Developers and teams adapting it | Which parts are core and which are domain, and how to run it locally | Section 5 (core and domain), section 9, README |
