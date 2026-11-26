@@ -159,6 +159,9 @@ class ModelGateway:
                     raise
                 usage = Usage(result.tokens_in, result.tokens_out)
                 cost = await self._close(ticket, None, usage, result.rate)
+                if not result.text.strip():  # the model's miss, as in `stream`: never the breaker's
+                    log.warning("model_empty_answer", stage=stage, model=entry.model)
+                    break
                 try:
                     parsed = schema.model_validate_json(result.text) if schema is not None else None
                 except ValidationError:

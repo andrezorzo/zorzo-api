@@ -506,3 +506,23 @@ async def test_a_stream_without_real_text_falls_to_the_next_entry(rig: Rig, pace
     assert isinstance(parts[-1], Completion) and parts[-1].model == B
     # Stalled with no real text: the provider's failure. Ended cleanly with none: the model missed.
     assert rig.gateway.breakers.callable(("openrouter", A)) is not blamed
+
+
+async def test_an_empty_completion_falls_to_the_next_entry_without_blame(rig: Rig) -> None:
+    rig = with_limits(rig, breaker_failures=1)
+    rig.fake.script(A, Reply(text=""))
+    result = await rig.complete()
+    assert result.model == B
+    assert rig.gateway.breakers.closed(("openrouter", A))  # the model missed; the provider answered
+
+
+async def test_a_paid_empty_stream_is_settled_from_its_usage(rig: Rig) -> None:
+    rig.fake.script(A, "error")
+    rig.fake.script(B, "error")
+    rig.fake.script(PAID, "no_text")
+    with pytest.raises(ModelsUnavailable):
+        async for _ in rig.gateway.stream(
+            "answer", MESSAGES, deadline_at=rig.deadline(), spend=RequestSpend(0.01)
+        ):
+            pass
+    assert rig.spent_today() == pytest.approx(800 * 1.0 / 1e6, abs=1e-6)  # its 800 input tokens, as reported

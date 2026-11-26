@@ -57,14 +57,14 @@ class OpenAICompatProvider:
         response = await self._post("chat/completions", body)
         try:
             data = response.json()
-            text = data["choices"][0]["message"]["content"]
-            usage = data.get("usage") or {}
-            tokens_in, tokens_out = int(usage.get("prompt_tokens", 0)), int(usage.get("completion_tokens", 0))
+            message = data["choices"][0]["message"]
         except (ValueError, LookupError, TypeError) as exc:
             raise ProviderError("malformed body") from exc
-        if not isinstance(text, str):
+        if not isinstance(message, dict):
             raise ProviderError("malformed body")
-        return ChatResult(text, tokens_in, tokens_out, _rate(response))
+        text = message.get("content")  # null when a filter or a refusal left no text: the model's miss
+        counts = _counts(data.get("usage")) or (0, 0)
+        return ChatResult(text if isinstance(text, str) else "", *counts, _rate(response))
 
     async def chat_stream(
         self, model: str, messages: list[dict[str, str]], *, max_tokens: int
@@ -146,13 +146,26 @@ def _stream_chunk(payload: str) -> ChatChunk:
         text = delta.get("content") if isinstance(delta, dict) else None
         text = text if isinstance(text, str) else ""
         usage = data.get("usage")  # some providers send it with the last text, or on every frame
-        if isinstance(usage, dict):
-            tokens_in, tokens_out = usage.get("prompt_tokens"), usage.get("completion_tokens")
-            if isinstance(tokens_in, int) and isinstance(tokens_out, int):  # partial counts are no counts
-                return ChatChunk(text=text, tokens_in=tokens_in, tokens_out=tokens_out)
+        counts = _counts(usage)
+        if counts is not None:
+            return ChatChunk(text=text, tokens_in=counts[0], tokens_out=counts[1])
     except (ValueError, LookupError, TypeError, AttributeError) as exc:
         raise ProviderError("malformed frame") from exc
     return ChatChunk(text=text)
+
+
+def _counts(usage: object) -> tuple[int, int] | None:
+    """Token counts from a `usage` object: a missing count is 0, but a count that isn't a whole number of
+    tokens (a string, a bool, a negative number) makes the object unusable: the caller keeps its estimate."""
+    if not isinstance(usage, dict) or not usage.keys() & {"prompt_tokens", "completion_tokens"}:
+        return None
+    counts = []
+    for key in ("prompt_tokens", "completion_tokens"):
+        value = usage.get(key, 0)
+        if isinstance(value, bool) or not isinstance(value, int | float) or value < 0 or value != int(value):
+            return None
+        counts.append(int(value))
+    return counts[0], counts[1]
 
 
 def _rate(response: httpx.Response) -> RateInfo | None:

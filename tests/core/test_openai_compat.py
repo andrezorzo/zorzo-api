@@ -1,7 +1,8 @@
 """AC6: the OpenAI-compatible adapter reads a stream as providers send it."""
 
 import httpx
-from rag_core.adapters.openai_compat import OpenAICompatProvider
+import pytest
+from rag_core.adapters.openai_compat import OpenAICompatProvider, _counts
 from rag_core.ports import ChatChunk
 
 FRAMES = (
@@ -45,3 +46,32 @@ async def test_null_token_counts_are_no_counts() -> None:
     chunks = [c async for c in provider.chat_stream("m", [{"role": "user", "content": "q"}], max_tokens=5)]
     await provider.close()
     assert chunks == [ChatChunk(text="end")]  # the counts can't be trusted half-way: none are taken
+
+
+async def test_a_completion_with_null_content_or_counts_still_reads() -> None:
+    body = {
+        "choices": [{"message": {"content": None}}],
+        "usage": {"prompt_tokens": None, "completion_tokens": 4},
+    }
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=body))
+    provider = OpenAICompatProvider("https://provider.test/v1", "k", transport=transport)
+    result = await provider.chat("m", [{"role": "user", "content": "q"}], max_tokens=5, schema=None)
+    await provider.close()
+    assert (result.text, result.tokens_in, result.tokens_out) == ("", 0, 0)  # no counts to trust
+
+
+@pytest.mark.parametrize(
+    ("usage", "counts"),
+    [
+        ({"prompt_tokens": 800}, (800, 0)),
+        ({"prompt_tokens": 7.0, "completion_tokens": 2.0}, (7, 2)),
+        ({"prompt_tokens": -500, "completion_tokens": 10}, None),
+        ({"prompt_tokens": True, "completion_tokens": 1}, None),
+        ({"prompt_tokens": "7", "completion_tokens": 1}, None),
+        ({}, None),
+    ],
+)
+def test_token_counts_are_whole_and_non_negative(
+    usage: dict[str, object], counts: tuple[int, int] | None
+) -> None:
+    assert _counts(usage) == counts

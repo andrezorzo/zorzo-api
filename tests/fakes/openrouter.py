@@ -125,8 +125,9 @@ class FakeOpenRouter:
                 yield _frame({"content": "\n"})
                 await asyncio.sleep(60)
                 return
-            if pace == "no_text":  # a role frame, then the end
+            if pace == "no_text":  # a role frame, its usage, then the end
                 yield _frame({"role": "assistant"})
+                yield b'data: {"choices":[],"usage":{"prompt_tokens":800,"completion_tokens":0}}\n\n'
                 yield b"data: [DONE]\n\n"
                 return
             if pace == "reasoning_only":  # thinks for 5 s, never writes
