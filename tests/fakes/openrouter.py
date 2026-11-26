@@ -125,6 +125,7 @@ class FakeOpenRouter:
                     await asyncio.sleep(0.05)
                     thought = {"choices": [{"index": 0, "delta": {"reasoning": "..."}}]}
                     yield f"data: {json.dumps(thought)}\n\n".encode()
+                return
             for n, word in enumerate(words):
                 text = word if n == 0 else " " + word
                 frame = {"choices": [{"index": 0, "delta": {"content": text}}]}

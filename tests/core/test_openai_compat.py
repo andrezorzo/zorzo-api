@@ -24,3 +24,12 @@ async def test_reads_text_usage_and_textless_frames_and_skips_keep_alives() -> N
         ChatChunk(text="Hi"),
         ChatChunk(text=" there", tokens_in=7, tokens_out=2),  # text and usage in one frame
     ]
+
+
+async def test_a_usage_frame_with_an_odd_choice_still_reads() -> None:
+    frames = b'data: {"choices":[null],"usage":{"prompt_tokens":3,"completion_tokens":1}}\n\ndata: [DONE]\n\n'
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=frames))
+    provider = OpenAICompatProvider("https://provider.test/v1", "k", transport=transport)
+    chunks = [c async for c in provider.chat_stream("m", [{"role": "user", "content": "q"}], max_tokens=5)]
+    await provider.close()
+    assert chunks == [ChatChunk(tokens_in=3, tokens_out=1)]

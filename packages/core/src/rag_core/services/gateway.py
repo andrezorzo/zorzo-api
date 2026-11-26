@@ -93,7 +93,8 @@ class _Ticket:
     chain_ends_at: float = math.inf  # a limit the gateway sets on the whole chain (rerank)
     trial: bool = False  # the breaker's half-open trial call
     # False when the call's time ran out for a reason that says nothing about the provider: it had less than
-    # `FAIR_SHARE` of its stage timeout, its stream was still sending, or a slow consumer held the time.
+    # `FAIR_SHARE` of its stage timeout, or its answer had started and was still coming, or a slow consumer
+    # held the time (see `FAIR_SHARE`).
     blame_timeout: bool = True
 
 
@@ -189,6 +190,7 @@ class ModelGateway:
             loop = asyncio.get_running_loop()
             ends_at = loop.time() + self._time_for(ticket)
             last_chunk_at = loop.time()  # the provider's silence is measured from here
+            wrote = False  # the model sent text (not only whitespace)
             chunks: AsyncIterator[ChatChunk] | None = None
             try:
                 chunks = aiter(
@@ -198,7 +200,8 @@ class ModelGateway:
                     # Each read is bounded on its own, never across a `yield`: the consumer's time between
                     # chunks counts toward the end, but a timeout can't fire inside the consumer.
                     if asyncio.get_running_loop().time() >= ends_at:
-                        ticket.blame_timeout = False  # the consumer held the time, not the provider
+                        if wrote:  # the consumer held the time (it only gets it once there is text)
+                            ticket.blame_timeout = False
                         raise TimeoutError
                     async with asyncio.timeout_at(ends_at):
                         chunk = await anext(chunks, None)
@@ -208,10 +211,11 @@ class ModelGateway:
                     if chunk.tokens_in is not None:
                         tokens_in, tokens_out = chunk.tokens_in, chunk.tokens_out or 0
                     if chunk.text:
+                        wrote = wrote or bool(chunk.text.strip())
                         parts.append(chunk.text)
                         yield chunk.text
             except BaseException as exc:
-                if parts and loop.time() - last_chunk_at < FAIR_SHARE * self._timeouts[stage]:
+                if wrote and loop.time() - last_chunk_at < FAIR_SHARE * self._timeouts[stage]:
                     ticket.blame_timeout = False  # the answer was still coming: alive, only long
                 if chunks is not None:
                     await _aclose(chunks)  # the provider's response, not left to the garbage collector

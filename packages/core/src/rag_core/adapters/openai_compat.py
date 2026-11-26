@@ -132,13 +132,18 @@ def _raise_for_status(response: httpx.Response) -> None:
 
 
 def _stream_chunk(payload: str) -> ChatChunk:
-    """One data frame; one without text (a role or reasoning delta) is still a sign the model works."""
+    """One data frame: its text, if any, and its token counts, if any (some providers send them with text).
+
+    A frame without text (a role or reasoning delta) still comes from the model, so it is still a chunk.
+    """
     try:
         data = json.loads(payload)
         if "error" in data:  # OpenRouter reports a mid-stream failure as an error frame
             raise ProviderError("error frame")
         choices = data.get("choices") or []
-        text = (choices[0].get("delta") or {}).get("content") if choices else None
+        choice = choices[0] if isinstance(choices, list) and choices else None
+        delta = choice.get("delta") if isinstance(choice, dict) else None
+        text = delta.get("content") if isinstance(delta, dict) else None
         text = text if isinstance(text, str) else ""
         usage = data.get("usage")  # some providers send it with the last text, or on every frame
         if usage:

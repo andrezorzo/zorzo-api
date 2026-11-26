@@ -148,8 +148,11 @@ class ChatResult:
 
 @dataclass(frozen=True)
 class ChatChunk:
-    """One data frame of a streamed answer: text, the token counts (last), or neither (the model sent a frame
-    with no text, such as reasoning). Every chunk is a sign the model is still working."""
+    """One data frame of a streamed answer: its text, its token counts (usually on the last frame, sometimes
+    with text), or neither (a frame from the model with no text, such as reasoning). After the answer's text
+    has started, any chunk shows the model still working; before it, only text counts (see the gateway's
+    `FAIR_SHARE`).
+    """
 
     text: str = ""
     tokens_in: int | None = None
