@@ -1,7 +1,8 @@
 """The gate (spec, "Modules built"): what a question must pass before the stream opens.
 
 In order: the bot check, the question's normalization, the rate limit (LLD "Security", "6.7 Rate limit").
-Each failure is an `ApiError`, answered as a plain HTTP error; the budget joins in F01-T05.
+Each failure is an `ApiError`, answered as a plain HTTP error. The budget is not a refusal: after the gate,
+the route asks the model gateway for the mode, and a spent budget answers search-only.
 """
 
 import asyncio

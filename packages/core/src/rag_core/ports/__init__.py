@@ -1,10 +1,11 @@
 """Ports: interfaces for what lives outside the core (LLD "Components and dependencies")."""
 
+from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Literal, Protocol
 
 from rag_core.events import StreamEvent
 
@@ -18,9 +19,6 @@ class HealthProbe(Protocol):
 
     async def ping(self) -> None:
         """Raise when the database can't be reached."""
-
-    async def degraded_today(self) -> bool:
-        """Whether today's (UTC) budget row is in degraded mode."""
 
 
 class BotCheck(Protocol):
@@ -99,10 +97,144 @@ class VectorStore(Protocol):
 class Reranker(Protocol):
     """One rerank level; it may raise, and the retrieval service falls to the next level (ADR 0009)."""
 
-    def rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]: ...
+    async def rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]: ...
 
     def warm(self) -> None:
         """Load what the level needs, at startup; may raise."""
+
+
+class ProviderError(Exception):
+    """A model provider failed the call: transport error, 5xx, an unexpected status or a malformed body.
+
+    The message names the kind of failure, never the request or the response body. `refused` is True when
+    the provider turned the call down before running it (a 4xx, a 503); a 502 or 504, a dropped connection
+    or a malformed answer may have run, and billed.
+    """
+
+    def __init__(self, kind: str, refused: bool = False) -> None:
+        super().__init__(kind)
+        self.refused = refused
+
+
+class RateLimited(ProviderError):
+    """The provider answered 429."""
+
+    def __init__(self, kind: str = "http 429") -> None:
+        super().__init__(kind, refused=True)
+
+
+class ContextTooLong(ProviderError):
+    """The provider refused the prompt as longer than the model's context."""
+
+    def __init__(self, kind: str) -> None:
+        super().__init__(kind, refused=True)
+
+
+@dataclass(frozen=True)
+class RateInfo:
+    """A provider's request quota for the day, from its `x-ratelimit-*` headers."""
+
+    remaining: int
+    limit: int
+
+
+@dataclass(frozen=True)
+class ChatResult:
+    text: str
+    tokens_in: int
+    tokens_out: int
+    rate: RateInfo | None = None
+
+
+@dataclass(frozen=True)
+class ChatChunk:
+    """One data frame of a streamed answer: its text, its token counts (usually on the last frame, sometimes
+    with text), or neither (a frame from the model with no text, such as reasoning). After the answer's text
+    has started, any chunk shows the model still working; before it, only text counts (see the gateway's
+    `FAIR_SHARE`).
+    """
+
+    text: str = ""
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+
+
+@dataclass(frozen=True)
+class RerankResult:
+    scores: list[float]  # one per document, in the documents' order
+    rate: RateInfo | None = None
+
+
+class ModelProvider(Protocol):
+    """One OpenAI-compatible endpoint (ADR 0007); failures raise `ProviderError`; the caller bounds time."""
+
+    async def chat(
+        self, model: str, messages: list[dict[str, str]], *, max_tokens: int, schema: dict[str, Any] | None
+    ) -> ChatResult: ...
+
+    def chat_stream(
+        self, model: str, messages: list[dict[str, str]], *, max_tokens: int
+    ) -> AsyncIterator[ChatChunk]: ...
+
+    async def rerank(self, model: str, query: str, documents: list[str]) -> RerankResult: ...
+
+    async def close(self) -> None: ...
+
+
+BudgetState = Literal["normal", "paid_disabled", "degraded"]
+
+
+class Budget(Protocol):
+    """The day's budget row (LLD "6.2 Daily budget"); the rules are the gateway's, the statements are here.
+
+    A store that fails raises `StoreUnavailable`.
+    """
+
+    async def state(self, day: date) -> BudgetState: ...
+
+    async def reserve(self, day: date, estimate: float, cap: float) -> bool:
+        """Add the estimate, and count the call, only when the spend stays within `cap` and the day's paid
+        entries aren't disabled; one statement, so concurrent reservations can't cross the cap."""
+
+    async def settle(self, day: date, delta: float, cutoff: float, cap: float, now: datetime) -> None:
+        """Add `delta` (actual - estimate); set `paid_disabled_at` / `degraded_at` when the settled spend
+        reaches `cutoff` / `cap`."""
+
+
+AlertKind = Literal[
+    "budget_exhausted", "providers_down", "backup_failed", "restore_failed", "eval_regression"
+]
+
+
+class AlertStore(Protocol):
+    """`alert_states` rows (LLD "6.10 Alerts"); a store that fails raises `StoreUnavailable`."""
+
+    async def open(
+        self, kind: AlertKind, now: datetime, remind_before: datetime
+    ) -> Literal["opened", "remind"] | None:
+        """Open the incident, or mark a reminder when the last message is older than `remind_before`; None
+        when the incident is open and was told recently. One conditional statement."""
+
+    async def close(self, kind: AlertKind, now: datetime) -> bool:
+        """Close an open incident; False when none was open."""
+
+
+class Alerter(Protocol):
+    """Delivers one message (Telegram in production, a log line locally); may raise."""
+
+    async def send(self, kind: AlertKind, message: str) -> None: ...
+
+    async def close(self) -> None: ...
+
+
+class EventLog(Protocol):
+    """`log_events` rows for events that belong to no request (breaker transitions)."""
+
+    def write(self, level: str, component: str, event: str, fields: dict[str, Any]) -> None:
+        """Never blocks: the row is written in the background, and a failure is only logged."""
+
+    async def drain(self, timeout: float | None = None) -> None:
+        """Wait for the pending writes, at shutdown and in tests; with `timeout`, cancel what still runs."""
 
 
 @dataclass(frozen=True)
@@ -200,14 +332,28 @@ class SecretScanner(Protocol):
 __all__ = [
     "EMBEDDING_DIM",
     "ActiveCorpus",
+    "AlertKind",
+    "AlertStore",
+    "Alerter",
+    "Budget",
+    "BudgetState",
+    "ChatChunk",
+    "ChatResult",
     "ChunkRow",
+    "ContextTooLong",
     "CorpusStore",
     "DataPublisher",
     "DocumentRow",
     "Embedder",
+    "EventLog",
     "Finding",
     "HealthProbe",
+    "ModelProvider",
+    "ProviderError",
     "PublishedChunk",
+    "RateInfo",
+    "RateLimited",
+    "RerankResult",
     "Reranker",
     "SearchHit",
     "SecretScanner",

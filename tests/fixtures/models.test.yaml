@@ -1,0 +1,26 @@
+# Models config for the tests: every entry points at the fake OpenRouter server (tests/fakes/openrouter.py).
+providers:
+  openrouter:
+    base_url: https://openrouter.test/api/v1
+    key_env: OPENROUTER_API_KEY
+    daily_requests: 10
+stages:
+  route:
+    max_tokens: 100
+    chain:
+      - {provider: openrouter, model: "test/route:free"}
+  rerank:
+    max_tokens: 1
+    chain:
+      - {provider: openrouter, model: "test/rerank:free"}
+  answer:
+    max_tokens: 200
+    chain:
+      - {provider: openrouter, model: "test/answer-a:free"}
+      - {provider: openrouter, model: "test/answer-b:free"}
+      - {provider: openrouter, model: "test/answer-paid", paid: true,
+         price: {input_per_mtok: 1.0, output_per_mtok: 4.0}}
+  judge:
+    max_tokens: 100
+    chain:
+      - {provider: openrouter, model: "test/judge:free"}

@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import anyio
+
 from rag_core.ports import SearchHit
 
 MODEL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
@@ -119,7 +121,12 @@ class LocalReranker:
     def warm(self) -> None:
         self.model()
 
-    def rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
+    async def rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
+        # The cross-encoder is CPU-bound: keep it off the event loop (LLD "Process model").
+        # abandon_on_cancel: the request deadline ends the wait even if the thread can't be stopped.
+        return await anyio.to_thread.run_sync(self._rerank, query, hits, abandon_on_cancel=True)
+
+    def _rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
         if not self._slots.acquire(timeout=LOCK_WAIT_S):
             raise RuntimeError("every rerank slot is busy")
         try:

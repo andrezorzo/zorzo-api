@@ -1,6 +1,8 @@
 """API settings, validated at startup (LLD "Configuration")."""
 
-from pydantic import Field, SecretStr, model_validator
+from pathlib import Path
+
+from pydantic import Field, SecretStr, field_validator, model_validator
 from rag_core.settings import AppSettings
 
 PUBLISHED_LOCAL_SEED = "local-salt-seed-change-me-0123456789"  # infra/.env.example, apps/api/AGENTS.md
@@ -13,6 +15,46 @@ class ApiSettings(AppSettings):
     # test secret.
     turnstile_secret: SecretStr = Field(min_length=1)
     salt_seed: SecretStr = Field(min_length=32, description="Seed of the daily IP salt")
+    # Models config; unset: config/models.yaml, or config/models.local.yaml with APP_ENV=local.
+    models_file: Path | None = None
+    # Model providers: required in production by the providers a chain uses (checked when they are built).
+    openrouter_api_key: SecretStr | None = None
+    groq_api_key: SecretStr | None = None
+    nvidia_api_key: SecretStr | None = None
+    google_ai_api_key: SecretStr | None = None
+    # Alerts (LLD "6.10 Alerts"): required in production; locally the alerter only logs.
+    telegram_bot_token: SecretStr | None = None
+    telegram_chat_id: SecretStr | None = None
+
+    @field_validator(
+        "openrouter_api_key",
+        "groq_api_key",
+        "nvidia_api_key",
+        "google_ai_api_key",
+        "telegram_bot_token",
+        "telegram_chat_id",
+        mode="before",
+    )
+    @classmethod
+    def _blank_is_unset(cls, value: object) -> object:
+        # Compose passes `${VAR:-}` as an empty string when the variable is unset.
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @property
+    def models_path(self) -> Path:
+        if self.models_file is not None:
+            return self.models_file
+        return Path("config/models.local.yaml" if self.app_env == "local" else "config/models.yaml")
+
+    def provider_keys(self) -> dict[str, str | None]:
+        """Each provider key by its variable name, as the models config's `key_env` names it."""
+        keys = {
+            "OPENROUTER_API_KEY": self.openrouter_api_key,
+            "GROQ_API_KEY": self.groq_api_key,
+            "NVIDIA_API_KEY": self.nvidia_api_key,
+            "GOOGLE_AI_API_KEY": self.google_ai_api_key,
+        }
+        return {name: key.get_secret_value() if key else None for name, key in keys.items()}
 
     @model_validator(mode="after")
     def _real_secrets_in_production(self) -> "ApiSettings":
@@ -24,4 +66,6 @@ class ApiSettings(AppSettings):
         # The published local seed would let anyone with the repository reverse the hashed IPs.
         if self.salt_seed.get_secret_value().strip() == PUBLISHED_LOCAL_SEED:
             raise ValueError("SALT_SEED is the published local example; production needs its own secret")
+        if not (self.telegram_bot_token and self.telegram_chat_id):
+            raise ValueError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required in production (alerts)")
         return self

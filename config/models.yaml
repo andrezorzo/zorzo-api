@@ -1,0 +1,34 @@
+# Models config (LLD "Configuration", models config). Provisional chains until the M3 eval matrix: free
+# entries picked from OpenRouter's model list (structured output for route and judge), then one paid entry.
+# Groq, NVIDIA NIM and Google entries join by config once their keys exist (ADR 0007).
+providers:
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    key_env: OPENROUTER_API_KEY
+    daily_requests: 1000  # free requests per UTC day after the one-time US$10 credit
+stages:
+  route:
+    max_tokens: 200
+    chain:
+      - {provider: openrouter, model: "nvidia/nemotron-3.5-super-vl:free"}
+      - {provider: openrouter, model: "inclusionai/ling-3.2-flash:free"}
+      - {provider: openrouter, model: "mistralai/mistral-small-24b-instruct-2501", paid: true,
+         price: {input_per_mtok: 0.05, output_per_mtok: 0.08}}
+  rerank:
+    max_tokens: 1  # a rerank call writes no text
+    chain:
+      - {provider: openrouter, model: "nvidia/nemotron-3.5-rerank-8b:free"}
+  answer:
+    max_tokens: 700
+    chain:
+      - {provider: openrouter, model: "google/gemma-4-31b-it:free"}
+      - {provider: openrouter, model: "nvidia/nemotron-3.5-super-vl:free"}
+      - {provider: openrouter, model: "mistralai/mistral-small-24b-instruct-2501", paid: true,
+         price: {input_per_mtok: 0.05, output_per_mtok: 0.08}}
+  judge:
+    max_tokens: 300
+    chain:
+      - {provider: openrouter, model: "nvidia/nemotron-3.5-super-vl:free"}
+      - {provider: openrouter, model: "inclusionai/ling-3.2-flash:free"}
+      - {provider: openrouter, model: "mistralai/mistral-small-24b-instruct-2501", paid: true,
+         price: {input_per_mtok: 0.05, output_per_mtok: 0.08}}

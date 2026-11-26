@@ -5,12 +5,15 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
 from rag_api.main import create_app
 from rag_api.settings import PUBLISHED_LOCAL_SEED
+from rag_core.adapters.factory import ConfigError
 from rag_core.domain import DomainError
+from rag_core.models_config import config_version, load_models
 
 from tests.conftest import api_settings
 from tests.fakes.turnstile import PASS_SECRET
@@ -112,6 +115,46 @@ def test_refuses_the_published_salt_seed_in_production(database_url: str) -> Non
             turnstile_secret="0x4AAAAAAAreal-looking-secret",
             salt_seed="local-salt-seed-change-me-0123456789",
         )
+
+
+ROOT = Path(__file__).resolve().parents[2]
+PRODUCTION: dict[str, Any] = {
+    "app_env": "production",
+    "turnstile_secret": "0x4AAAAAAAreal-looking-secret",
+    "salt_seed": "a-production-seed-that-is-long-enough",
+    "telegram_bot_token": "123:abc",
+    "telegram_chat_id": "42",
+    "models_file": ROOT / "config/models.yaml",
+    "embedder": "ollama",
+    "reranker": "local",
+}
+
+
+def test_refuses_a_provider_without_its_key_in_production(database_url: str) -> None:
+    settings = api_settings(database_url, **{**PRODUCTION, "openrouter_api_key": None})
+    with pytest.raises(ConfigError, match="OPENROUTER_API_KEY"):
+        create_app(settings)
+    assert create_app(api_settings(database_url, **PRODUCTION)).state.gateway  # with the key, it starts
+
+
+def test_refuses_production_without_telegram(database_url: str) -> None:
+    with pytest.raises(ValidationError, match="TELEGRAM"):
+        api_settings(database_url, **{**PRODUCTION, "telegram_chat_id": None})
+
+
+def test_local_profile_loads_models_local_yaml(database_url: str) -> None:
+    app = create_app(api_settings(database_url, models_file=None))
+    models = load_models(ROOT / "config/models.local.yaml")
+    assert app.state.gateway.config == models
+    assert app.state.model_config_version == config_version(models, app.state.limits)
+
+
+def test_refuses_an_invalid_models_file(database_url: str, tmp_path: Path) -> None:
+    bad = tmp_path / "models.yaml"
+    bad.write_text("providers: {}\nstages: {}\n")
+    result = _start({"DOMAIN": "zorzo", "DATABASE_URL": database_url, "MODELS_FILE": str(bad)})
+    assert result.returncode == 1
+    assert "refusing to start" in result.stderr
 
 
 def test_the_guarded_seed_is_the_published_example() -> None:

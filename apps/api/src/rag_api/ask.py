@@ -9,6 +9,7 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 from rag_core.errors import ApiError, ErrorCode
 from rag_core.events import Done, StreamEvent
+from rag_core.ports import StoreUnavailable
 from rag_core.services import corpus as corpus_service
 from rag_core.services.client_ip import VIEWER_HEADER
 from rag_core.services.gate import Asker
@@ -45,9 +46,24 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
     loop = asyncio.get_running_loop()
     deadline_at = loop.time() + state.limits.request_deadline
     question = await state.gate.check(body.q, body.turnstile, asker, deadline_at)
-    left = deadline_at - loop.time()
-    if left <= 0:  # the gate finished on the deadline: nothing left for the answer
+    if deadline_at - loop.time() <= 0:  # the gate finished on the deadline: nothing left for the answer
         log.warning("deadline_exceeded", stage="after_gate")
+        raise ApiError(ErrorCode.UNAVAILABLE)
+    # Whether the models can answer now (LLD "6.2 Daily budget", "6.6 Circuit breaker", "6.8 Free quota").
+    try:
+        async with asyncio.timeout_at(deadline_at):
+            reason = await state.gateway.mode()
+    except StoreUnavailable as exc:
+        log.error("mode_check_failed", error=type(exc).__name__)
+        raise ApiError(ErrorCode.UNAVAILABLE) from exc
+    except TimeoutError as exc:
+        log.warning("deadline_exceeded", stage="mode")
+        raise ApiError(ErrorCode.UNAVAILABLE) from exc
+    # In a degraded mode the question makes no model call: the rerank chain is the local level only.
+    rerankers = state.rerankers if reason is None else state.local_rerankers
+    left = deadline_at - loop.time()
+    if left <= 0:
+        log.warning("deadline_exceeded", stage="mode")
         raise ApiError(ErrorCode.UNAVAILABLE)
     corpus = await corpus_service.servable(state.vector_store, state.embedder.tag, left)
     trace_id: str = request.state.trace_id
@@ -65,8 +81,10 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                     sink=sink,
                     embedder=state.embedder,
                     store=state.vector_store,
-                    rerankers=state.rerankers,
+                    rerankers=rerankers,
                     limits=state.limits,
+                    # Until the agent graph exists (F01-T06), normal mode is search-only too.
+                    reason=reason or "models_unavailable",
                     deadline_at=deadline_at,
                 )
             except Exception:

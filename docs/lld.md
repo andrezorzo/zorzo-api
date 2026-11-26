@@ -1,6 +1,6 @@
 # LLD — zorzo.dev.br (zorzo-api)
 
-2026-11-25 · André de Castro Zorzo · Status: draft · HLD: [hld.md](hld.md)
+2026-11-26 · André de Castro Zorzo · Status: draft · HLD: [hld.md](hld.md)
 
 Scope: the `zorzo-api` repository. The front (`zorzo-site`) keeps its own LLD for rendering and the 3D brain;
 section 8 here covers only how the front behaves against the API, plus the dashboard pages.
@@ -16,7 +16,7 @@ Status labels used below: **existing**, **planned**, **to detail** (named, behav
 | Database schema | Django migrations in `apps/dashboard/data/migrations/` |
 | Environment variables (type, required, default) | Each app's settings class: `AppSettings` in core and its subclasses in the API and ingest; the dashboard's Django settings |
 | Rule values | `config/limits.yaml`; values decided in section 9 of this document |
-| Model and rerank chains | `config/models.yaml`, `config/models.local.yaml` (planned); schema in section 3 "Configuration" |
+| Model and rerank chains | `config/models.yaml`, `config/models.local.yaml`; schema in section 3 "Configuration" |
 | Commands and project practices | `README.md`, `AGENTS.md` |
 | Where each piece of code lives, and why | `docs/code-map.md` (planned; also a corpus source) |
 | Front rendering, the 3D brain and its data | `zorzo-site`'s `docs/lld.md` |
@@ -37,7 +37,9 @@ zorzo-api/
   packages/core/        generic core: retrieval, model gateway, agent graph, verification,
                         guard, telemetry, ingest pipeline, eval harness; ports and adapters   (existing: settings,
                         errors, health, events, retrieval, search-only answer, ingest
-                        pipeline, Postgres/Ollama/rerank/gitleaks/publisher adapters)
+                        pipeline, model gateway, budget, breakers, quota, alerts,
+                        Postgres/Ollama/rerank/gitleaks/publisher/OpenAI-compatible/
+                        Telegram adapters)
   apps/api/             FastAPI: HTTP routes, SSE, gate; wires core + domain at startup      (existing: healthz, ask)
   apps/dashboard/       Django: public /dash pages, the `data` app (schema owner), commands    (existing: schema)
   apps/ingest/          one-shot job: runs the core ingest pipeline for a domain              (existing)
@@ -45,11 +47,12 @@ zorzo-api/
                         examples.yaml, prompts/, intents.yaml, tools/, evals/ (datasets),
                         loaders.yaml, public.yaml                                             (existing: domain.yaml,
                                                                                               corpus/, examples.yaml)
-  config/               models.yaml, models.local.yaml, limits.yaml                           (existing: limits.yaml)
+  config/               models.yaml, models.local.yaml, limits.yaml                           (existing)
   contracts/            sse-v1.schema.json, openapi.json snapshot                             (existing: sse-v1)
   infra/                terraform/, compose files, Caddyfiles, systemd units and timers       (existing: compose,
                         Dockerfile)
-  tests/fakes/          fake OpenRouter server, fake tools                                    (planned)
+  tests/fakes/          fake OpenRouter server, fake tools                                    (existing: OpenRouter,
+                                                                                              Turnstile, alerter)
   docs/                 HLD, LLD, ADRs, PRDs, specs, tasks, code map (planned)                 (existing)
 ```
 
@@ -146,7 +149,7 @@ connection; the domain is chosen by `DOMAIN` and loaded by the apps, never by `c
 | EventLog | `write` | Level, component, event, fields | — | One `log_events` row, written in the background; never blocks the caller |
 | DataPublisher | `publish` | Brain and corpus data for a version | Manifest | S3 adapter writes `data/<hash>/` and invalidates only the manifest; local adapter writes a folder the local Caddy serves |
 
-Core modules: Retrieval and Ingest pipeline **existing**; Gate, Guard, Agent graph, Verification, Model gateway,
+Core modules: Retrieval, Ingest pipeline and Model gateway **existing**; Gate, Guard, Agent graph, Verification,
 Telemetry and Eval harness **planned**. Responsibilities: HLD section "Architecture" (core and domain). Tools are
 domain pieces, not ports (section 6.5).
 
@@ -187,7 +190,7 @@ domain pieces, not ports (section 6.5).
   that takes a token only where one is left, so concurrent requests from the same key can't both pass
   (section 6.7).
 - **Budget, reserve then settle:** before a paid call, one conditional
-  `UPDATE … WHERE cost_usd + estimate <= cap` reserves the estimate; after the call, the row is corrected by
+  `INSERT … ON CONFLICT DO UPDATE … WHERE cost_usd + estimate <= cap` reserves the estimate; after the call, the row is corrected by
   `actual − estimate`. Two concurrent requests can't both cross the cap. The estimate rule is in section 6.2.
 - **Ingest:** a Postgres advisory lock (`pg_try_advisory_lock`) allows one run at a time, and a second run
   exits at once instead of waiting; chunks upsert by content hash with `ON CONFLICT DO NOTHING`.
@@ -258,6 +261,13 @@ domain pieces, not ports (section 6.5).
   `price` (`input_per_mtok`, `output_per_mtok`, US$ per million tokens). Only `rerank` may have an empty
   chain. In production every provider a chain uses needs its key, or the app doesn't start. Other model
   calls of the graph map onto these stages (`assess` and `reformulate` to `route`, `repair` to `answer`).
+- **Database bounds:** the short statements of the gateway (budget reserve and settle, alert state, event
+  rows) run in a transaction that sets Postgres `statement_timeout` and `lock_timeout` to
+  `SHORT_STATEMENT_TIMEOUT`; the server ends a stuck statement, so there is no client-side timeout to cancel
+  half-way. TCP keepalives and `tcp_user_timeout` end a connection to a dead server in seconds, and a request
+  waits at most `POOL_WAIT` for a pooled connection.
+- **Shutdown:** the gateway drains its background work (reservation releases, alerts, event rows) within
+  `SHUTDOWN_DRAIN`, then cancels what is left and logs it, so a stuck write never holds the process.
 
 ## 4. Data
 
@@ -450,9 +460,15 @@ States of the day's budget row; the day is UTC, so every visitor sees the same "
 - Reserve, then settle (section 3). The estimate is `prompt_tokens × input_price + max_tokens × output_price`,
   with `prompt_tokens` counted as `ceil(characters / 3)` (conservative for English and Portuguese, no
   tokenizer). If it doesn't fit in what is left, the call doesn't happen and the next chain entry, or
-  search-only, takes over. A failed call settles with actual 0, releasing its reservation.
+  search-only, takes over.
+- **Settle:** a call the provider refused (a 3xx or 4xx other than 408, a 503, a 429, context too long)
+  settles at 0. Any other failure (timeout, 500, 502, 504, a dropped connection, the request cancelled) keeps
+  its estimate, because the provider may have billed it; a success without usage counts also keeps the
+  estimate.
+- The reservation is shielded from cancellation: a request that leaves while reserving still gets an answer
+  from the database, and a reservation that landed after the caller left is released in the background.
 - The state moves on settle: when the settled spend crosses the cutoff, `paid_disabled_at` is set; at the cap,
-  `degraded_at`. A reservation needs `paid_disabled_at` empty. `requests` counts paid calls.
+  `degraded_at`. A reservation needs `paid_disabled_at` empty. `requests` counts reservations.
 - Per-request ceiling `REQUEST_COST_CAP_USD`: before each model call, if the estimate doesn't fit in what the
   request has left, the agent answers with what it has.
 - Free calls cost 0 in this table; their limit is the quota (section 6.8).
@@ -546,12 +562,21 @@ stateDiagram-v2
 States of one chain entry's breaker; it lives in the API process memory.
 
 - An open breaker skips its chain entry without waiting for a timeout.
-- Failures: a timeout, a transport error, a 5xx or a malformed body counts toward `BREAKER_FAILURES`; a 429
-  opens the breaker at once. Each falls to the next entry; there is no same-entry retry (the next entry is
-  the retry). Output that parses but fails the requested schema is retried once on the same entry, then
-  falls through, and never counts: the provider works, the model missed.
+- Failures: a transport error, a 5xx, a malformed body or frame, content that isn't a string, or an error
+  choice counts toward `BREAKER_FAILURES`; a 429 opens the breaker at once. Each falls to the next entry;
+  there is no same-entry retry (the next entry is the retry).
+- **Model misses never count:** output that parses but fails the requested schema is retried once on the same
+  entry, then falls through; an empty answer, or a stream that ends cleanly with no text, falls through at
+  once. The provider works, the model missed.
+- **Blame for a timeout:** it counts only when the entry was granted at least `BREAKER_FAIR_SHARE` of the
+  stage timeout and either no real text was sent yet, or the model was silent for at least
+  `BREAKER_FAIR_SHARE` of the stage timeout after its last data frame. Any data frame from the model is a sign
+  of life; an aggregator's keep-alive comment is not; leading whitespace is held back until real text
+  arrives. A slow consumer is never blamed. Owner's decision: a short grant or a model that was still writing
+  says nothing about the provider.
 - Half-open lets exactly one trial call through; other calls skip the entry until it ends.
-- Each entry gets `min(TIMEOUT_<STAGE>, time left)`; an entry with no time left is not tried.
+- Each entry gets `min(TIMEOUT_<STAGE>, time left)`; an entry with no time left is not tried. The `rerank`
+  chain shares one `TIMEOUT_RERANK` for all its entries.
 - Every transition is written to `log_events`; `/dash/` shows the latest state per provider.
 - In-memory state is correct because the API runs as one process (section 6.3, "Process model").
 
@@ -614,8 +639,12 @@ Kinds: `site_down`, `budget_exhausted`, `providers_down`, `backup_failed`, `rest
   API, so it arrives when the VPS is down; it has no row in `alert_states`.
   `budget_exhausted` and `providers_down` are detected by the API during requests. The other three come from
   the background tasks (section 7).
-- `budget_exhausted` opens when the gateway sees the day `degraded` and closes on the first check of a new UTC
-  day; `providers_down` opens when every `answer` entry's breaker is open and closes when one closes.
+- `budget_exhausted` opens when the gateway sees the day `paid_disabled` (owner's decision: the owner hears at
+  the paid cutoff, while free entries still answer), escalates when the day reaches `degraded`, and closes on
+  the first check of a new UTC day; `providers_down` opens when every `answer` entry's breaker is open and
+  closes when one closes.
+- A condition is checked against `alert_states` at most once per `ALERT_CHECK_INTERVAL` per kind, so an
+  escalation is sent within that interval. A restart forgets what was sent and may repeat one message.
 - An alerts service in core owns these rules over `alert_states`; the Alerter only delivers (Telegram in
   production, a log line locally). Sending runs in the background with a short timeout and never fails a
   request; messages carry the kind and counts, never visitor data.
@@ -739,6 +768,7 @@ endpoints and per-environment switches.
 | `REQUEST_COST_CAP_USD` | 0.01 | Per request | `limits.yaml` |
 | `QUOTA_WARN` | 80% | Free-quota saving steps | `limits.yaml` |
 | `BREAKER_FAILURES` / `BREAKER_WINDOW` / `BREAKER_COOLDOWN` | 5 / 60 s / 60 s | Circuit breaker | `limits.yaml` |
+| `BREAKER_FAIR_SHARE` | 50% | Timeout blame (section 6.6) | Code (`services/gateway.py`) |
 | `CACHE_SIMILARITY` | 0.95 | Answer cache | `limits.yaml` |
 | `CACHE_TTL` | 60 days | Answer cache | `limits.yaml` |
 | `DEGRADED_MAX_PASSAGES` | 6 | Passages shown in search-only mode | `limits.yaml` |
@@ -749,6 +779,9 @@ endpoints and per-environment switches.
 | `RETENTION_RETIRED_VERSIONS` | 30 days | Retired and rejected versions | `limits.yaml` |
 | `BACKUP_RETENTION` | 14 days | Backup bucket lifecycle | Terraform |
 | `ALERT_REPEAT_AFTER` | 12 h | Alert reminders | `limits.yaml` |
+| `ALERT_CHECK_INTERVAL` | 60 s | Per-kind alert check (section 6.10) | Code (`services/alerts.py`) |
+| `SHORT_STATEMENT_TIMEOUT` / `POOL_WAIT` | 2 s / 5 s | Database bounds (section 3 "Configuration") | Code (`adapters/postgres.py`) |
+| `SHUTDOWN_DRAIN` | 6 s | Gateway background work at shutdown | Code (`services/gateway.py`) |
 | `SNAPSHOT_INTERVAL` | 15 min | Snapshot pull timer | systemd timer |
 | `GITHUB_CACHE_TTL` | 10 min | `github_activity` | `limits.yaml` |
 | `GITHUB_COMMITS_MAX` | 3 | `github_activity` | `limits.yaml` |
@@ -835,4 +868,8 @@ Architecture decisions (0001–0011) are indexed in the HLD.
   2026-11-25; the response carries no rate-limit headers.
 - [ ] Charts library for the dashboard.
 - [ ] Eval harness: dataset format, metrics per layer, noise-band rule: to detail.
+- [ ] Local profile address of Ollama: `models.local.yaml` uses `localhost`, while compose services use
+  `ollama:11434`; to settle in F01-T06.
+- [ ] A model that always answers empty or always misses the schema never opens its breaker: revisit with the
+  eval matrix at M3.
 - [ ] Production restart policy: the API fails fast when Postgres is not ready at boot (Database), so the production compose needs `restart: unless-stopped` and a start order; to settle with the deploy feature.
