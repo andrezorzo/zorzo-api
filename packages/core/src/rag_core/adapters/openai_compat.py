@@ -7,6 +7,7 @@ prompt or the response body.
 """
 
 import json
+import math
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -62,9 +63,9 @@ class OpenAICompatProvider:
             raise ProviderError("malformed body") from exc
         if not isinstance(message, dict):
             raise ProviderError("malformed body")
-        text = message.get("content")  # null when a filter or a refusal left no text: the model's miss
+        text = _content(message)
         counts = _counts(data.get("usage")) or (0, 0)
-        return ChatResult(text if isinstance(text, str) else "", *counts, _rate(response))
+        return ChatResult(text, *counts, _rate(response))
 
     async def chat_stream(
         self, model: str, messages: list[dict[str, str]], *, max_tokens: int
@@ -154,15 +155,37 @@ def _stream_chunk(payload: str) -> ChatChunk:
     return ChatChunk(text=text)
 
 
+def _content(message: dict[str, Any]) -> str:
+    """A message's text: null (a filter or a refusal left none) is "", the model's miss; a list of content
+    parts is joined; a missing key or another type is a malformed body, the provider's failure."""
+    if "content" not in message:
+        raise ProviderError("malformed body")
+    content = message["content"]
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list) and all(isinstance(p, dict) for p in content):
+        return "".join(
+            p["text"] for p in content if p.get("type") == "text" and isinstance(p.get("text"), str)
+        )
+    raise ProviderError("malformed body")
+
+
+MAX_TOKEN_COUNT = 10_000_000  # far past any context: a larger count is a provider bug, not a bill
+
+
 def _counts(usage: object) -> tuple[int, int] | None:
-    """Token counts from a `usage` object: a missing count is 0, but a count that isn't a whole number of
-    tokens (a string, a bool, a negative number) makes the object unusable: the caller keeps its estimate."""
-    if not isinstance(usage, dict) or not usage.keys() & {"prompt_tokens", "completion_tokens"}:
+    """Both token counts of a `usage` object, or None when either is missing or isn't a whole, finite,
+    plausible number of tokens: the caller then keeps its estimate, never a count that bills too little."""
+    if not isinstance(usage, dict):
         return None
     counts = []
     for key in ("prompt_tokens", "completion_tokens"):
-        value = usage.get(key, 0)
-        if isinstance(value, bool) or not isinstance(value, int | float) or value < 0 or value != int(value):
+        value = usage.get(key)
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return None
+        if not math.isfinite(value) or not 0 <= value <= MAX_TOKEN_COUNT or value != int(value):
             return None
         counts.append(int(value))
     return counts[0], counts[1]

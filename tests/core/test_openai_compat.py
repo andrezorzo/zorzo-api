@@ -3,7 +3,7 @@
 import httpx
 import pytest
 from rag_core.adapters.openai_compat import OpenAICompatProvider, _counts
-from rag_core.ports import ChatChunk
+from rag_core.ports import ChatChunk, ProviderError
 
 FRAMES = (
     b": OPENROUTER PROCESSING\n\n"
@@ -63,7 +63,9 @@ async def test_a_completion_with_null_content_or_counts_still_reads() -> None:
 @pytest.mark.parametrize(
     ("usage", "counts"),
     [
-        ({"prompt_tokens": 800}, (800, 0)),
+        ({"prompt_tokens": 800}, None),  # half the counts would bill too little
+        ({"prompt_tokens": float("inf"), "completion_tokens": 1}, None),
+        ({"prompt_tokens": 10**15, "completion_tokens": 1}, None),
         ({"prompt_tokens": 7.0, "completion_tokens": 2.0}, (7, 2)),
         ({"prompt_tokens": -500, "completion_tokens": 10}, None),
         ({"prompt_tokens": True, "completion_tokens": 1}, None),
@@ -75,3 +77,40 @@ def test_token_counts_are_whole_and_non_negative(
     usage: dict[str, object], counts: tuple[int, int] | None
 ) -> None:
     assert _counts(usage) == counts
+
+
+@pytest.mark.parametrize(
+    ("message", "text"),
+    [
+        ({"content": None}, ""),
+        (
+            {
+                "content": [
+                    {"type": "text", "text": "an"},
+                    {"type": "image"},
+                    {"type": "text", "text": "swer"},
+                ]
+            },
+            "answer",
+        ),
+    ],
+)
+async def test_reads_null_and_part_list_content(message: dict[str, object], text: str) -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"choices": [{"message": message}]})
+    )
+    provider = OpenAICompatProvider("https://provider.test/v1", "k", transport=transport)
+    result = await provider.chat("m", [{"role": "user", "content": "q"}], max_tokens=5, schema=None)
+    await provider.close()
+    assert result.text == text
+
+
+@pytest.mark.parametrize("message", [{}, {"content": 7}, {"content": {"text": "x"}}])
+async def test_a_malformed_message_is_the_providers_failure(message: dict[str, object]) -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"choices": [{"message": message}]})
+    )
+    provider = OpenAICompatProvider("https://provider.test/v1", "k", transport=transport)
+    with pytest.raises(ProviderError):
+        await provider.chat("m", [{"role": "user", "content": "q"}], max_tokens=5, schema=None)
+    await provider.close()
