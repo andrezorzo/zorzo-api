@@ -10,7 +10,7 @@ from decimal import Decimal
 
 from sqlalchemy import text
 
-from rag_core.adapters.postgres import Database, store_errors
+from rag_core.adapters.postgres import Database
 from rag_core.ports import BudgetState
 
 STATE = text("""
@@ -48,8 +48,8 @@ class PostgresBudget:
         self.db = db
 
     async def state(self, day: date) -> BudgetState:
-        # One read, on every question: no transaction or bounds around it (its callers bound the time).
-        async with store_errors(), self.db.engine.connect() as conn:
+        # Bounded like a write: a lock on the table (a migration) fails this in seconds, not at the deadline.
+        async with self.db.short_transaction() as conn:
             found = (await conn.execute(STATE, {"day": day})).scalar()
         return found or "normal"
 

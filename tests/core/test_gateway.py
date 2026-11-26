@@ -416,9 +416,29 @@ async def test_a_later_rerank_entry_with_most_of_the_time_is_blamed(rig: Rig) ->
     assert not rig.gateway.breakers.callable(("openrouter", "test/rerank-b:free"))
 
 
-async def test_the_callers_deadline_never_blames_the_provider_even_with_most_of_the_timeout(rig: Rig) -> None:
+async def test_a_call_with_most_of_its_timeout_is_blamed_whatever_cut_it(rig: Rig) -> None:
     rig = with_limits(rig, timeout_answer=0.2, breaker_failures=1)
     rig.fake.script(A, "hang")
     with pytest.raises(ModelsUnavailable):
         await rig.complete(deadline_at=rig.deadline(0.15))  # 75% of the stage timeout, cut by the caller
-    assert rig.gateway.breakers.closed(("openrouter", A))
+    assert not rig.gateway.breakers.callable(("openrouter", A))  # failing to answer in 75% counts
+
+
+async def test_a_reservation_its_caller_left_is_given_back(rig: Rig) -> None:
+    budget = rig.gateway.budget
+    real_reserve = budget.reserve
+
+    async def slow_reserve(*args: Any) -> bool:
+        await asyncio.sleep(0.1)  # the commit lands after the caller has left
+        return await real_reserve(*args)
+
+    budget.reserve = slow_reserve  # type: ignore[method-assign,assignment]
+    rig.fake.script(A, "error")
+    rig.fake.script(B, "error")
+    task = asyncio.create_task(rig.complete())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await rig.gateway.drain()
+    assert rig.spent_today() == 0.0

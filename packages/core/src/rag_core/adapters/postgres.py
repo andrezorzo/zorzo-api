@@ -16,6 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_en
 from rag_core.ports import StoreUnavailable
 
 CONNECT_TIMEOUT_S = 5
+DEAD_SOCKET_MS = 10_000  # unacknowledged data for this long ends the connection
+POOL_WAIT_S = 5
 PROBE_TIMEOUT_S = 2.0
 # A short statement (a budget row, an alert row, a log row) that takes seconds is stuck: Postgres ends a
 # statement or lock wait past this. No client-side timeout: one could cut a COMMIT the server already did.
@@ -44,7 +46,18 @@ class Database:
             pool_pre_ping=True,
             # Errors would otherwise quote bound values, such as the visitor's question, into the logs.
             hide_parameters=True,
-            connect_args={"connect_timeout": CONNECT_TIMEOUT_S},
+            # A connection that stops answering (a half-open socket, a partition) fails in seconds instead of
+            # hanging a statement for good: TCP keepalives and libpq's user timeout. Waiting for a pooled
+            # connection is bounded too.
+            connect_args={
+                "connect_timeout": CONNECT_TIMEOUT_S,
+                "keepalives": 1,
+                "keepalives_idle": 5,
+                "keepalives_interval": 2,
+                "keepalives_count": 2,
+                "tcp_user_timeout": DEAD_SOCKET_MS,
+            },
+            pool_timeout=POOL_WAIT_S,
         )
         self.metadata = MetaData()
 

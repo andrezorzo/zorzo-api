@@ -38,11 +38,13 @@ from rag_core.services.quota import Quota
 log = structlog.get_logger()
 
 CHARS_PER_TOKEN = 3  # conservative for English and Portuguese, no tokenizer (LLD "6.2 Daily budget")
-# A timeout counts toward the breaker only when the entry had at least this share of its stage timeout: with
-# less, the earlier entries of the chain ran it out, not the provider.
+# A timeout counts toward the breaker when the call had at least this share of its stage timeout, whatever
+# limit ended it (the stage timeout, the rerank chain's, the caller's deadline): a provider that can't answer
+# in half its timeout is failing. With less, the time ran out before the provider had its chance.
 FAIR_SHARE = 0.5
-# The background work gets this long at shutdown, all of it: Docker kills the container 10 s after SIGTERM.
-SHUTDOWN_DRAIN_S = 7.0
+# The background work gets this long at shutdown, all of it, plus a short wait for what it cancels (three
+# kinds of work, `CANCEL_WAIT_S` each): Docker kills the container 10 s after SIGTERM.
+SHUTDOWN_DRAIN_S = 6.0
 
 
 class ModelsUnavailable(Exception):
@@ -303,11 +305,8 @@ class ModelGateway:
         """`min(TIMEOUT_<STAGE>, time left)`; notes on the ticket whether its timeout is the provider's."""
         now = asyncio.get_running_loop().time()
         timeout = self._timeouts[ticket.stage]
-        own_end = min(now + timeout, ticket.chain_ends_at)
-        granted = min(own_end, ticket.deadline_at) - now
-        # The provider's fault only when the gateway's own limit ended the call (never the caller's
-        # deadline) and the call had a fair share of its stage timeout.
-        ticket.blame_timeout = own_end <= ticket.deadline_at and granted >= FAIR_SHARE * timeout
+        granted = min(now + timeout, ticket.chain_ends_at, ticket.deadline_at) - now
+        ticket.blame_timeout = granted >= FAIR_SHARE * timeout
         return granted
 
     def _out_of_time(self, deadline_at: float) -> bool:
@@ -356,8 +355,13 @@ class ModelGateway:
             log.info("model_entry_skipped", stage=stage, model=entry.model, why="request_cap")
             return False
         day = self.clock().date()
+        # Shielded: a caller that leaves mid-reserve must not leave a committed reservation nobody settles.
+        reserving = asyncio.ensure_future(self.budget.reserve(day, estimate, self.limits.daily_budget_usd))
         try:
-            reserved = await self.budget.reserve(day, estimate, self.limits.daily_budget_usd)
+            reserved = await asyncio.shield(reserving)
+        except asyncio.CancelledError:
+            self._background.spawn(self._release_if_reserved(reserving, day, estimate))
+            raise
         except StoreUnavailable as exc:  # no reservation, no paid call
             log.error("budget_reserve_failed", error=str(exc))
             return False
@@ -422,18 +426,27 @@ class ModelGateway:
             await self._settle(ticket, cost)
         return cost
 
+    async def _release_if_reserved(
+        self, reserving: "asyncio.Future[bool]", day: date, estimate: float
+    ) -> None:
+        """A reservation its caller left before it answered: give the estimate back if it was taken."""
+        try:
+            reserved = await reserving
+        except StoreUnavailable:
+            return
+        if reserved:
+            await self._settle_row(day, -estimate)
+
     async def _settle(self, ticket: _Ticket, actual: float) -> None:
         ticket.spend.spent += actual - ticket.estimate
-        if ticket.day is None:
-            return
+        if ticket.day is not None:
+            await self._settle_row(ticket.day, actual - ticket.estimate)
+
+    async def _settle_row(self, day: date, delta: float) -> None:
         lim = self.limits
         try:
             await self.budget.settle(
-                ticket.day,
-                actual - ticket.estimate,
-                lim.budget_paid_cutoff * lim.daily_budget_usd,
-                lim.daily_budget_usd,
-                self.clock(),
+                day, delta, lim.budget_paid_cutoff * lim.daily_budget_usd, lim.daily_budget_usd, self.clock()
             )
         except StoreUnavailable as exc:
             log.error("budget_settle_failed", error=str(exc))
