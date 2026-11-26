@@ -92,7 +92,7 @@ def create_app(settings: ApiSettings) -> FastAPI:
     app.state.gateway, app.state.model_config_version = _gateway(settings, limits, db)
     # Degraded questions use the local levels only, so they make no model call.
     app.state.local_rerankers = build_rerankers(settings)
-    app.state.rerankers = rerank_chain(app.state.gateway, app.state.local_rerankers, limits)
+    app.state.rerankers = rerank_chain(app.state.gateway, app.state.local_rerankers)
     app.state.vector_store = PgVectorStore(db, limits.rrf_k, limits.search_min_similarity)
     app.state.gate = Gate(
         TurnstileBotCheck(settings.turnstile_secret.get_secret_value(), limits.timeout_turnstile),

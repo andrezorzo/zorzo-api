@@ -306,3 +306,42 @@ async def test_a_paid_call_that_may_have_run_keeps_its_estimate(rig: Rig) -> Non
         await rig.complete()
     prompt_tokens = -(-len(MESSAGES[0]["content"]) // 3)
     assert rig.spent_today() == pytest.approx((prompt_tokens * 1.0 + 200 * 4.0) / 1e6, abs=1e-6)
+
+
+async def test_a_cancel_while_reserving_leaves_the_trial_free(rig: Rig) -> None:
+    key = ("openrouter", PAID)
+    rig.gateway.breakers.failure(key, rate_limited=True)
+    rig.gateway.breakers.clock = lambda: 10**9  # the cooldown has passed
+    entry = CONFIG.stage("answer").chain[2]
+
+    async def hang(*args: Any) -> bool:
+        await asyncio.sleep(60)
+        return True
+
+    rig.gateway.budget.reserve = hang  # type: ignore[method-assign,assignment]
+    task = asyncio.create_task(rig.gateway._take("answer", entry, 10, rig.deadline(), RequestSpend(0.01)))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert rig.gateway.breakers.callable(key)  # the next call may take the trial
+
+
+async def test_a_hanging_remote_rerank_opens_its_breaker(rig: Rig) -> None:
+    rig = with_limits(rig, timeout_rerank=0.05, breaker_failures=2)
+    rig.fake.always("test/rerank:free", "hang")
+    for _ in range(2):
+        with pytest.raises(ModelsUnavailable):
+            await rig.gateway.rerank("q", ["a", "b"])
+    assert not rig.gateway.breakers.callable(("openrouter", "test/rerank:free"))
+
+
+async def test_the_alert_says_when_the_paid_cutoff_becomes_search_only(rig: Rig) -> None:
+    rig.seed_budget(0.08, paid_disabled=True)
+    await rig.gateway.mode()
+    await rig.gateway.drain()
+    rig.seed_budget(0.10, paid_disabled=True, degraded=True)
+    await rig.gateway.mode()
+    await rig.gateway.drain()
+    messages = [m for _, m in rig.alerter.sent]
+    assert len(messages) == 2 and messages[1].startswith("now: ") and "search-only" in messages[1]

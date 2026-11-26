@@ -62,6 +62,9 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
     # In a degraded mode the question makes no model call: the rerank chain is the local level only.
     rerankers = state.rerankers if reason is None else state.local_rerankers
     left = deadline_at - loop.time()
+    if left <= 0:
+        log.warning("deadline_exceeded", stage="mode")
+        raise ApiError(ErrorCode.UNAVAILABLE)
     corpus = await corpus_service.servable(state.vector_store, state.embedder.tag, left)
     trace_id: str = request.state.trace_id
     stream = QueueSink()

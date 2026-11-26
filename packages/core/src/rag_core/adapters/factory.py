@@ -92,11 +92,9 @@ def build_gateway(
     )
 
 
-def rerank_chain(gateway: ModelGateway, local: list[Reranker], limits: Limits) -> list[Reranker]:
+def rerank_chain(gateway: ModelGateway, local: list[Reranker]) -> list[Reranker]:
     """The remote level when the `rerank` stage has entries, then the local ones (ADR 0009)."""
     from rag_core.services.gateway_reranker import GatewayReranker
 
-    remote: list[Reranker] = (
-        [GatewayReranker(gateway, limits.timeout_rerank)] if gateway.config.stage("rerank").chain else []
-    )
+    remote: list[Reranker] = [GatewayReranker(gateway)] if gateway.config.stage("rerank").chain else []
     return [*remote, *local]

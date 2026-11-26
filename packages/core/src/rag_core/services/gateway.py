@@ -21,7 +21,9 @@ from rag_core.events import DegradedReason
 from rag_core.limits import Limits
 from rag_core.models_config import Entry, ModelsConfig, StageName
 from rag_core.ports import (
+    Alerter,
     Budget,
+    ChatChunk,
     ContextTooLong,
     ModelProvider,
     ProviderError,
@@ -78,8 +80,11 @@ class _Ticket:
     estimate: float
     day: date | None
     spend: RequestSpend
-    deadline_at: float  # the request's, to tell its end from the stage timeout
+    deadline_at: float  # the request's (inf when the caller bounds the call itself)
     trial: bool = False  # the breaker's half-open trial call
+    # False when the call's time ran out for a reason that says nothing about the provider: the request's
+    # deadline came before the stage timeout, or a slow consumer of the stream held the time.
+    blame_timeout: bool = True
 
 
 class ModelGateway:
@@ -132,7 +137,7 @@ class ModelGateway:
                 if ticket is None:
                     break
                 try:
-                    async with asyncio.timeout(self._time_for(stage, deadline_at)):
+                    async with asyncio.timeout(self._time_for(ticket)):
                         result = await self.providers[entry.provider].chat(
                             entry.model, messages, max_tokens=max_tokens, schema=json_schema
                         )
@@ -171,16 +176,18 @@ class ModelGateway:
                 continue
             parts: list[str] = []
             tokens_in = tokens_out = 0
-            ends_at = asyncio.get_running_loop().time() + self._time_for(stage, deadline_at)
-            chunks = aiter(
-                self.providers[entry.provider].chat_stream(entry.model, messages, max_tokens=max_tokens)
-            )
+            ends_at = asyncio.get_running_loop().time() + self._time_for(ticket)
+            chunks: AsyncIterator[ChatChunk] | None = None
             try:
+                chunks = aiter(
+                    self.providers[entry.provider].chat_stream(entry.model, messages, max_tokens=max_tokens)
+                )
                 while True:
                     # Each read is bounded on its own, never across a `yield`: the consumer's time between
                     # chunks counts toward the end, but a timeout can't fire inside the consumer.
                     if asyncio.get_running_loop().time() >= ends_at:
-                        raise TimeoutError  # even when the next chunk is already buffered
+                        ticket.blame_timeout = False  # the consumer held the time, not the provider
+                        raise TimeoutError
                     async with asyncio.timeout_at(ends_at):
                         chunk = await anext(chunks, None)
                     if chunk is None:
@@ -191,7 +198,8 @@ class ModelGateway:
                         parts.append(chunk.text)
                         yield chunk.text
             except BaseException as exc:
-                await _aclose(chunks)  # the provider's response, not left to the garbage collector
+                if chunks is not None:
+                    await _aclose(chunks)  # the provider's response, not left to the garbage collector
                 await self._close(ticket, exc)
                 if _failed(exc):
                     if parts:
@@ -204,7 +212,7 @@ class ModelGateway:
             return
         raise ModelsUnavailable(stage)
 
-    async def rerank(self, query: str, documents: list[str], *, deadline_at: float) -> list[float]:
+    async def rerank(self, query: str, documents: list[str], *, deadline_at: float = math.inf) -> list[float]:
         """Scores per document from the `rerank` stage; `ModelsUnavailable` sends the caller to local."""
         chars = len(query) + sum(len(d) for d in documents)
         spend = RequestSpend(self.limits.request_cost_cap_usd)
@@ -213,7 +221,7 @@ class ModelGateway:
             if ticket is None:
                 continue
             try:
-                async with asyncio.timeout(self._time_for("rerank", deadline_at)):
+                async with asyncio.timeout(self._time_for(ticket)):
                     result = await self.providers[entry.provider].rerank(entry.model, query, documents)
             except BaseException as exc:
                 await self._close(ticket, exc)
@@ -269,14 +277,21 @@ class ModelGateway:
     async def close(self) -> None:
         """At shutdown: the background work, then every client the gateway owns (providers, alerter)."""
         await self.drain()
-        for provider in self.providers.values():
-            await provider.close()
-        await self.alerts.alerter.close()
+        clients: list[ModelProvider | Alerter] = [*self.providers.values(), self.alerts.alerter]
+        for client in clients:
+            try:  # one client failing to close doesn't keep the others open
+                await client.close()
+            except Exception as exc:
+                log.warning("client_close_failed", client=type(client).__name__, error=type(exc).__name__)
 
     # -- one entry ----------------------------------------------------------------------------------------
 
-    def _time_for(self, stage: StageName, deadline_at: float) -> float:
-        return min(self._timeouts[stage], deadline_at - asyncio.get_running_loop().time())
+    def _time_for(self, ticket: _Ticket) -> float:
+        """`min(TIMEOUT_<STAGE>, time left)`; notes on the ticket which of the two binds."""
+        left = ticket.deadline_at - asyncio.get_running_loop().time()
+        timeout = self._timeouts[ticket.stage]
+        ticket.blame_timeout = timeout <= left
+        return min(timeout, left)
 
     def _out_of_time(self, deadline_at: float) -> bool:
         return deadline_at - asyncio.get_running_loop().time() <= 0
@@ -295,7 +310,12 @@ class ModelGateway:
             return None
         trial = not self.breakers.closed(key)
         ticket = _Ticket(stage, entry, 0.0, None, spend, deadline_at, trial)
-        if entry.paid and not await self._reserve(ticket, chars):
+        try:
+            reserved = not entry.paid or await self._reserve(ticket, chars)
+        except BaseException:
+            self.breakers.release(key, trial)  # cancelled while reserving: the trial must not stay taken
+            raise
+        if not reserved:
             self.breakers.release(key, trial)
             return None
         return ticket
@@ -335,11 +355,7 @@ class ModelGateway:
         """Record the verdict on the breaker and the quota, settle the reservation; returns the cost."""
         entry = ticket.entry
         key, trial = (entry.provider, entry.model), ticket.trial
-        # A timeout at the request's own deadline says nothing about the provider: the stage had less time
-        # than its timeout (LLD "6.6 Circuit breaker").
-        cut_by_deadline = (
-            isinstance(exc, TimeoutError) and asyncio.get_running_loop().time() >= ticket.deadline_at
-        )
+        # A timeout counts toward the breaker only when the stage timeout bound the call (LLD "6.6").
         if exc is None:
             self.breakers.success(key, trial)
         elif isinstance(exc, RateLimited):
@@ -347,9 +363,9 @@ class ModelGateway:
         elif isinstance(exc, ContextTooLong):
             log.error("context_too_long", stage=ticket.stage, model=entry.model)
             self.breakers.release(key, trial)
-        elif _failed(exc) and not cut_by_deadline:
+        elif _failed(exc) and not (isinstance(exc, TimeoutError) and not ticket.blame_timeout):
             self.breakers.failure(key, trial=trial)
-        else:  # cut by the deadline, cancelled, or a bug: no verdict on the provider
+        else:  # a timeout that isn't the provider's, cancelled, or a bug: no verdict on the provider
             self.breakers.release(key, trial)
         if _failed(exc):
             log.warning(

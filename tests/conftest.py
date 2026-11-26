@@ -171,7 +171,7 @@ def build_app(
     app.state.gateway = build_gateway(
         old.config, {"openrouter": provider}, app.state.db, app.state.alerter, gate.limits
     )
-    app.state.rerankers = rerank_chain(app.state.gateway, app.state.local_rerankers, gate.limits)
+    app.state.rerankers = rerank_chain(app.state.gateway, app.state.local_rerankers)
     return app
 
 
