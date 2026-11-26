@@ -384,3 +384,17 @@ async def test_the_remote_rerank_chain_gets_one_timeout(rig: Rig) -> None:
     assert time.monotonic() - started < 0.5  # both entries within one TIMEOUT_RERANK
     # The first hang ran out its stage timeout: the provider's fault, so its breaker opened.
     assert not rig.gateway.breakers.callable(("openrouter", "test/rerank:free"))
+
+
+async def test_a_later_rerank_entry_cut_by_the_chain_limit_is_not_blamed(rig: Rig) -> None:
+    rig = with_limits(rig, timeout_rerank=0.3, breaker_failures=1)
+    second = Entry(provider="openrouter", model="test/rerank-b:free")
+    stage = CONFIG.stage("rerank").model_copy(update={"chain": [*CONFIG.stage("rerank").chain, second]})
+    rig.gateway.config = CONFIG.model_copy(
+        update={"stages": CONFIG.stages.model_copy(update={"rerank": stage})}
+    )
+    rig.fake.script("test/rerank:free", "slow_error")  # fails after using most of the chain's time
+    rig.fake.script("test/rerank-b:free", "hang")
+    with pytest.raises(ModelsUnavailable):
+        await rig.gateway.rerank("q", ["a"])
+    assert rig.gateway.breakers.callable(("openrouter", "test/rerank-b:free"))

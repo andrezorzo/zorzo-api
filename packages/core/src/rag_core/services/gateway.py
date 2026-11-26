@@ -83,6 +83,7 @@ class _Ticket:
     deadline_at: float  # the caller's (inf when the caller bounds the call itself)
     chain_ends_at: float = math.inf  # a limit the gateway sets on the whole chain (rerank)
     trial: bool = False  # the breaker's half-open trial call
+    chain_first: bool = True  # the first entry called in this chain walk: it had the whole chain limit
     # False when the call's time ran out for a reason that says nothing about the provider: the caller's
     # deadline came before the gateway's own limits, or a slow consumer of the stream held the time.
     blame_timeout: bool = True
@@ -221,10 +222,12 @@ class ModelGateway:
         chain_ends_at = asyncio.get_running_loop().time() + self._timeouts["rerank"]
         chars = len(query) + sum(len(d) for d in documents)
         spend = RequestSpend(self.limits.request_cost_cap_usd)
+        first = True
         for entry in self.config.stage("rerank").chain:
             ticket = await self._take("rerank", entry, chars, deadline_at, spend, chain_ends_at)
             if ticket is None:
                 continue
+            ticket.chain_first, first = first, False
             try:
                 async with asyncio.timeout(self._time_for(ticket)):
                     result = await self.providers[entry.provider].rerank(entry.model, query, documents)
@@ -299,8 +302,11 @@ class ModelGateway:
         call; the caller's deadline doesn't.
         """
         now = asyncio.get_running_loop().time()
-        own_end = min(now + self._timeouts[ticket.stage], ticket.chain_ends_at)
-        ticket.blame_timeout = own_end < ticket.deadline_at
+        stage_end = now + self._timeouts[ticket.stage]
+        own_end = min(stage_end, ticket.chain_ends_at)
+        # A later entry cut by the chain limit had only what the earlier ones left: not its fault.
+        chain_cut_later = ticket.chain_ends_at < stage_end and not ticket.chain_first
+        ticket.blame_timeout = own_end < ticket.deadline_at and not chain_cut_later
         return min(own_end, ticket.deadline_at) - now
 
     def _out_of_time(self, deadline_at: float) -> bool:

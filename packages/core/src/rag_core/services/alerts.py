@@ -45,13 +45,20 @@ class Alerts:
         self._background = BackgroundTasks()
         self._raise_checked: dict[AlertKind, float] = {}  # when `raise_soon` last asked the store, per kind
         # The severity last asked for per kind, while its incident may be open: a worse state is told at once.
+        # Unknown after a restart, so a restart never counts as worse.
         self._severity: dict[AlertKind, int] = {}
         # One kind's raises and clears run in the order they were asked for (asyncio.Lock is first come,
         # first served), so a late clear can't close the incident a later raise opened.
         self._locks: dict[AlertKind, asyncio.Lock] = defaultdict(asyncio.Lock)
 
-    async def raise_(self, kind: AlertKind, message: str, worse: bool = False) -> None:
-        """Open the incident, or remind; `worse` (the incident got worse) sends the message now."""
+    async def raise_(
+        self, kind: AlertKind, message: str, worse: bool = False, before: int | None = None
+    ) -> None:
+        """Open the incident, or remind; `worse` (the incident got worse) sends the message now.
+
+        `before` is the severity known before a worse raise, put back when the store fails so the next check
+        tries again.
+        """
         self._maybe_open.add(kind)
         async with self._locks[kind]:
             now = self.clock()
@@ -59,6 +66,8 @@ class Alerts:
             try:
                 outcome = await self.store.open(kind, now, remind_before)
             except StoreUnavailable as exc:  # `raise_soon` asks again after its interval
+                if worse and before is not None:
+                    self._severity[kind] = before
                 log.error("alert_store_failed", kind=kind, error=str(exc))
                 return
             if outcome is not None:
@@ -77,12 +86,13 @@ class Alerts:
         """
         now = self.monotonic()
         last = self._raise_checked.get(kind)
-        worse = severity > self._severity.get(kind, 0)
+        before = self._severity.get(kind)
+        worse = before is not None and severity > before
         if last is not None and now - last < RAISE_CHECK_EVERY_S and not worse:
             return
         self._raise_checked[kind] = now
-        self._severity[kind] = max(severity, self._severity.get(kind, 0))
-        self._background.spawn(self.raise_(kind, message, worse))
+        self._severity[kind] = max(severity, before or 0)
+        self._background.spawn(self.raise_(kind, message, worse, before))
 
     def clear_soon(self, kind: AlertKind) -> None:
         if self._claim_clear(kind):

@@ -125,9 +125,9 @@ def _raise_for_status(response: httpx.Response) -> None:
         raise RateLimited("http 429")
     if status in (400, 413) and any(m in response.text.lower() for m in _CONTEXT_MARKERS):
         raise ContextTooLong(f"http {status}")
-    # Refused up front: a 4xx (but a 408 timeout) or a 503 (no provider available). A 502 or 504 may come
-    # after the upstream model ran, and billed.
-    raise ProviderError(f"http {status}", refused=(400 <= status < 500 and status != 408) or status == 503)
+    # Refused up front: anything below 500 but a 408 timeout (a redirect, a 4xx), or a 503 (no provider
+    # available). A 500, 502 or 504 may come after the upstream model ran, and billed.
+    raise ProviderError(f"http {status}", refused=(status < 500 and status != 408) or status == 503)
 
 
 def _stream_chunk(payload: str) -> ChatChunk | None:

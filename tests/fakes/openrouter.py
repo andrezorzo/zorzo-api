@@ -6,7 +6,7 @@ normally. It records every request (path, model, body), so a test can assert whi
 - chat completions, as JSON or SSE (`stream: true`), with usage;
 - `/rerank`, scoring the documents in their given order unless `rerank_scores` says otherwise;
 - failures: "rate_limited" (429 with `Retry-After`), "error" (500), "bad_gateway" (502), "unavailable"
-  (503), "bad_request" (400), "hang", "malformed" (a 200 that isn't
+  (503), "bad_request" (400), "slow_error" (500 after 0.25 s), "hang", "malformed" (a 200 that isn't
   the expected JSON), "context_too_long" (400), "break_after_first_token" (a stream that dies mid-way);
 - `Reply(...)` for a given text, token counts or rate-limit headers.
 """
@@ -74,6 +74,9 @@ class FakeOpenRouter:
             return httpx.Response(STATUS[behavior], json={"error": {"code": STATUS[behavior]}})
         if behavior == "hang":
             await asyncio.sleep(60)
+        if behavior == "slow_error":  # a 500 after 0.25 s
+            await asyncio.sleep(0.25)
+            return httpx.Response(500, json={"error": {"code": 500}})
         if behavior == "malformed":
             return httpx.Response(200, text="<html>")
         if behavior == "context_too_long":
