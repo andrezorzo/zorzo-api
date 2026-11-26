@@ -9,7 +9,7 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 from rag_core.errors import ApiError, ErrorCode
 from rag_core.events import Done, StreamEvent
-from rag_core.ports import StoreUnavailable
+from rag_core.ports import StoreUnavailableError
 from rag_core.services import corpus as corpus_service
 from rag_core.services.client_ip import VIEWER_HEADER
 from rag_core.services.gate import Asker
@@ -53,7 +53,7 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
     try:
         async with asyncio.timeout_at(deadline_at):
             reason = await state.gateway.mode()
-    except StoreUnavailable as exc:
+    except StoreUnavailableError as exc:
         log.error("mode_check_failed", error=type(exc).__name__)
         raise ApiError(ErrorCode.UNAVAILABLE) from exc
     except TimeoutError as exc:

@@ -16,10 +16,10 @@ import httpx
 from rag_core.ports import (
     ChatChunk,
     ChatResult,
-    ContextTooLong,
+    ContextTooLongError,
     ProviderError,
     RateInfo,
-    RateLimited,
+    RateLimitedError,
     RerankResult,
 )
 
@@ -128,9 +128,9 @@ def _raise_for_status(response: httpx.Response) -> None:
     if status == 200:
         return
     if status == 429:
-        raise RateLimited("http 429")
+        raise RateLimitedError("http 429")
     if status in (400, 413) and any(m in response.text.lower() for m in _CONTEXT_MARKERS):
-        raise ContextTooLong(f"http {status}")
+        raise ContextTooLongError(f"http {status}")
     # Refused up front: a redirect or a 4xx (but a 408 timeout), or a 503 (no provider available). Another
     # 2xx, a 500, 502 or 504 may come after the upstream model ran, and billed.
     refused = (300 <= status < 500 and status != 408) or status == 503

@@ -47,7 +47,7 @@ class Bucket:
     resets_at: datetime | None = None
 
 
-class StoreUnavailable(Exception):
+class StoreUnavailableError(Exception):
     """A store refused or failed the request (database down, a lock wait or long statement it ended)."""
 
 
@@ -56,8 +56,8 @@ class RateLimiter(Protocol):
         """Take one token from every bucket, or from none.
 
         None when every bucket had one; otherwise the empty buckets, each with the seconds until it holds one.
-        A store that fails raises `StoreUnavailable`, which the gate answers as `unavailable`. One that stops
-        answering may block: the caller bounds the call.
+        A store that fails raises `StoreUnavailableError`, which the gate answers as `unavailable`. One that
+        stops answering may block: the caller bounds the call.
         """
 
 
@@ -116,14 +116,14 @@ class ProviderError(Exception):
         self.refused = refused
 
 
-class RateLimited(ProviderError):
+class RateLimitedError(ProviderError):
     """The provider answered 429."""
 
     def __init__(self, kind: str = "http 429") -> None:
         super().__init__(kind, refused=True)
 
 
-class ContextTooLong(ProviderError):
+class ContextTooLongError(ProviderError):
     """The provider refused the prompt as longer than the model's context."""
 
     def __init__(self, kind: str) -> None:
@@ -187,7 +187,7 @@ BudgetState = Literal["normal", "paid_disabled", "degraded"]
 class Budget(Protocol):
     """The day's budget row (LLD "6.2 Daily budget"); the rules are the gateway's, the statements are here.
 
-    A store that fails raises `StoreUnavailable`.
+    A store that fails raises `StoreUnavailableError`.
     """
 
     async def state(self, day: date) -> BudgetState: ...
@@ -207,7 +207,7 @@ AlertKind = Literal[
 
 
 class AlertStore(Protocol):
-    """`alert_states` rows (LLD "6.10 Alerts"); a store that fails raises `StoreUnavailable`."""
+    """`alert_states` rows (LLD "6.10 Alerts"); a store that fails raises `StoreUnavailableError`."""
 
     async def open(
         self, kind: AlertKind, now: datetime, remind_before: datetime
@@ -340,7 +340,7 @@ __all__ = [
     "ChatChunk",
     "ChatResult",
     "ChunkRow",
-    "ContextTooLong",
+    "ContextTooLongError",
     "CorpusStore",
     "DataPublisher",
     "DocumentRow",
@@ -352,7 +352,7 @@ __all__ = [
     "ProviderError",
     "PublishedChunk",
     "RateInfo",
-    "RateLimited",
+    "RateLimitedError",
     "RerankResult",
     "Reranker",
     "SearchHit",

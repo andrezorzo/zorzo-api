@@ -25,14 +25,14 @@ class Summary:
     copied: int | None = None
 
 
-class IngestRejected(Exception):
+class IngestRejectedError(Exception):
     def __init__(self, summary: Summary, problems: list[Finding]) -> None:
         self.summary = summary
         self.problems = problems
         super().__init__(f"corpus version {summary.version} rejected: {len(problems)} problem(s)")
 
 
-class PublishFailed(Exception):
+class PublishError(Exception):
     """The version went live but its brain and corpus data weren't published."""
 
     def __init__(self, version: int) -> None:
@@ -40,7 +40,7 @@ class PublishFailed(Exception):
         super().__init__(f"corpus version {version} is active but its data wasn't published")
 
 
-class ActivationRefused(Exception):
+class ActivationRefusedError(Exception):
     pass
 
 
@@ -62,14 +62,14 @@ async def run_ingest(
     try:
         return await _fill_candidate(version, source, store, embedder, scanner, allowlist, limits)
     except BaseException as exc:  # rejected, failed or cancelled: the original error is what the caller sees
-        if isinstance(exc, IngestRejected):
+        if isinstance(exc, IngestRejectedError):
             # Logged before the reject, so the owner learns what to fix even if the reject fails.
             for problem in exc.problems:
                 log.error("ingest_rejected", file=problem.file, rule=problem.rule)
         try:
             await store.reject(version)
         except Exception as reject_error:
-            if isinstance(exc, IngestRejected):
+            if isinstance(exc, IngestRejectedError):
                 log.error("reject_failed", version=version)  # the traceback comes from the caller's log
                 # Its summary would claim a status the database may not have.
                 raise reject_error from exc
@@ -90,7 +90,7 @@ async def _fill_candidate(
     if not documents and not problems:
         problems = [Finding(str(source), "no documents")]
     if problems:
-        raise IngestRejected(Summary(version, "rejected"), problems)
+        raise IngestRejectedError(Summary(version, "rejected"), problems)
 
     doc_rows: list[DocumentRow] = []
     drafts: list[tuple[str, ChunkDraft]] = []
@@ -134,7 +134,7 @@ async def publish_active(
 ) -> str:
     """Publish the brain and corpus data of an active version; returns the published folder.
 
-    Any failure raises PublishFailed: the version is live, its data not yet published.
+    Any failure raises PublishError: the version is live, its data not yet published.
     """
     try:
         tag = await store.embed_model_tag(version)
@@ -143,15 +143,15 @@ async def publish_active(
         folder, files, manifest = publish.build(version, tag, await store.published_chunks(version), examples)
         await publisher.publish(folder, files, manifest)
     except Exception as exc:
-        raise PublishFailed(version) from exc
+        raise PublishError(version) from exc
     return folder
 
 
 async def activate(version: int, *, store: CorpusStore, require_eval: bool) -> None:
     """With `require_eval` (production), only a version with a passing eval run is activated."""
     if require_eval and not await store.eval_passed(version):
-        raise ActivationRefused(f"corpus version {version} has no passing eval run")
+        raise ActivationRefusedError(f"corpus version {version} has no passing eval run")
     try:
         await store.activate(version)
     except LookupError as exc:
-        raise ActivationRefused(str(exc)) from exc
+        raise ActivationRefusedError(str(exc)) from exc

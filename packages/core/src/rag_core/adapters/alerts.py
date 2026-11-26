@@ -12,6 +12,9 @@ from rag_core.ports import AlertKind
 
 log = structlog.get_logger()
 
+TELEGRAM_URL = "https://api.telegram.org"
+TELEGRAM_TIMEOUT_S = 5.0
+
 # Opens a closed (or new) incident, or takes the reminder slot when the last message is older than
 # :remind_before; otherwise changes nothing and returns no row. One statement, so concurrent raises send once.
 # A row whose `open_since` is :now was opened by this statement (a reminder needs time to have passed).
@@ -51,9 +54,6 @@ class PostgresAlertStore:
             return (await conn.execute(CLOSE, {"kind": kind, "now": now})).first() is not None
 
 
-TELEGRAM_URL = "https://api.telegram.org"
-
-
 class TelegramAlerter:
     """The bot token is part of Telegram's URL: the `httpx` loggers stay at `warning` (LLD "Logs"), and
     errors are reported by type only."""
@@ -61,7 +61,9 @@ class TelegramAlerter:
     def __init__(self, token: str, chat_id: str, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self._path = f"/bot{token}/sendMessage"
         self._chat_id = chat_id
-        self._client = httpx.AsyncClient(base_url=TELEGRAM_URL, transport=transport, timeout=5.0)
+        self._client = httpx.AsyncClient(
+            base_url=TELEGRAM_URL, transport=transport, timeout=TELEGRAM_TIMEOUT_S
+        )
 
     async def send(self, kind: AlertKind, message: str) -> None:
         response = await self._client.post(

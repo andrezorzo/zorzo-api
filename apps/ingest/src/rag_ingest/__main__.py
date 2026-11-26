@@ -26,9 +26,9 @@ from rag_core.adapters.pgvector_store import PgCorpusStore
 from rag_core.adapters.postgres import Database
 from rag_core.domain import DomainConfig, DomainError, Example, corpus_dir, load_domain, load_examples
 from rag_core.ingest.pipeline import (
-    ActivationRefused,
-    IngestRejected,
-    PublishFailed,
+    ActivationRefusedError,
+    IngestRejectedError,
+    PublishError,
     Summary,
     activate,
     publish_active,
@@ -92,13 +92,13 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
         await db.close()  # before the summary: once it is printed, nothing is awaited that a signal could cut
         _summary(summary)
         return 0
-    except IngestRejected as exc:  # the problems were logged by the pipeline
+    except IngestRejectedError as exc:  # the problems were logged by the pipeline
         _summary(exc.summary)
         return 1
-    except ActivationRefused as exc:
+    except ActivationRefusedError as exc:
         log.error("activation_refused", reason=str(exc))
         return 1
-    except PublishFailed as exc:
+    except PublishError as exc:
         # Live but unpublished. Recovery: a new ingest (unchanged chunks are copied, not embedded again), its
         # eval run, then --activate-version; locally, --activate does it in one run.
         log.exception("publish_failed", version=exc.version)

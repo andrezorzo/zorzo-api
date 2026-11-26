@@ -16,7 +16,7 @@ import structlog
 
 from rag_core.errors import ApiError, ErrorCode
 from rag_core.limits import Limits
-from rag_core.ports import BotCheck, Bucket, RateLimiter, StoreUnavailable
+from rag_core.ports import BotCheck, Bucket, RateLimiter, StoreUnavailableError
 from rag_core.services.client_ip import hashed_ip, viewer_ip
 from rag_core.services.question import normalize
 
@@ -76,7 +76,7 @@ class Gate:
         step[0] = "rate_limit"
         try:
             refused = await self.limiter.take(buckets, now)
-        except StoreUnavailable as exc:  # a database down is `unavailable` (LLD "Errors")
+        except StoreUnavailableError as exc:  # a database down is `unavailable` (LLD "Errors")
             log.error("rate_limit_failed", error=str(exc))
             raise ApiError(ErrorCode.UNAVAILABLE) from exc
         if refused is not None:
