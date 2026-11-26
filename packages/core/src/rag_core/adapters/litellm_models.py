@@ -41,7 +41,14 @@ from litellm.router_utils.cooldown_handlers import (
 from litellm.types.router import AllowedFailsPolicy, RouterRateLimitError
 
 from rag_core.models_config import Entry, ModelsConfig, Provider, StageName, entry_id
-from rag_core.ports import ChatResult, ContextTooLongError, Cooldown, ProviderError, RateLimitedError
+from rag_core.ports import (
+    ChatResult,
+    ContextTooLongError,
+    Cooldown,
+    CoolingDownError,
+    ProviderError,
+    RateLimitedError,
+)
 
 # LiteLLM prints a "Give Feedback / Get Help" banner to stdout on every error unless told not to.
 litellm.suppress_debug_info = True
@@ -332,7 +339,9 @@ def _provider_error(exc: BaseException) -> Exception:
         return _provider_error(exc.original_exception)
     if isinstance(exc, Timeout):
         return TimeoutError("timeout")
-    if isinstance(exc, RateLimitError | RouterRateLimitError):
+    if isinstance(exc, RouterRateLimitError):
+        return CoolingDownError()
+    if isinstance(exc, RateLimitError):
         return RateLimitedError()
     status = getattr(exc, "status_code", None)
     if isinstance(exc, ContextWindowExceededError) or (

@@ -26,6 +26,7 @@ from rag_core.ports import (
     ChatResult,
     ContextTooLongError,
     Cooldown,
+    CoolingDownError,
     EventLog,
     ModelRouter,
     ProviderError,
@@ -264,10 +265,14 @@ class ModelGateway:
                     return await self.models.rerank(
                         entry_key, query, documents, timeout=ends_at - loop.time() + DEADLINE_MARGIN_S
                     )
+            except CoolingDownError:
+                if first:  # refused without a request (a cooldown this request hadn't seen): no window yet
+                    window_ends_at = None
             except (ProviderError, TimeoutError) as exc:
-                # The call's own timeout is set past the guard, so the guard always makes the cut: it counts
-                # here, once, only when it was the first call's own stage timeout.
-                if guard.expired() and first and window_ends_at <= deadline_at:
+                # The call's own timeout is set past the guard, so only the guard cuts on time: that cut
+                # counts here, once, when it was the first call's own stage timeout.
+                cut = isinstance(exc, TimeoutError) and isinstance(exc.__cause__, asyncio.CancelledError)
+                if cut and guard.expired() and first and window_ends_at <= deadline_at:
                     self.models.strike(entry_key)
                 self._failed("rerank", exc)
             finally:

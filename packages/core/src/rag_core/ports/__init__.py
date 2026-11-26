@@ -123,6 +123,13 @@ class RateLimitedError(ProviderError):
         super().__init__(kind, refused=True)
 
 
+class CoolingDownError(RateLimitedError):
+    """The entry is cooling down: refused without a request."""
+
+    def __init__(self) -> None:
+        super().__init__("cooling down")
+
+
 class ContextTooLongError(ProviderError):
     """The provider refused the prompt as longer than the model's context."""
 
@@ -349,6 +356,7 @@ __all__ = [
     "ChunkRow",
     "ContextTooLongError",
     "Cooldown",
+    "CoolingDownError",
     "CorpusStore",
     "DataPublisher",
     "DocumentRow",
