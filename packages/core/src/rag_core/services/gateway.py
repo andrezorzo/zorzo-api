@@ -39,12 +39,13 @@ log = structlog.get_logger()
 
 CHARS_PER_TOKEN = 3  # conservative for English and Portuguese, no tokenizer (LLD "6.2 Daily budget")
 # A timeout counts toward the breaker when the call had at least this share of its stage timeout, whatever
-# limit ended it (the stage timeout, the rerank chain's, the caller's deadline), and the provider sent
-# nothing: a provider silent for half its timeout is failing. With less time, it never had its chance; a
-# stream that was still coming is alive, only long (owner decision, LLD "6.6 Circuit breaker").
+# limit ended it (the stage timeout, the rerank chain's, the caller's deadline), and the provider had been
+# silent for this share of it too (for a stream, since its last chunk or keep-alive): a provider silent that
+# long is failing. With less time it never had its chance, and a stream still coming is alive, only long
+# (owner decision, LLD "6.6 Circuit breaker").
 FAIR_SHARE = 0.5
-# The background work gets this long at shutdown, all of it, plus a short wait for what it cancels (three
-# kinds of work, `CANCEL_WAIT_S` each): Docker kills the container 10 s after SIGTERM.
+# The background work gets this long at shutdown, its three kinds at once, plus a short wait for what it
+# cancels (`CANCEL_WAIT_S`): Docker kills the container 10 s after SIGTERM.
 SHUTDOWN_DRAIN_S = 6.0
 
 
@@ -290,13 +291,9 @@ class ModelGateway:
     async def drain(self, timeout: float | None = None) -> None:
         """Wait for the background work (settles of cancelled calls, alerts, breaker rows), all of it within
         `timeout`."""
-        loop = asyncio.get_running_loop()
-        ends_at = None if timeout is None else loop.time() + timeout
-        # Money first (settles, refunds), then alerts and breaker rows; each gets an even share of what is
-        # left, so one kind stuck on the database can't take all the others' time.
+        # At once, each with the whole time: one kind stuck on the database can't take the others' time.
         drains = (self._background.drain, self.alerts.drain, self.breakers.event_log.drain)
-        for n, drain in enumerate(drains):
-            await drain(None if ends_at is None else max(0.0, ends_at - loop.time()) / (len(drains) - n))
+        await asyncio.gather(*(drain(timeout) for drain in drains))
 
     async def close(self) -> None:
         """At shutdown: the background work, then every client the gateway owns (providers, alerter)."""
@@ -440,16 +437,17 @@ class ModelGateway:
     ) -> None:
         """A reservation its caller left before it answered: give the estimate back if it was taken."""
         try:
-            reserved = await asyncio.shield(reserving)  # a shutdown cancelling this must not cut the commit
+            # Shielded: a shutdown cancelling this must not cut the reserve's commit.
+            if await asyncio.shield(reserving):
+                await self._settle_row(day, -estimate)
         except StoreUnavailable:
             return
         except asyncio.CancelledError:
             # Shutdown ran out of time: the day's row may keep this estimate. Said, so the gap is explained.
-            log.warning("reservation_release_abandoned", day=str(day), estimate=estimate)
+            if not reserving.cancelled():
+                log.warning("reservation_release_abandoned", day=str(day), estimate=estimate)
             reserving.add_done_callback(lambda f: f.cancelled() or f.exception())
             raise
-        if reserved:
-            await self._settle_row(day, -estimate)
 
     async def _settle(self, ticket: _Ticket, actual: float) -> None:
         ticket.spend.spent += actual - ticket.estimate

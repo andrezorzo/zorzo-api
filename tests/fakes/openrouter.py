@@ -22,6 +22,7 @@ from typing import Any
 import httpx
 
 DEFAULT_TEXT = "Hello from the fake model"
+DRIP_TEXT = " ".join(["word"] * 40)  # 2 s at one word every 50 ms
 # Failures answered with an error status: 500 and 502 may come after the model ran, 503 and 400 before.
 STATUS = {"error": 500, "bad_gateway": 502, "unavailable": 503, "bad_request": 400}
 
@@ -113,7 +114,7 @@ class FakeOpenRouter:
         )
 
     def _stream(self, reply: Reply, broken: bool, pace: Behavior) -> httpx.Response:
-        words = reply.text.split(" ")
+        words = (DRIP_TEXT if pace == "drip" else reply.text).split(" ")
 
         async def frames() -> AsyncIterator[bytes]:
             yield b": OPENROUTER PROCESSING\n\n"

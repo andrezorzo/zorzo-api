@@ -445,11 +445,11 @@ async def test_a_reservation_its_caller_left_is_given_back(rig: Rig) -> None:
 
 
 async def test_a_stream_still_sending_when_cut_is_not_blamed(rig: Rig) -> None:
-    rig = with_limits(rig, timeout_answer=0.2, breaker_failures=1)
-    rig.fake.script(A, "drip")  # five words, one every 50 ms: still coming when 0.15 s runs out
+    rig = with_limits(rig, timeout_answer=1.0, breaker_failures=1)
+    rig.fake.script(A, "drip")  # a word every 50 ms for 2 s: still coming when 0.6 s runs out
     with pytest.raises(ModelsUnavailable):
         async for _ in rig.gateway.stream(
-            "answer", MESSAGES, deadline_at=rig.deadline(0.15), spend=RequestSpend(0)
+            "answer", MESSAGES, deadline_at=rig.deadline(0.6), spend=RequestSpend(0)
         ):
             pass  # the consumer reads at once; the provider is the slow one
     assert rig.gateway.breakers.closed(("openrouter", A))

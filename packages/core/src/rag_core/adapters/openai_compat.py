@@ -82,8 +82,11 @@ class OpenAICompatProvider:
                     await response.aread()
                     _raise_for_status(response)
                 async for line in response.aiter_lines():
+                    if line.startswith(":"):
+                        yield ChatChunk()  # a keep-alive: the provider is still there
+                        continue
                     if not line.startswith("data:"):
-                        continue  # blank lines and `: comment` keep-alives
+                        continue  # blank lines between events
                     payload = line[len("data:") :].strip()
                     if payload == "[DONE]":
                         return
