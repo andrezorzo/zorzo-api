@@ -160,14 +160,23 @@ async def test_a_cooled_entry_is_skipped_and_the_next_gets_one_request(rig: Rig)
     assert rig.fake.models_called() == [A, B, B, PAID]  # B once per question: no retry on it
 
 
-async def test_repeated_failures_cool_an_entry(rig: Rig) -> None:
-    rig.fake.always(A, "error")
+@pytest.mark.parametrize("failure", ["error", "error_choice"])  # a 500; a 200 the adapter finds failed
+async def test_repeated_failures_cool_an_entry(rig: Rig, failure: str) -> None:
+    rig.fake.always(A, failure)
     for _ in range(FAILS_BEFORE_COOLDOWN + 1):
         await rig.complete()
     assert f"answer:openrouter/{A}" in await rig.gateway.models.cooldowns()
     calls = len(rig.fake.models_called())
     assert (await rig.complete()).model == B
     assert rig.fake.models_called()[calls:] == [B]  # A cooling: no request
+
+
+async def test_repeated_broken_streams_cool_an_entry(rig: Rig) -> None:
+    rig.fake.always(A, "break_after_first_token")  # a dropped connection: LiteLLM leaves it out of its count
+    for _ in range(FAILS_BEFORE_COOLDOWN + 1):
+        with pytest.raises(ModelsUnavailableError):
+            await rig.stream()
+    assert f"answer:openrouter/{A}" in await rig.gateway.models.cooldowns()
 
 
 class Verdict(BaseModel):
@@ -219,6 +228,15 @@ async def test_a_negative_reported_cost_is_ignored(rig: Rig) -> None:
     result = await rig.complete()
     price = (1000 * PAID_PRICE.input_per_mtok + 100 * PAID_PRICE.output_per_mtok) / 1e6
     assert result.cost_usd == pytest.approx(price)  # never less than spent, never a broken number
+
+
+async def test_a_reported_cost_far_past_the_estimate_settles_at_the_estimate(rig: Rig) -> None:
+    rig.fake.script(A, "error")
+    rig.fake.script(B, "error")
+    rig.fake.script(PAID, Reply(cost=250.0))  # a provider's bug: one answer can't cost the day's budget
+    result = await rig.complete()
+    assert result.cost_usd == pytest.approx(ESTIMATE)
+    assert rig.spent_today() == pytest.approx(ESTIMATE, abs=1e-6)
 
 
 async def test_skips_a_paid_entry_the_budget_cant_cover(rig: Rig) -> None:
@@ -430,6 +448,20 @@ async def test_a_cooldown_that_restarts_between_looks_is_logged_as_both(rig: Rig
     # The rows are written in the background, so in no fixed order.
     events = sorted((event, fields.get("status")) for _, event, fields in rig.log_events())
     assert events == [("cooldown_ended", None), ("cooldown_started", "401"), ("cooldown_started", "429")]
+
+
+async def test_a_cooldown_renewed_before_it_ended_is_the_same_cooldown(rig: Rig) -> None:
+    entry = f"answer:openrouter/{A}"
+    looks = iter([{entry: Cooldown("429", 1.0, 30.0)}, {entry: Cooldown("500", 10.0, 60.0)}])
+
+    async def cooldowns() -> dict[str, Cooldown]:
+        return next(looks)
+
+    rig.gateway.models.cooldowns = cooldowns  # type: ignore[method-assign]
+    await rig.gateway._note_cooldowns()
+    await rig.gateway._note_cooldowns()  # renewed at 10 s, while the first ran until 31 s
+    await rig.gateway.drain()
+    assert [event for _, event, _ in rig.log_events()] == ["cooldown_started"]
 
 
 async def test_the_budget_alert_opens_at_the_paid_cutoff(rig: Rig) -> None:

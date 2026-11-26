@@ -40,6 +40,9 @@ CHARS_PER_TOKEN = 3  # conservative for English and Portuguese, no tokenizer (LL
 # the chain moves on, and a miss never cools an entry (LLD "6.6 Circuit breaker").
 ATTEMPTS_PER_FREE_ENTRY = 2
 RATE_LIMITED = "429"
+# The estimate already assumes the longest answer, so a settle past this multiple of it is a provider's bug
+# (a unit change, a broken count), and the estimate is kept instead (LLD "6.2 Daily budget").
+MAX_COST_OVER_ESTIMATE = 2
 # The background work gets this long at shutdown, its three kinds at once, plus a short wait for what it
 # cancels (`CANCEL_WAIT_S`): Docker kills the container 10 s after SIGTERM.
 SHUTDOWN_DRAIN_S = 6.0
@@ -159,7 +162,7 @@ class ModelGateway:
                     return completion
         reservation = await self._paid_reservation(stage, messages, deadline_at, spend)
         if reservation is not None:
-            paid = await self._paid_call(
+            paid_result = await self._paid_call(
                 reservation,
                 self.models.complete(
                     entry_id(stage, reservation.entry),
@@ -170,9 +173,9 @@ class ModelGateway:
                 ),
                 deadline_at,
             )
-            if paid is not None:
-                cost = await self._settle_success(reservation, paid)
-                completion = self._completion(stage, reservation.entry, paid, schema, cost)
+            if paid_result is not None:
+                cost = await self._settle_success(reservation, paid_result)
+                completion = self._completion(stage, reservation.entry, paid_result, schema, cost)
                 if completion is not None:
                     return completion
         raise ModelsUnavailableError(stage)
@@ -220,10 +223,13 @@ class ModelGateway:
                 timeout=self._time_for(stage, deadline_at),
             )
             outcome = _Outcome()
-            async for text in self._relay(
-                stage, reservation.entry, chunks, deadline_at, outcome, reservation
-            ):
-                yield text
+            try:
+                async for text in self._relay(
+                    stage, reservation.entry, chunks, deadline_at, outcome, reservation
+                ):
+                    yield text
+            finally:
+                await self._note_cooldowns()
             if outcome.completion is not None:
                 yield outcome.completion
                 return
@@ -423,18 +429,23 @@ class ModelGateway:
 
     async def _note_cooldowns(self) -> None:
         """Refresh the cooldowns and write the ones that started or ended since the last look (LLD "6.6
-        Circuit breaker"); a cooldown that ended and started again in between counts as both."""
+        Circuit breaker"). A cooldown that ended and started again in between counts as both; one renewed
+        before it ended (LiteLLM restarts it on a later failure) is the same cooldown."""
         try:
             now = await self.models.cooldowns()
         except Exception as exc:  # a bookkeeping failure never fails a question
             log.warning("cooldowns_unreadable", error=type(exc).__name__)
             return
-        for name, old in self._cooling.items():
-            if name not in now or now[name].started_at != old.started_at:
+        restarted = {
+            name
+            for name, old in self._cooling.items()
+            if name in now and now[name].started_at >= old.started_at + old.length_s
+        }
+        for name in self._cooling:
+            if name not in now or name in restarted:
                 self.event_log.write("info", "gateway", "cooldown_ended", {"entry": name})
         for name, cooldown in now.items():
-            previous = self._cooling.get(name)
-            if previous is None or previous.started_at != cooldown.started_at:
+            if name not in self._cooling or name in restarted:
                 fields = {"entry": name, "status": cooldown.status, "seconds": cooldown.length_s}
                 self.event_log.write("warning", "gateway", "cooldown_started", fields)
         self._cooling = now
@@ -482,6 +493,9 @@ class ModelGateway:
             cost = reservation.estimate
         else:
             cost = (result.tokens_in * price.input_per_mtok + result.tokens_out * price.output_per_mtok) / 1e6
+        if cost > MAX_COST_OVER_ESTIMATE * reservation.estimate:
+            log.warning("implausible_cost", stage=reservation.stage, cost=cost, estimate=reservation.estimate)
+            cost = reservation.estimate
         await self._settle(reservation, cost)
         return cost
 

@@ -3,7 +3,10 @@ entry, called by the gateway entry by entry.
 
 The Router makes each call (timeouts, the provider's quirks, the cost OpenRouter reports) and keeps the
 cooldowns: a 429, a 401 or a 404 cools an entry at once, for `Retry-After` when the provider sends one;
-any other failure cools it on the `FAILS_BEFORE_COOLDOWN + 1`-th within the cooldown time. There is no
+any other failure cools it on the `FAILS_BEFORE_COOLDOWN + 1`-th within the cooldown time. LiteLLM leaves
+some failures out of that count (a dropped connection, a 402 on a lone deployment, and what this adapter
+finds wrong in a 200), so each call checks the count moved and adds the failure through LiteLLM's own
+counting when it didn't. There is no
 same-entry retry (`num_retries=0`: the next entry is the retry) and no Router fallback (the gateway walks
 the chain). Failures come out as `ProviderError` (`refused` when the provider turned the call down) or
 `TimeoutError`; the message names the kind, never the request or the response.
@@ -11,11 +14,12 @@ the chain). Failures come out as `ProviderError` (`refused` when the provider tu
 
 import math
 import os
+from contextlib import contextmanager
 
 # Set before LiteLLM is imported: otherwise the import fetches the model cost map from GitHub.
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
-from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
+from collections.abc import AsyncIterator, Callable, Coroutine, Iterator, Mapping
 from http import HTTPStatus
 from typing import Any, cast
 
@@ -29,7 +33,10 @@ from litellm.exceptions import (
 )
 from litellm.llms.custom_httpx.async_client_cleanup import close_litellm_async_clients
 from litellm.router import Router
-from litellm.router_utils.cooldown_handlers import async_get_cooldown_deployments_with_debug_info
+from litellm.router_utils.cooldown_handlers import (
+    async_get_cooldown_deployments_with_debug_info,
+    should_cooldown_based_on_allowed_fails_policy,
+)
 from litellm.types.router import AllowedFailsPolicy, RouterRateLimitError
 
 from rag_core.models_config import Entry, ModelsConfig, Provider, StageName, entry_id
@@ -41,6 +48,7 @@ litellm.suppress_debug_info = True
 STAGES: tuple[StageName, ...] = ("route", "rerank", "answer", "judge")
 KEYLESS = "unused"  # the OpenAI client needs some key; a keyless endpoint (Ollama) ignores it
 FAILS_BEFORE_COOLDOWN = 2  # a timeout, a 5xx or a dropped connection cools an entry on the third
+COOL_AT_ONCE = 0  # allowed fails for a 429, a 401 or a 404
 MAX_TOKEN_COUNT = 10_000_000  # far past any context: a larger count is a provider bug, not a bill
 _CONTEXT_MARKERS = (
     "context length",
@@ -68,13 +76,16 @@ class LiteLLMModels:
             for stage in STAGES
             for entry in config.stage(stage).chain
         ]
+        self._cooldown_s = cooldown_s
         self._router = Router(
             model_list=deployments,
             num_retries=0,
             cooldown_time=cooldown_s,
             allowed_fails=FAILS_BEFORE_COOLDOWN,
             allowed_fails_policy=AllowedFailsPolicy(
-                RateLimitErrorAllowedFails=0, AuthenticationErrorAllowedFails=0, NotFoundErrorAllowedFails=0
+                RateLimitErrorAllowedFails=COOL_AT_ONCE,
+                AuthenticationErrorAllowedFails=COOL_AT_ONCE,
+                NotFoundErrorAllowedFails=COOL_AT_ONCE,
             ),
             # LiteLLM spares a group with one deployment and no fallback from the fail count for any error
             # its policy doesn't name (a 500 comes as a generic `APIError`). Naming each entry its own
@@ -84,58 +95,58 @@ class LiteLLMModels:
 
     async def complete(
         self,
-        entry_id: str,
+        entry_key: str,
         messages: list[dict[str, str]],
         *,
         max_tokens: int,
         schema: dict[str, Any] | None,
         timeout: float,
     ) -> ChatResult:
-        try:
-            response = await self._router.acompletion(
-                model=entry_id, **_request(messages, max_tokens, timeout), **_format(schema)
-            )
-        except _LIBRARY_ERRORS as exc:
-            raise _provider_error(exc) from None
-        choice = response.choices[0] if response.choices else None
-        if _failed_choice(choice):
-            raise ProviderError("error choice")
-        content = choice.message.content if choice is not None else None
-        if content is not None and not isinstance(content, str):
-            raise ProviderError("unreadable content")
+        with self._failures_counted(entry_key):
+            try:
+                response = await self._router.acompletion(
+                    model=entry_key, **_request(messages, max_tokens, timeout), **_format(schema)
+                )
+            except _LIBRARY_ERRORS as exc:
+                raise _provider_error(exc) from exc
+            choice = response.choices[0] if response.choices else None
+            if _failed_choice(choice):
+                raise ProviderError("error choice")
+            content = choice.message.content if choice is not None else None
+            if content is not None and not isinstance(content, str):
+                raise ProviderError("unreadable content")
         usage = getattr(response, "usage", None)
         tokens_in, tokens_out = _counts(usage)
-        return ChatResult(content or "", tokens_in, tokens_out, entry_id, _cost(usage))
+        return ChatResult(content or "", tokens_in, tokens_out, entry_key, _cost(usage))
 
     def stream(
-        self, entry_id: str, messages: list[dict[str, str]], *, max_tokens: int, timeout: float
+        self, entry_key: str, messages: list[dict[str, str]], *, max_tokens: int, timeout: float
     ) -> AsyncIterator[str | ChatResult]:
-        return _stream(
-            lambda: self._router.acompletion(
-                model=entry_id, **_request(messages, max_tokens, timeout, stream=True)
-            ),
-            entry_id,
-        )
+        request = _request(messages, max_tokens, timeout, stream=True)
+        return self._stream(lambda: self._router.acompletion(model=entry_key, **request), entry_key)
 
-    async def rerank(self, entry_id: str, query: str, documents: list[str], *, timeout: float) -> list[float]:
-        try:
-            response = await self._router.arerank(
-                model=entry_id,
-                query=query,
-                documents=documents,
-                top_n=len(documents),  # every document back: providers default to fewer
-                timeout=timeout,
-                disable_fallbacks=True,
-            )
-        except _LIBRARY_ERRORS as exc:
-            raise _provider_error(exc) from None
-        scores: dict[int, float] = {}
-        for item in response.results or []:
-            index, score = item.get("index"), item.get("relevance_score")
-            if isinstance(index, int) and isinstance(score, int | float) and 0 <= index < len(documents):
-                scores[index] = float(score)
-        if len(scores) != len(documents):
-            raise ProviderError("incomplete rerank")
+    async def rerank(
+        self, entry_key: str, query: str, documents: list[str], *, timeout: float
+    ) -> list[float]:
+        with self._failures_counted(entry_key):
+            try:
+                response = await self._router.arerank(
+                    model=entry_key,
+                    query=query,
+                    documents=documents,
+                    top_n=len(documents),  # every document back: providers default to fewer
+                    timeout=timeout,
+                    disable_fallbacks=True,
+                )
+            except _LIBRARY_ERRORS as exc:
+                raise _provider_error(exc) from exc
+            scores: dict[int, float] = {}
+            for item in response.results or []:
+                index, score = item.get("index"), item.get("relevance_score")
+                if isinstance(index, int) and isinstance(score, int | float) and 0 <= index < len(documents):
+                    scores[index] = float(score)
+            if len(scores) != len(documents):
+                raise ProviderError("incomplete rerank")
         return [scores[i] for i in range(len(documents))]
 
     async def cooldowns(self) -> dict[str, Cooldown]:
@@ -148,6 +159,66 @@ class LiteLLMModels:
     async def close(self) -> None:
         self._router.discard()  # type: ignore[no-untyped-call]
         await close_litellm_async_clients()  # type: ignore[no-untyped-call]
+
+    async def _stream(
+        self, call: Callable[[], Coroutine[Any, Any, Any]], entry_key: str
+    ) -> AsyncIterator[str | ChatResult]:
+        """The text as it comes, then the `ChatResult`. A break after text is a failure that ran (and
+        billed), whatever LiteLLM makes of it: this code knows text went out, the library's wrapper may not.
+
+        The counts are reported but not billable: without a usage frame from the provider, LiteLLM fills them
+        in from its own tokenizer, and nothing on the stream tells the two apart. An error choice on a stream
+        isn't seen here (LiteLLM maps it to "stop" and keeps no trace): OpenRouter's error frames are caught
+        by LiteLLM, which raises on them."""
+        parts: list[str] = []
+        usage: Any = None
+        with self._failures_counted(entry_key):
+            try:
+                response = await call()
+                async for piece in response:
+                    usage = getattr(piece, "usage", None) or usage
+                    choice = piece.choices[0] if piece.choices else None
+                    text = choice.delta.content if choice is not None else None
+                    if text is not None and not isinstance(text, str):
+                        raise ProviderError("unreadable content")
+                    if text:
+                        parts.append(text)
+                        yield text
+            except _LIBRARY_ERRORS as exc:
+                if parts:
+                    raise ProviderError("stream broke") from exc
+                raise _provider_error(exc) from exc
+        tokens_in, tokens_out = _counts(usage)
+        yield ChatResult(
+            "".join(parts), tokens_in, tokens_out, entry_key, _cost(usage), billable_counts=False
+        )
+
+    @contextmanager
+    def _failures_counted(self, entry_key: str) -> Iterator[None]:
+        """Make each failure of a call count once toward the entry's cooldown (see the module docstring)."""
+        before = self._fails(entry_key)
+        try:
+            yield
+        except (ProviderError, TimeoutError) as exc:
+            cause = exc.__cause__
+            if not isinstance(cause, RouterRateLimitError) and self._fails(entry_key) == before:
+                counted = cause if isinstance(cause, Exception) else exc
+                if should_cooldown_based_on_allowed_fails_policy(self._router, entry_key, counted):
+                    status = getattr(cause, "status_code", None)
+                    self._router.cooldown_cache.add_deployment_to_cooldown(
+                        model_id=entry_key,
+                        original_exception=counted,
+                        exception_status=status
+                        if isinstance(status, int)
+                        else HTTPStatus.INTERNAL_SERVER_ERROR,
+                        cooldown_time=self._cooldown_s,
+                    )
+            raise
+
+    def _fails(self, entry_key: str) -> int:
+        """The entry's failures in LiteLLM's count (the key its allowed-fails logic uses)."""
+        count = self._router.cache.get_cache(key=f"deployment:{entry_key}:allowed_fails", local_only=True)
+        return count if isinstance(count, int) else 0
 
 
 def _params(stage: StageName, entry: Entry, provider: Provider, key: str | None) -> dict[str, Any]:
@@ -183,37 +254,6 @@ def _format(schema: dict[str, Any] | None) -> dict[str, Any]:
             "json_schema": {"name": "output", "strict": True, "schema": schema},
         }
     }
-
-
-async def _stream(
-    call: Callable[[], Coroutine[Any, Any, Any]], entry_id: str
-) -> AsyncIterator[str | ChatResult]:
-    """The text as it comes, then the `ChatResult`. A break after text is a failure that ran (and billed),
-    whatever LiteLLM makes of it: this code knows text went out, the library's wrapper may not say so.
-
-    The counts are reported but not billable: without a usage frame from the provider, LiteLLM fills them in
-    from its own tokenizer, and nothing on the stream tells the two apart."""
-    parts: list[str] = []
-    usage: Any = None
-    try:
-        response = await call()
-        async for piece in response:
-            usage = getattr(piece, "usage", None) or usage
-            choice = piece.choices[0] if piece.choices else None
-            if _failed_choice(choice):
-                raise ProviderError("error frame")
-            text = choice.delta.content if choice is not None else None
-            if text is not None and not isinstance(text, str):
-                raise ProviderError("unreadable content")
-            if text:
-                parts.append(text)
-                yield text
-    except _LIBRARY_ERRORS as exc:
-        if parts:
-            raise ProviderError("stream broke") from None
-        raise _provider_error(exc) from None
-    tokens_in, tokens_out = _counts(usage)
-    yield ChatResult("".join(parts), tokens_in, tokens_out, entry_id, _cost(usage), billable_counts=False)
 
 
 def _failed_choice(choice: Any) -> bool:
