@@ -24,7 +24,7 @@ from tests.conftest import ROOT, create_migrated_database, drop_database, run_in
 FIXTURE_CORPUS = ROOT / "tests" / "fixtures" / "corpus"
 EXAMPLES = ROOT / "domains" / "zorzo" / "src" / "domain_zorzo" / "examples.yaml"
 FAKE_TAG = "fake-hash-v1"
-DOCUMENTED_SIGTERM_EXIT = 143  # apps/ingest/AGENTS.md: SIGTERM cancels the run and exits 143
+DOCUMENTED_SIGTERM_EXIT = 143  # the SIGTERM exit code apps/ingest/AGENTS.md documents
 
 
 @dataclass
