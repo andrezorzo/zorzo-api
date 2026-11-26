@@ -3,11 +3,17 @@ map); and the provider's numbers are checked before they settle the budget."""
 
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from rag_core.adapters.litellm_models import MAX_TOKEN_COUNT, _cost, _counts
+from rag_core.adapters.litellm_models import MAX_TOKEN_COUNT, LiteLLMModels, _cost, _counts
+from rag_core.models_config import load_models
+from rag_core.ports import ProviderError
+
+from tests.conftest import served
+from tests.fakes.openrouter import FakeOpenRouter
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -62,3 +68,19 @@ def test_token_counts_count_only_when_both_are_plausible(
     prompt: object, completion: object, counts: tuple[int, int]
 ) -> None:
     assert _counts(SimpleNamespace(prompt_tokens=prompt, completion_tokens=completion)) == counts
+
+
+async def test_a_providers_error_body_never_reaches_a_traceback() -> None:
+    fake = FakeOpenRouter()
+    models = LiteLLMModels(served(load_models(ROOT / "tests/fixtures/models.test.yaml"), fake), {}, 60)
+    fake.script("test/answer-a:free", "moderated")
+    question = "my phone is 555-0100"  # what a visitor typed, echoed back by the provider
+    try:
+        await models.complete("answer:openrouter/test/answer-a:free", [{"role": "user", "content": question}],
+                              max_tokens=5, schema=None, timeout=5)  # fmt: skip
+    except ProviderError as exc:
+        rendered = "".join(traceback.format_exception(exc))
+    finally:
+        await models.close()
+    assert "http 403" in rendered
+    assert question not in rendered  # the library's error, which quotes it, stays out of the chain

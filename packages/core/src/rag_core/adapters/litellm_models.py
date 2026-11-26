@@ -68,6 +68,7 @@ _CONTEXT_MARKERS = (
 _CONTEXT_STATUSES = (HTTPStatus.BAD_REQUEST, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
 _ERROR_FINISH = "error"  # OpenRouter's `finish_reason` when the upstream model failed mid-answer
 _LIBRARY_ERRORS = (openai.OpenAIError, RouterRateLimitError)
+LIBRARY_ERROR = "_library_error"  # where a mapped error keeps LiteLLM's exception (see `_hidden`)
 
 
 class LiteLLMModels:
@@ -117,7 +118,7 @@ class LiteLLMModels:
                     model=entry_key, **_request(messages, max_tokens, timeout), **_format(schema)
                 )
             except _LIBRARY_ERRORS as exc:
-                raise _provider_error(exc) from exc
+                raise _hidden(_provider_error(exc), exc) from None
             choice = response.choices[0] if response.choices else None
             if _failed_choice(choice):
                 raise ProviderError("error choice")
@@ -148,7 +149,7 @@ class LiteLLMModels:
                     disable_fallbacks=True,
                 )
             except _LIBRARY_ERRORS as exc:
-                raise _provider_error(exc) from exc
+                raise _hidden(_provider_error(exc), exc) from None
             scores: dict[int, float] = {}
             for item in response.results or []:
                 index, score = item.get("index"), item.get("relevance_score")
@@ -201,8 +202,8 @@ class LiteLLMModels:
                         yield text
             except _LIBRARY_ERRORS as exc:
                 if parts:
-                    raise ProviderError("stream broke") from exc
-                raise _provider_error(exc) from exc
+                    raise _hidden(ProviderError("stream broke"), exc) from None
+                raise _hidden(_provider_error(exc), exc) from None
         tokens_in, tokens_out = _counts(usage)
         yield ChatResult(
             "".join(parts), tokens_in, tokens_out, entry_key, _cost(usage), billable_counts=False
@@ -273,8 +274,8 @@ def _skipped_by_litellm(exc: BaseException, streaming: bool) -> Exception | None
     - once a stream is open, a timeout too (LiteLLM skips a stream's raw transport error: it has no status);
     - a 402 (skipped on a lone deployment);
     - a 5xx whose text names `APIConnectionError` (skipped for its text, which may quote the request).
-    A request's own 4xx never counts, whatever its text."""
-    cause = exc.__cause__
+    A request's own 4xx never counts, whatever its text. LiteLLM's exception is the one `_hidden` kept."""
+    cause = getattr(exc, LIBRARY_ERROR, None)
     if isinstance(cause, MidStreamFallbackError) and cause.original_exception is not None:
         cause = cause.original_exception
     if cause is None:
@@ -293,6 +294,13 @@ def _skipped_by_litellm(exc: BaseException, streaming: bool) -> Exception | None
     if dropped or text_skipped or status == HTTPStatus.PAYMENT_REQUIRED:
         return cause
     return None
+
+
+def _hidden(error: Exception, library_error: BaseException) -> Exception:
+    """`error`, keeping LiteLLM's exception for the cooldown count only. It is not chained (`from None`): a
+    traceback in the logs would print it, and its text can quote the provider's answer or the request."""
+    setattr(error, LIBRARY_ERROR, library_error)
+    return error
 
 
 def _status(exc: BaseException) -> int | None:

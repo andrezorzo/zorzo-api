@@ -7,11 +7,11 @@ normally. It records every request (path, model, body), so a test can assert whi
 - chat completions, as JSON or SSE (`stream: true`), with usage;
 - `/rerank`, scoring the documents in their given order unless `rerank_scores` says otherwise;
 - failures: "rate_limited" (429 with `Retry-After`), "error" (500), "bad_gateway" (502), "unavailable"
-  (503), "bad_request" (400), "unauthorized" (401), "payment_required" (402), "hang", "malformed" (a 200
-  that isn't the expected JSON), "error_choice" (a 200 whose choice says the model failed),
-  "context_too_long" (400), "no_text" (a stream that ends with no text), "stall_after_headers" (a
-  stream that opens and never sends a frame), "break_after_first_token" (a
-  stream that dies mid-way);
+  (503), "bad_request" (400), "unauthorized" (401), "payment_required" (402), "moderated" (403, echoing
+  the input), "hang", "malformed" (a 200 that isn't the expected JSON), "error_choice" (a 200 whose choice
+  says the model failed), "context_too_long" (400), "no_text" (a stream that ends with no text),
+  "stall_after_headers" (a stream that opens and never sends a frame), "break_after_first_token" (a stream
+  that dies mid-way);
 - `Reply(...)` for a given text, token counts or reported cost.
 """
 
@@ -97,6 +97,9 @@ class FakeOpenRouter:
             return httpx.Response(STATUS[behavior], json={"error": {"code": STATUS[behavior]}})
         if behavior == "hang":
             await asyncio.sleep(60)
+        if behavior == "moderated":  # a 403 that echoes the flagged input, as moderation answers do
+            flagged = body.get("messages", [{}])[-1].get("content", "")
+            return httpx.Response(403, json={"error": {"code": 403, "metadata": {"flagged_input": flagged}}})
         if behavior == "malformed":
             return httpx.Response(200, text="<html>")
         if behavior == "error_choice":  # the upstream model died mid-answer: a 200 with an error choice
