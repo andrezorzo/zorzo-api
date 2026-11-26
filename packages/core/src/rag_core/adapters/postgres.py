@@ -17,6 +17,12 @@ from rag_core.ports import StoreUnavailableError
 
 CONNECT_TIMEOUT_S = 5
 DEAD_SOCKET_MS = 10_000  # unacknowledged data for this long ends the connection
+# An idle connection is probed after KEEPALIVE_IDLE_S, then every KEEPALIVE_INTERVAL_S; KEEPALIVE_PROBES
+# unanswered probes end it.
+KEEPALIVE_IDLE_S = 5
+KEEPALIVE_INTERVAL_S = 2
+KEEPALIVE_PROBES = 2
+MS_PER_S = 1000
 POOL_WAIT_S = 5
 PROBE_TIMEOUT_S = 2.0
 # A short statement (a budget row, an alert row, a log row) that takes seconds is stuck: Postgres ends a
@@ -53,9 +59,9 @@ class Database:
             connect_args={
                 "connect_timeout": CONNECT_TIMEOUT_S,
                 "keepalives": 1,
-                "keepalives_idle": 5,
-                "keepalives_interval": 2,
-                "keepalives_count": 2,
+                "keepalives_idle": KEEPALIVE_IDLE_S,
+                "keepalives_interval": KEEPALIVE_INTERVAL_S,
+                "keepalives_count": KEEPALIVE_PROBES,
                 "tcp_user_timeout": DEAD_SOCKET_MS,
             },
             pool_timeout=POOL_WAIT_S,
@@ -75,7 +81,7 @@ class Database:
         included) is `StoreUnavailableError`."""
         try:
             async with self.engine.begin() as conn:
-                await conn.execute(BOUNDS, {"ms": str(int(SHORT_STATEMENT_S * 1000))})
+                await conn.execute(BOUNDS, {"ms": str(int(SHORT_STATEMENT_S * MS_PER_S))})
                 yield conn
         except (OSError, SQLAlchemyError) as exc:
             raise StoreUnavailableError(type(exc).__name__) from exc

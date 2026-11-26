@@ -41,6 +41,10 @@ from rag_ingest.settings import IngestSettings
 
 log = structlog.get_logger()
 
+# A process ended by a signal exits with 128 + the signal number, as the shell reports it.
+EXIT_SIGTERM = 128 + signal.SIGTERM
+EXIT_SIGINT = 128 + signal.SIGINT
+
 
 def _summary(summary: Summary) -> None:
     print(json.dumps({"summary": asdict(summary)}), flush=True)
@@ -135,7 +139,7 @@ async def _run(args: argparse.Namespace, settings: IngestSettings, config: _Conf
         return await _main(args, settings, config)
     except asyncio.CancelledError:
         if terminated:
-            return 143  # 128 + SIGTERM
+            return EXIT_SIGTERM
         raise
 
 
@@ -166,7 +170,7 @@ def main() -> None:
     try:
         sys.exit(asyncio.run(_run(args, settings, config)))
     except KeyboardInterrupt:  # Ctrl-C: the cleanup ran and `ingest_interrupted` was logged
-        sys.exit(130)
+        sys.exit(EXIT_SIGINT)
     except ConfigError as exc:  # e.g. EMBEDDER=fake outside APP_ENV=local
         print(f"rag-ingest: refusing to run: {exc}", file=sys.stderr)
         sys.exit(1)
