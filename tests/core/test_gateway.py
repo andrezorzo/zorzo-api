@@ -442,3 +442,14 @@ async def test_a_reservation_its_caller_left_is_given_back(rig: Rig) -> None:
         await task
     await rig.gateway.drain()
     assert rig.spent_today() == 0.0
+
+
+async def test_a_stream_still_sending_when_cut_is_not_blamed(rig: Rig) -> None:
+    rig = with_limits(rig, timeout_answer=0.2, breaker_failures=1)
+    rig.fake.script(A, Reply(text="one two three"))
+    with pytest.raises(ModelsUnavailable):
+        async for _ in rig.gateway.stream(
+            "answer", MESSAGES, deadline_at=rig.deadline(0.15), spend=RequestSpend(0)
+        ):
+            await asyncio.sleep(0.1)  # the time runs out while the answer is still coming
+    assert rig.gateway.breakers.closed(("openrouter", A))

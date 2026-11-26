@@ -20,7 +20,13 @@ class BackgroundTasks:
     def spawn(self, work: Coroutine[Any, Any, None]) -> None:
         task = asyncio.get_running_loop().create_task(work)
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(self._done)
+
+    def _done(self, task: "asyncio.Task[None]") -> None:
+        self._tasks.discard(task)
+        if not task.cancelled() and (exc := task.exception()) is not None:
+            # A bug in background work: logged by type (its text may quote a query), never lost.
+            log.error("background_task_failed", task=task.get_coro().__qualname__, error=type(exc).__name__)  # type: ignore[union-attr]
 
     async def drain(self, timeout: float | None = None) -> None:
         """Wait until nothing runs, including work spawned meanwhile; at shutdown and in tests.

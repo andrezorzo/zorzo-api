@@ -39,8 +39,9 @@ log = structlog.get_logger()
 
 CHARS_PER_TOKEN = 3  # conservative for English and Portuguese, no tokenizer (LLD "6.2 Daily budget")
 # A timeout counts toward the breaker when the call had at least this share of its stage timeout, whatever
-# limit ended it (the stage timeout, the rerank chain's, the caller's deadline): a provider that can't answer
-# in half its timeout is failing. With less, the time ran out before the provider had its chance.
+# limit ended it (the stage timeout, the rerank chain's, the caller's deadline), and the provider sent
+# nothing: a provider silent for half its timeout is failing. With less time, it never had its chance; a
+# stream that was still coming is alive, only long (owner decision, LLD "6.6 Circuit breaker").
 FAIR_SHARE = 0.5
 # The background work gets this long at shutdown, all of it, plus a short wait for what it cancels (three
 # kinds of work, `CANCEL_WAIT_S` each): Docker kills the container 10 s after SIGTERM.
@@ -91,7 +92,7 @@ class _Ticket:
     chain_ends_at: float = math.inf  # a limit the gateway sets on the whole chain (rerank)
     trial: bool = False  # the breaker's half-open trial call
     # False when the call's time ran out for a reason that says nothing about the provider: it had less than
-    # `FAIR_SHARE` of its stage timeout, or a slow consumer of the stream held the time.
+    # `FAIR_SHARE` of its stage timeout, its stream was still sending, or a slow consumer held the time.
     blame_timeout: bool = True
 
 
@@ -206,6 +207,8 @@ class ModelGateway:
                         parts.append(chunk.text)
                         yield chunk.text
             except BaseException as exc:
+                if parts:
+                    ticket.blame_timeout = False  # the provider was sending: alive, only long
                 if chunks is not None:
                     await _aclose(chunks)  # the provider's response, not left to the garbage collector
                 await self._close(ticket, exc)
@@ -286,7 +289,8 @@ class ModelGateway:
         `timeout`."""
         loop = asyncio.get_running_loop()
         ends_at = None if timeout is None else loop.time() + timeout
-        for drain in (self._background.drain, self.alerts.drain, self.breakers.event_log.drain):
+        # The quick ones first (alerts, breaker rows): a settle stuck on the database can't take their time.
+        for drain in (self.alerts.drain, self.breakers.event_log.drain, self._background.drain):
             await drain(None if ends_at is None else max(0.0, ends_at - loop.time()))
 
     async def close(self) -> None:
@@ -431,7 +435,7 @@ class ModelGateway:
     ) -> None:
         """A reservation its caller left before it answered: give the estimate back if it was taken."""
         try:
-            reserved = await reserving
+            reserved = await asyncio.shield(reserving)  # a shutdown cancelling this must not cut the commit
         except StoreUnavailable:
             return
         if reserved:

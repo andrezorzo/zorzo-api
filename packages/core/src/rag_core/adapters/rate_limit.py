@@ -37,8 +37,8 @@ RETURNING b.key
 """).bindparams(*_ARRAYS)
 
 # A take touches a few rows: Postgres itself ends a statement that waits on a lock or runs long, so a lock
-# wait fails in seconds. A connection that stops answering altogether is bounded only by the caller's deadline
-# (cancelling a query on a dead socket waits on that socket).
+# wait fails in seconds. A connection that stops answering altogether fails through the TCP bounds of
+# `Database` (postgres.py); the caller's deadline bounds the rest.
 LOCK_TIMEOUT_S = 2.0  # Postgres's statement and lock timeout for a take: seconds mean it is stuck
 
 
