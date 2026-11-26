@@ -265,7 +265,8 @@ class ModelGateway:
                     return await self.models.rerank(
                         entry_key, query, documents, timeout=ends_at - loop.time() + DEADLINE_MARGIN_S
                     )
-            except CoolingDownError:
+            except CoolingDownError as exc:
+                self._failed("rerank", exc)
                 if first:  # refused without a request (a cooldown this request hadn't seen): no window yet
                     window_ends_at = None
             except (ProviderError, TimeoutError) as exc:
