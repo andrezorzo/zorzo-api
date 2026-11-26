@@ -85,6 +85,13 @@ class Rig:
         return [(r[0], r[1], r[2]) for r in rows]
 
 
+async def settle_litellm() -> None:
+    """Wait for the background tasks LiteLLM spawned (its failure handlers) to finish."""
+    pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    await asyncio.wait(pending, timeout=2)
+    await asyncio.sleep(0.05)  # a handler it hands to a thread
+
+
 def make_gateway(
     db: Database, fake: FakeOpenRouter, alerter: RecordingAlerter, limits: Limits = LIMITS
 ) -> ModelGateway:
@@ -160,7 +167,8 @@ async def test_a_cooled_entry_is_skipped_and_the_next_gets_one_request(rig: Rig)
     assert rig.fake.models_called() == [A, B, B, PAID]  # B once per question: no retry on it
 
 
-@pytest.mark.parametrize("failure", ["error", "error_choice"])  # a 500; a 200 the adapter finds failed
+# A 500; a 200 the adapter finds failed; a 402, which LiteLLM leaves out of its count.
+@pytest.mark.parametrize("failure", ["error", "error_choice", "payment_required"])
 async def test_repeated_failures_cool_an_entry(rig: Rig, failure: str) -> None:
     rig.fake.always(A, failure)
     for _ in range(FAILS_BEFORE_COOLDOWN + 1):
@@ -176,7 +184,7 @@ async def test_broken_streams_cool_an_entry_on_the_third(rig: Rig) -> None:
     for _ in range(FAILS_BEFORE_COOLDOWN):
         with pytest.raises(ModelsUnavailableError):
             await rig.stream()
-    await asyncio.sleep(0.2)  # LiteLLM counts a stream's failure on a thread: let it, if it would
+    await settle_litellm()  # LiteLLM counts a stream's failure in background work: let it, if it would
     assert f"answer:openrouter/{A}" not in await rig.gateway.models.cooldowns()  # counted once each
     with pytest.raises(ModelsUnavailableError):
         await rig.stream()
@@ -473,6 +481,21 @@ async def test_a_cooldown_renewed_before_it_ended_is_the_same_cooldown(rig: Rig)
     await rig.gateway._note_cooldowns()  # renewed at 10 s, while the first ran until 31 s
     await rig.gateway.drain()
     assert [event for _, event, _ in rig.log_events()] == ["cooldown_started"]
+
+
+async def test_a_cooldown_renewed_for_another_cause_is_logged_as_a_restart(rig: Rig) -> None:
+    entry = f"answer:openrouter/{A}"
+    looks = iter([{entry: Cooldown("429", 1.0, 30.0)}, {entry: Cooldown("401", 10.0, 60.0)}])
+
+    async def cooldowns() -> dict[str, Cooldown]:
+        return next(looks)
+
+    rig.gateway.models.cooldowns = cooldowns  # type: ignore[method-assign]
+    await rig.gateway._note_cooldowns()
+    await rig.gateway._note_cooldowns()  # renewed inside the first's window, but for an auth failure
+    await rig.gateway.drain()
+    events = sorted((event, fields.get("status")) for _, event, fields in rig.log_events())
+    assert events == [("cooldown_ended", None), ("cooldown_started", "401"), ("cooldown_started", "429")]
 
 
 async def test_the_budget_alert_opens_at_the_paid_cutoff(rig: Rig) -> None:

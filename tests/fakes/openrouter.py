@@ -7,9 +7,10 @@ normally. It records every request (path, model, body), so a test can assert whi
 - chat completions, as JSON or SSE (`stream: true`), with usage;
 - `/rerank`, scoring the documents in their given order unless `rerank_scores` says otherwise;
 - failures: "rate_limited" (429 with `Retry-After`), "error" (500), "bad_gateway" (502), "unavailable"
-  (503), "bad_request" (400), "unauthorized" (401), "hang", "malformed" (a 200 that isn't the expected
-  JSON), "error_choice" (a 200 whose choice says the model failed), "context_too_long" (400), "no_text" (a
-  stream that ends with no text), "break_after_first_token" (a stream that dies mid-way);
+  (503), "bad_request" (400), "unauthorized" (401), "payment_required" (402), "hang", "malformed" (a 200
+  that isn't the expected JSON), "error_choice" (a 200 whose choice says the model failed),
+  "context_too_long" (400), "no_text" (a stream that ends with no text), "break_after_first_token" (a
+  stream that dies mid-way);
 - `Reply(...)` for a given text, token counts or reported cost.
 """
 
@@ -30,7 +31,14 @@ CREATED = 1_700_000_000
 # Fields OpenRouter sends on every streamed frame (LiteLLM reads them).
 FRAME_FIELDS = {"id": GEN_ID, "object": "chat.completion.chunk", "created": CREATED, "model": "fake"}
 # Failures answered with an error status: 500 and 502 may come after the model ran, 503 and 400 before.
-STATUS = {"error": 500, "bad_gateway": 502, "unavailable": 503, "bad_request": 400, "unauthorized": 401}
+STATUS = {
+    "error": 500,
+    "bad_gateway": 502,
+    "unavailable": 503,
+    "bad_request": 400,
+    "unauthorized": 401,
+    "payment_required": 402,
+}
 
 
 @dataclass(frozen=True)

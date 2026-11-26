@@ -127,7 +127,7 @@ class LiteLLMModels:
         return self._stream(lambda: self._router.acompletion(model=entry_key, **request), entry_key)
 
     async def rerank(
-        self, entry_key: str, query: str, documents: list[str], *, timeout: float
+        self, entry_key: str, /, query: str, documents: list[str], *, timeout: float
     ) -> list[float]:
         with self._failures_counted(entry_key):
             try:
@@ -173,7 +173,7 @@ class LiteLLMModels:
         by LiteLLM, which raises on them."""
         parts: list[str] = []
         usage: Any = None
-        with self._failures_counted(entry_key):
+        with self._failures_counted(entry_key, streaming=True):
             try:
                 response = await call()
                 async for piece in response:
@@ -195,12 +195,12 @@ class LiteLLMModels:
         )
 
     @contextmanager
-    def _failures_counted(self, entry_key: str) -> Iterator[None]:
+    def _failures_counted(self, entry_key: str, streaming: bool = False) -> Iterator[None]:
         """Add to the entry's cooldown count the failures LiteLLM leaves out (see the module docstring)."""
         try:
             yield
         except (ProviderError, TimeoutError) as exc:
-            skipped = _skipped_by_litellm(exc)
+            skipped = _skipped_by_litellm(exc, streaming)
             if skipped is not None and should_cooldown_based_on_allowed_fails_policy(
                 self._router, entry_key, skipped
             ):
@@ -248,10 +248,13 @@ def _format(schema: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def _skipped_by_litellm(exc: BaseException) -> Exception | None:
-    """The failure to count, when it is the entry's and LiteLLM's cooldown accounting doesn't count it: an
-    error this adapter found in a 200 (no library error behind it), a dropped connection (LiteLLM skips any
-    error whose text names `APIConnectionError`), or a 402 (skipped on a lone deployment)."""
+def _skipped_by_litellm(exc: BaseException, streaming: bool) -> Exception | None:
+    """The failure to count, when it is the entry's and LiteLLM's cooldown accounting doesn't count it:
+    - an error this adapter found in a 200 (no library error behind it);
+    - a dropped connection (LiteLLM skips any error whose text names `APIConnectionError`);
+    - on a stream, a timeout too (LiteLLM counts a stream's raw transport error, which has no status);
+    - a 402 (skipped on a lone deployment).
+    Decided by type, never by the text, which may quote the visitor's question."""
     cause = exc.__cause__
     if isinstance(cause, MidStreamFallbackError) and cause.original_exception is not None:
         cause = cause.original_exception
@@ -259,7 +262,10 @@ def _skipped_by_litellm(exc: BaseException) -> Exception | None:
         return exc if isinstance(exc, Exception) else None
     if not isinstance(cause, Exception) or isinstance(cause, RouterRateLimitError):
         return None  # an entry already cooling: nothing new
-    if "APIConnectionError" in str(cause) or _status(cause) == HTTPStatus.PAYMENT_REQUIRED:
+    dropped = isinstance(cause, openai.APIConnectionError) and (
+        streaming or not isinstance(cause, openai.APITimeoutError)
+    )
+    if dropped or _status(cause) == HTTPStatus.PAYMENT_REQUIRED:
         return cause
     return None
 
