@@ -37,3 +37,14 @@ review rounds. Each was weighed and accepted; the design is in the module's docs
 - A text with a real tag reads its `<` and `>` as spaces when looking for phones, so a lone `>` between two
   number groups of that text can be taken for a phone's separator and redacted. Without a real tag it is left
   alone (`202 > 555 > 0173` stays a ranking).
+- A path or slug counts mixed parts (letters with digits, such as `v2`) as a minority, so a key cut in groups
+  is read as a key only while most of its groups are mixed; a path whose parts are mostly mixed short words
+  (`/v2/v3/v4/…`) is cut as a key. The rule exists because a key written as short mixed groups would
+  otherwise pass as a slug.
+- A private key body counts only when its lines are base64 and add up to `MIN_PEM_BODY_CHARS` (16): a real
+  body is hundreds of characters, and the minimum is what stops a word between two mentions of the markers
+  (`"-----BEGIN PRIVATE KEY-----" with "-----END PRIVATE KEY-----"`) from being cut as a key. A body in
+  another shape (an encrypted key with `Proc-Type` lines) is cut by its header only.
+- Number groups apart by ` > ` or ` < ` twice or more are read as a list (a ranking), not a phone, even when
+  they would be a valid number without the brackets (`202 > 555 > 0173`). A phone written that way on purpose
+  is not found.
