@@ -8,7 +8,6 @@ vote; the judge labels the rest against their cited passages only.
 import contextlib
 import json
 import re
-import unicodedata
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -26,10 +25,13 @@ _STRICT = ConfigDict(extra="forbid", frozen=True)
 # or an example object, is passed over until one parses as the answer).
 _JSON_START = re.compile(r'\{\s*"')
 _DECODER = json.JSONDecoder(strict=False)  # a raw newline inside a string is read, as the draft reads it
-# Our prompt elements, however spaced or written (the full-width and small less-than signs too); model or
-# visitor text inside one must not open or close any of them. Invisible characters are dropped first.
+# Our prompt elements, however spaced or written (the full-width and small less-than signs, invisible
+# characters around the slash); model or visitor text inside one must not open or close any of them.
 LESS_THAN_SIGNS = "<\uff1c\ufe64"
-_DELIMITER = re.compile(rf"[{LESS_THAN_SIGNS}]\s*(/?)\s*(claim|checked_claims|passage)\b", re.IGNORECASE)
+_GAP = r"[\s\u00ad\u200b-\u200f\u2060-\u2064\ufeff]*"  # whitespace and the invisible format characters
+_DELIMITER = re.compile(
+    rf"[{LESS_THAN_SIGNS}]{_GAP}(/?){_GAP}(claim|checked_claims|passage)\b", re.IGNORECASE
+)
 
 
 class AnswerClaim(BaseModel):
@@ -73,34 +75,42 @@ class CheckedClaim:
     verdict: CheckedVerdict
 
 
-def _decoded(text: str, partial: bool) -> Iterator[Any]:
-    """The JSON values starting at each possible start; with `partial`, also what an unfinished one holds
-    so far. Text after a value (a closing fence, a sentence) is left out."""
+def _decoded(text: str, allow_unfinished: bool) -> Iterator[tuple[Any, bool]]:
+    """The JSON values starting at each possible start, each with whether it is complete; with
+    `allow_unfinished`, also what an unfinished one holds so far. Text after a value (a closing fence, a
+    sentence) is left out."""
     for match in _JSON_START.finditer(text):
         try:
-            yield _DECODER.raw_decode(text, match.start())[0]
+            yield _DECODER.raw_decode(text, match.start())[0], True
             continue
         except ValueError:
             pass
-        if partial:
+        if allow_unfinished:
             with contextlib.suppress(ValueError):
-                yield parse_partial_json(text[match.start() :])
+                yield parse_partial_json(text[match.start() :]), False
 
 
 def read_answer(text: str) -> AnswerContract | None:
     """The answer from its whole text (JSON mode, fenced JSON, or JSON after a sentence); None when it
     doesn't validate. It tries the starts `draft_text` tries, so the draft and the answer agree."""
-    for parsed in _decoded(text, partial=False):
-        try:
-            return AnswerContract.model_validate(parsed)
-        except ValueError:  # JSON that isn't the contract
-            continue
+    for parsed, _ in _decoded(text, allow_unfinished=False):
+        if (answer := _contract(parsed)) is not None:
+            return answer
     return None
 
 
-def draft_text(partial: str) -> str:
+def _contract(parsed: Any) -> AnswerContract | None:
+    try:
+        return AnswerContract.model_validate(parsed)
+    except ValueError:
+        return None
+
+
+def draft_text(streamed: str) -> str:
     """The claims' text so far, read from the answer's JSON as it grows; never JSON or passage numbers."""
-    for parsed in _decoded(partial, partial=True):
+    for parsed, complete in _decoded(streamed, allow_unfinished=True):
+        if complete and _contract(parsed) is None:  # a whole object that isn't the answer (an example)
+            continue
         claims = parsed.get("claims") if isinstance(parsed, dict) else None
         if isinstance(claims, list):
             texts = [c["text"] for c in claims if isinstance(c, dict) and isinstance(c.get("text"), str)]
@@ -134,8 +144,7 @@ def judge_input(claims: Sequence[CitedClaim]) -> str:
 def as_data(text: str) -> str:
     """Text placed inside a prompt element, unable to open or close one of ours (other text is untouched,
     so `List<T>` stays as written)."""
-    visible = "".join(c for c in text if unicodedata.category(c) != "Cf")
-    return _DELIMITER.sub(r"&lt;\1\2", visible)
+    return _DELIMITER.sub(r"&lt;\1\2", text)
 
 
 def apply_verdicts(
