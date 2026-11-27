@@ -5,12 +5,13 @@ chunk ids. A claim citing no passage, or one outside the request's passages, is 
 vote; the judge labels the rest against their cited passages only.
 """
 
+import json
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from langchain_core.utils.json import parse_json_markdown, parse_partial_json
+from langchain_core.utils.json import parse_partial_json
 from pydantic import BaseModel, ConfigDict
 
 from rag_core.ports import SearchHit
@@ -21,10 +22,13 @@ CheckedVerdict = Literal[Verdict, "gap"]  # `gap`: the sentence naming what the 
 _STRICT = ConfigDict(extra="forbid", frozen=True)
 # Where the answer's JSON starts: after a Markdown fence when there is one, otherwise at a brace opening a
 # key, so a brace in prose before it doesn't count.
-_FENCE = re.compile(r"```(?:json)?\s*")
+_FENCE = re.compile(r"```[A-Za-z]*[ \t]*\n?")
 _JSON_START = re.compile(r'\{\s*"')
-# Our prompt elements; model or visitor text inside one must not open or close any of them.
-_DELIMITER = re.compile(r"<(/?)(claim|checked_claims|passage)\b", re.IGNORECASE)
+_CLOSING_FENCE = "```"
+# Our prompt elements, however spaced or written (the full-width less-than sign too); model or visitor text
+# inside one must not open or close any of them.
+FULLWIDTH_LESS_THAN = "\uff1c"
+_DELIMITER = re.compile(rf"[<{FULLWIDTH_LESS_THAN}]\s*(/?)\s*(claim|checked_claims|passage)\b", re.IGNORECASE)
 
 
 class AnswerClaim(BaseModel):
@@ -68,41 +72,49 @@ class CheckedClaim:
     verdict: CheckedVerdict
 
 
-def _json_part(text: str) -> str | None:
-    """The answer's JSON, from where it starts to a closing fence (or the end so far)."""
+def _json_starts(text: str) -> list[int]:
+    """Where the answer's JSON may start, most likely first: the first brace opening a key, and the first one
+    after a Markdown fence; the fence's goes first when the fence comes before any such brace."""
+    first = _JSON_START.search(text)
     fence = _FENCE.search(text)
-    if fence is not None:
-        return text[fence.end() :].split("```")[0]
-    start = _JSON_START.search(text)
-    return text[start.start() :] if start is not None else None
+    after_fence = _JSON_START.search(text, fence.end()) if fence is not None else None
+    starts = [m.start() for m in (first, after_fence) if m is not None]
+    if fence is not None and (first is None or fence.start() < first.start()):
+        starts.reverse()
+    return list(dict.fromkeys(starts))
+
+
+def _candidates(text: str, parser: Callable[[str], Any]) -> Iterator[Any]:
+    """`text` parsed from each possible start, with or without a closing fence after the JSON."""
+    for start in _json_starts(text):
+        part = text[start:]
+        cut = part.rfind(_CLOSING_FENCE)
+        for piece in (part, part[:cut]) if cut > 0 else (part,):
+            try:
+                yield parser(piece)
+            except ValueError:
+                continue
 
 
 def read_answer(text: str) -> AnswerContract | None:
     """The answer from its whole text (JSON mode, fenced JSON, or JSON after a sentence); None when it
-    doesn't validate. It reads from where `draft_text` does, so the draft and the answer agree."""
-    part = _json_part(text)
-    if part is None:
-        return None
-    try:
-        return AnswerContract.model_validate(parse_json_markdown(part))
-    except ValueError:  # malformed JSON, or JSON that isn't the contract (ValidationError is a ValueError)
-        return None
+    doesn't validate. It tries the starts `draft_text` tries, so the draft and the answer agree."""
+    for parsed in _candidates(text, json.loads):
+        try:
+            return AnswerContract.model_validate(parsed)
+        except ValueError:  # JSON that isn't the contract
+            continue
+    return None
 
 
 def draft_text(partial: str) -> str:
     """The claims' text so far, read from the answer's JSON as it grows; never JSON or passage numbers."""
-    part = _json_part(partial)
-    if part is None:
-        return ""
-    try:
-        parsed: Any = parse_partial_json(part)
-    except ValueError:
-        return ""
-    claims = parsed.get("claims") if isinstance(parsed, dict) else None
-    if not isinstance(claims, list):
-        return ""
-    texts = [c["text"] for c in claims if isinstance(c, dict) and isinstance(c.get("text"), str)]
-    return " ".join(t for t in texts if t)
+    for parsed in _candidates(partial, parse_partial_json):
+        claims = parsed.get("claims") if isinstance(parsed, dict) else None
+        if isinstance(claims, list):
+            texts = [c["text"] for c in claims if isinstance(c, dict) and isinstance(c.get("text"), str)]
+            return " ".join(t for t in texts if t)
+    return ""
 
 
 def cite(answer: AnswerContract, passages: Sequence[SearchHit]) -> list[CitedClaim]:

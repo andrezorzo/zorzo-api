@@ -23,8 +23,8 @@ SHORT_DEADLINE_S, LONG_RESERVE_S = 4, 3
 # Verification out of time: the judge hangs past a short request deadline, with the answer allowed to start.
 VERIFY_REQUEST_DEADLINE_S, SMALL_RESERVE_S = 2.5, 0.5
 PING_S = 0.2
-# A reserve that leaves no time for the steps before the answer (the default request deadline is 20 s).
-RESERVE_BEYOND_THE_STEPS_S = 19.95
+# A request whose reserve leaves the steps before the answer a tenth of a second: a hanging route crosses it.
+STEPS_DEADLINE_S, STEPS_RESERVE_S = 2, 1.9
 CLAIMS = [("André used Lambda and Kinesis on AWS.", [1]), ("He built serverless pipelines.", [1, 2])]
 
 
@@ -174,11 +174,12 @@ def test_a_repaired_answer_publishes_its_own_claims(client: TestClient, fake: Fa
 
 
 def test_too_little_time_for_the_answer_goes_search_only(corpus_database: str, fake: FakeOpenRouter) -> None:
-    script(fake)
+    script(fake, route=Reply("unused"))
+    fake.schema_scripts["RouteResult"].appendleft("hang")
     with TestClient(
         build_app(
             api_settings(corpus_database),
-            limits={"answer_reserve": RESERVE_BEYOND_THE_STEPS_S},
+            limits={"request_deadline": STEPS_DEADLINE_S, "answer_reserve": STEPS_RESERVE_S},
             openrouter=fake,
         )
     ) as c:

@@ -8,12 +8,15 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 from rag_core.events import StreamEvent
+from rag_core.limits import Limits
 
 from tests.conftest import api_settings, build_app, create_migrated_database, drop_database
 from tests.contract.sse import Stream, read
 from tests.fakes.openrouter import FakeOpenRouter
 from tests.fakes.turnstile import DUMMY_TOKEN
 
+# A hung search: a short request deadline, a reserve within it, and pings while it waits.
+HUNG_DEADLINE_S, HUNG_RESERVE_S, FAST_PING_S = 0.2, 0.1, 0.05
 QUESTION = {
     "q": "Which AWS services has he used?",
     "session": "7b9e5c1e-6f0a-4a43-9a51-2d1f1c3b8a10",
@@ -220,8 +223,13 @@ def hung_search(client: TestClient) -> Stream:
             return []
 
     app.state.embedder = Hung()
-    app.state.limits = app.state.limits.model_copy(
-        update={"request_deadline": 0.2, "answer_reserve": 0.1, "ping_interval": 0.05}
+    app.state.limits = Limits.model_validate(
+        {
+            **app.state.limits.model_dump(),
+            "request_deadline": HUNG_DEADLINE_S,
+            "answer_reserve": HUNG_RESERVE_S,
+            "ping_interval": FAST_PING_S,
+        }
     )
     try:
         return ask(client)

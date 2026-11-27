@@ -118,3 +118,17 @@ def test_the_kind_follows_the_resolved_base_url(tmp_path: Path, monkeypatch: pyt
     assert load_models(write(tmp_path, text)).providers["openrouter"].kind == "openrouter"
     monkeypatch.setenv("ROUTER_URL", "http://ollama:11434/v1")
     assert load_models(write(tmp_path, text)).providers["openrouter"].kind == "openai"
+
+
+@pytest.mark.parametrize(
+    ("url", "kind"),
+    [
+        ("https://openrouter.ai/api/v1", "openrouter"),
+        ("https://eu.openrouter.ai/api/v1", "openrouter"),
+        ("https://openrouter.ai.proxy.internal/v1", "openai"),
+        ("http://ollama:11434/v1?via=openrouter.ai", "openai"),
+    ],
+)
+def test_the_kind_is_openrouter_only_for_its_hosts(tmp_path: Path, url: str, kind: str) -> None:
+    text = VALID.replace('"https://openrouter.ai/api/v1"', f'"{url}"')
+    assert load_models(write(tmp_path, text)).providers["openrouter"].kind == kind
