@@ -54,13 +54,16 @@ KEY_SHAPE = re.compile(
 )
 # A private key block: its header, then (within `MAX_PEM_CHARS`) its body and END line, so the whole is cut.
 PEM_HEADER = re.compile(r"-----BEGIN ([A-Z ]*)PRIVATE KEY-----")
-PEM_BODY = re.compile(r"[A-Za-z0-9+/=\s:,.-]*")
+PEM_BODY = re.compile(r"[A-Za-z0-9+/=\s:,.\\>\"'-]*")  # as written in a JSON string or a quote block
 MAX_PEM_CHARS = 8192
 # A run of key characters, with its `=` padding (`KEY=VALUE` and `?api_key=VALUE` are two runs).
 TOKEN = re.compile(rf"(?<![A-Za-z0-9_+-])[A-Za-z0-9_+-]{{{MIN_TOKEN_CHARS},}}=*(?![A-Za-z0-9_+-])")
 # A base64 run, which has `/`; one whose parts are all ordinary words or numbers is a path, not a key.
 BASE64 = re.compile(rf"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{{{MIN_TOKEN_CHARS},}}={{0,2}}(?![A-Za-z0-9+/])")
 WORD_SEPARATORS = re.compile(r"[-_]")
+# CamelCase: each capital starts a run of lowercase letters, but for one trailing run of capitals and a short
+# number (`MyRepo`, `ReactDOM`, `IntroducingGPT4`). Letters in random case (`wJalrXUtnFEMI`) are not.
+CAMEL_CASE = re.compile(r"(?:[A-Z][a-z]+)+[A-Z]*\d{0,2}")
 
 Span = tuple[int, int, str]
 
@@ -89,9 +92,10 @@ class Redactor:
             return REDACTED_MARK
         value = layers[-1]
         # A phone can hide in a layer the next one turns into markup (`&lt;b (11) 98765-4321&gt;`).
-        # A phone can also hide in a tag or an attribute (`<a title="(11) 91234-5678">`).
-        untagged = value.replace("<", " ").replace(">", " ")
-        spans = [*self._secret_spans(value), *pii.spans(value, self._allowed, [*layers[:-1], untagged])]
+        # A phone can also hide in a tag or an attribute (`<a title="(11) 91234-5678">`): read with the angle
+        # brackets as spaces, but only where the text has a tag, so `202 > 555 > 0173` stays a ranking.
+        untagged = value.replace("<", " ").replace(">", " ") if pii.HTML_TAG.search(value) else None
+        spans = [*self._secret_spans(value), *pii.spans(value, self._allowed, layers[:-1], untagged)]
         return _replace(value, self._outside_the_allowlist(value, spans))
 
     def walk(self, value: Any) -> Any:
@@ -193,12 +197,15 @@ def _is_a_path(run: str) -> bool:
 
 
 def _is_a_word(part: str) -> bool:
-    """All digits; all letters in one case (or capitalized); or a short mixed word such as `v2`. A part of
-    letters in random case (`wJalrXUtnFEMI`) is not a word."""
+    """All digits; a word of letters in one case, capitalized or CamelCase (shorter than a token); or a short
+    mixed word such as `v2`. A part of letters in random case (`wJalrXUtnFEMI`) is not a word."""
     if part.isdigit():
         return True
-    if part.isalpha():
-        return part.islower() or part.isupper() or part[1:].islower()
+    if len(part) < MIN_TOKEN_CHARS and (
+        (part.isalpha() and (part.islower() or part.isupper() or part[1:].islower()))
+        or CAMEL_CASE.fullmatch(part)
+    ):
+        return True
     return part.isalnum() and len(part) <= MAX_MIXED_WORD_CHARS
 
 

@@ -365,3 +365,59 @@ def test_a_short_decoded_form_of_a_secret_does_not_destroy_other_text() -> None:
 def test_a_phone_in_a_tag_or_an_attribute_is_found(text: str) -> None:
     redacted = REDACTOR.text(text)
     assert "91234" not in redacted and "[phone]" in redacted
+
+
+# -- the round-4 regressions -------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/andrezorzo/MyRepo/blob/main/src/v2",
+        "https://docs.python.org/3/library/asyncio/eventloop/AbstractEventLoop",
+        "https://github.com/facebook/react/tree/main/packages/ReactDOM/v18",
+        "https://aws.amazon.com/blogs/machine-learning/2024/11/27/AmazonBedrockKnowledgeBases",
+        "https://openai.com/index/IntroducingGPT4/v1/notes/2024/11/some-longer-title",
+    ],
+)
+def test_camel_case_path_parts_are_words(url: str) -> None:
+    assert REDACTOR.text(url) == url
+    assert REDACTOR.text(f"see {url} for more") == f"see {url} for more"
+
+
+def test_letters_in_random_case_are_not_camel_case() -> None:
+    from rag_core.services.redact import _is_a_word  # the rule itself, since a key is told by it
+
+    assert not _is_a_word("wJalrXUtnFEMI") and not _is_a_word("bPxRfiCYEXAMPLEKEY")
+    assert _is_a_word("MyRepo") and _is_a_word("ReactDOM") and _is_a_word("IntroducingGPT4")
+
+
+def test_a_private_key_in_a_json_string_or_a_quote_block_is_cut_whole() -> None:
+    body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7\\nabcd+/EFGH=="
+    json_text = f'{{"private_key": "-----BEGIN PRIVATE KEY-----\\n{body}\\n-----END PRIVATE KEY-----\\n"}}'
+    redacted = REDACTOR.text(json_text)
+    assert "MIIEvQ" not in redacted and "abcd" not in redacted and "END PRIVATE" not in redacted
+    quoted = (
+        "> -----BEGIN PRIVATE KEY-----\n> MIIEvQIBADANBg\n> abcd+/EFGH==\n> -----END PRIVATE KEY-----\nthen"
+    )
+    assert REDACTOR.text(quoted) == "> [secret]\nthen"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "ranking: 202 > 555 > 0173 votes, the rest of the answer here",
+        "sorted: 415 < 555 < 0132 ok",
+    ],
+)
+def test_angle_brackets_between_numbers_are_not_a_phone(text: str) -> None:
+    assert REDACTOR.text(text) == text
+
+
+def test_a_number_after_a_tag_is_cut_where_it_is() -> None:
+    assert REDACTOR.text("<b>Phone:</b> 11 > 98765-4321") == "<b>Phone:</b> [phone]"
+
+
+def test_a_single_case_letter_token_in_a_path_is_still_a_key() -> None:
+    redacted = REDACTOR.text("token users/12345/ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGH")
+    assert "ABCDEFGH" not in redacted and "[secret]" in redacted

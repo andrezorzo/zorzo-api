@@ -227,14 +227,18 @@ def personal_data(text: str, allowlist: Iterable[str] | Allowed = ()) -> list[st
     return rules
 
 
-def spans(text: str, ok: Allowed, also: Iterable[str] = ()) -> list[tuple[int, int, str]]:
+def spans(
+    text: str, ok: Allowed, also: Iterable[str] = (), same_length: str | None = None
+) -> list[tuple[int, int, str]]:
     """Where the text holds an email, phone, CPF or card number the rules of `personal_data` find, as
     `(start, end, placeholder)`; allowlisted ones are left out. Nothing is rewritten: the caller merges these
     with other detectors' spans (`rag_core.services.redact`).
 
     The text should already be as a page renders it (entities decoded, hidden characters gone). `also` are
     earlier forms of it (before an entity was decoded): a phone the matcher reads in one of them, which the
-    text's own markup hides from it, is found again in `text` and counts.
+    text's own markup hides from it, is found again in `text` and counts. `same_length` is `text` with
+    characters swapped one for one (a tag's brackets for spaces): the phones read from it are found in it, and
+    their positions are the text's own.
     """
     found = [
         (m.start(), m.end(), EMAIL_MARK)
@@ -249,6 +253,10 @@ def spans(text: str, ok: Allowed, also: Iterable[str] = ()) -> list[tuple[int, i
         # The matcher read the phone in the text as it prepares it (markup gone, a wrapped line joined). One
         # it can't find again as written is hidden too well to cut out: the whole text goes, failing closed.
         found += located or [(0, len(text), PHONE_MARK)]
+    if same_length is not None:
+        for raw in _unlisted_phones(same_length, ok):
+            located = [(m.start(), m.end(), PHONE_MARK) for m in _phone_in_text(raw).finditer(same_length)]
+            found += located or [(0, len(text), PHONE_MARK)]
     return found
 
 

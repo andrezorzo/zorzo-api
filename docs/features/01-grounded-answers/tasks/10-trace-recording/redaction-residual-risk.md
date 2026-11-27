@@ -30,3 +30,10 @@ review rounds. Each was weighed and accepted; the design is in the module's docs
   of everything. Settings hold none that short.
 - The redactor does not read the token's neighbours: a secret written with a character inserted inside it
   (`s e c r e t`) is not found. Only hidden characters, NFKC differences and entities are undone.
+- A path part in lowerCamelCase (`eventLoop`) or with a long digit suffix is not a word, so a long URL path
+  made of such parts is cut as a key. CamelCase here starts with a capital (`MyRepo`, `ReactDOM`,
+  `IntroducingGPT4`), which is what ordinary paths use; loosening it would also let letters in random case
+  through, and those are what a base64 key looks like.
+- A text with a real tag reads its `<` and `>` as spaces when looking for phones, so a lone `>` between two
+  number groups of that text can be taken for a phone's separator and redacted. Without a real tag it is left
+  alone (`202 > 555 > 0173` stays a ranking).
