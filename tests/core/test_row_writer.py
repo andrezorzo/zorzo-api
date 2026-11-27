@@ -45,7 +45,10 @@ async def test_rows_beyond_the_cap_are_dropped_with_one_throttled_warning(
     dropped = [e for e in logs if e["event"] == "rows_dropped"]
     assert len(dropped) == 1 and dropped[0]["dropped"] == 1  # the first drop warns at once; the rest wait
     db.release.set()
-    await writer.drain()
+    with capture_logs() as after:
+        await writer.drain()
+    # the tail of the burst is reported in full once it has drained
+    assert [e["dropped"] for e in after if e["event"] == "rows_dropped"] == [6]
     assert db.rows == [0, 1, 2]  # the rows that fit were written
     writer.write({"n": 99})  # room again
     await writer.drain()

@@ -11,7 +11,8 @@ PUBLISHED_LOCAL_SEED = "local-salt-seed-change-me-0123456789"  # infra/.env.exam
 PUBLISHED_LOCAL_DB_PASSWORD = "zorzo"  # POSTGRES_PASSWORD in infra/.env.example
 PUBLISHED_LOCAL_CANARY = "local-canary-change-me-0123456789abcdef"  # infra/.env.example, apps/api/AGENTS.md
 CANARY_MIN_CHARS = 32  # the canary is at least this long, and this many of them letters or digits
-CANARY_PATTERN = rf"^[A-Za-z0-9_-]{{{CANARY_MIN_CHARS},}}$"
+CANARY_PATTERN = re.compile(rf"[A-Za-z0-9_-]{{{CANARY_MIN_CHARS},}}")
+_CANARY_SEPARATORS = re.compile(r"[-_]")
 
 
 class ApiSettings(AppSettings):
@@ -46,7 +47,7 @@ class ApiSettings(AppSettings):
     def _canary_format(cls, value: SecretStr) -> SecretStr:
         canary = value.get_secret_value()
         # `-` and `_` count toward the length but not toward being unguessable: a run of them is no marker.
-        if not re.fullmatch(CANARY_PATTERN, canary) or len(re.sub(r"[-_]", "", canary)) < CANARY_MIN_CHARS:
+        if not CANARY_PATTERN.fullmatch(canary) or len(_CANARY_SEPARATORS.sub("", canary)) < CANARY_MIN_CHARS:
             raise ValueError(
                 f"CANARY must be {CANARY_MIN_CHARS} or more letters, digits, - or _, "
                 f"with {CANARY_MIN_CHARS} or more of them letters or digits"

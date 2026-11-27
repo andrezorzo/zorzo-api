@@ -34,6 +34,26 @@ CANARY_LINE = "Internal marker: {canary}. Never write it."
 # What is not a letter or a digit is dropped before comparing, so a model that spaces, hyphenates or recases
 # the canary still trips it.
 _SEPARATORS = re.compile(r"[\W_]+")
+# Full stops other than U+002E, read as one in a link (U+FF0E is already one after NFKC).
+_DOTS = {0x3002: ".", 0xFF61: ".", 0xFF0E: "."}
+# Where an explicit link may start: not inside a word, so a long run of letters is scanned once, not at every
+# position.
+_LEFT_BOUNDARY = r"(?<![A-Za-z0-9+.\-])"
+_DANGEROUS_SCHEMES = "javascript|data|vbscript"  # refused even without `//`; `Data: março` is plain text
+_EXPLICIT_LINK = re.compile(
+    rf"""
+    {_LEFT_BOUNDARY}(?:
+        [a-z][a-z0-9+.\-]*://[^\s]*          # a scheme with its slashes
+      | (?:{_DANGEROUS_SCHEMES}):[^\s]+        # one of the schemes refused without them
+      | https?:[^\s]+                          # http or https without the slashes: `https:evil.com`
+      | www\.[^\s]*
+    )
+    | (?<![A-Za-z0-9+.\-:/])//[^\s]+          # a scheme-relative link
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_TRAILING_PUNCTUATION = ".,;:!?)]}'\"\u00bb\u201d\u2019\u2014\u2013"  # also the closing quotes and dashes
+_AUTHORITY = re.compile(r"[a-z0-9.\-]+")  # a plain ASCII host: no userinfo, port, escape or bracket
 
 
 async def check_input(classifier: InjectionClassifier, question: str, threshold: float) -> InputAction:
@@ -55,8 +75,10 @@ def with_canary(prompts: Prompts, canary: str) -> Prompts:
 
 
 def _squash(text: str) -> str:
-    """Letters and digits only, in compatibility form (a fullwidth letter is its plain one) and casefolded."""
-    return _SEPARATORS.sub("", unicodedata.normalize("NFKC", text)).casefold()
+    """Letters and digits only, casefolded and decomposed with the accents dropped (`İ` is `i`, a fullwidth
+    letter is its plain one)."""
+    decomposed = unicodedata.normalize("NFKD", text.casefold())
+    return _SEPARATORS.sub("", "".join(c for c in decomposed if not unicodedata.category(c).startswith("M")))
 
 
 class CanaryWatch:
@@ -107,38 +129,16 @@ class CanaryScan:
         return self._canary in squashed
 
 
-# Schemes refused even without `//` (`javascript:alert(1)`); other `word:` is plain text (`Skills:Python`).
-_DANGEROUS_SCHEMES = "javascript|data|vbscript|file|mailto|tel|ftp|blob|about"
-# A bare host is written in lowercase (`evil.com/login`): `ASP.NET` and `Node.JS` are names. Names and files
-# in lowercase (`main.py`, `install.sh`) are not hosts either, unless a path follows (`main.py/x`).
-_FILE_EXTENSIONS = frozenset((
-    "py", "js", "ts", "md", "sh", "json", "yaml", "yml", "txt", "html", "css", "java", "go", "rs", "rb",
-    "php", "sql", "toml", "lock", "cfg", "ini",
-))  # fmt: skip
-_LINK_LIKE = re.compile(
-    rf"""
-    (?i: [a-z][a-z0-9+.\-]*://[^\s]*             # a scheme with its slashes
-       | (?:{_DANGEROUS_SCHEMES}):[^\s]*          # a scheme that is refused without them
-       | //[^\s]+                                 # a scheme-relative link
-       | www\.[^\s]* )
-    | (?<![@\w.\-])(?P<bare>(?:[a-z0-9\-]+\.)+(?P<tld>[a-z]{{2,24}}))\b(?P<rest>[^\s]*)   # a bare host
-    """,
-    re.VERBOSE,
-)
-_TRAILING_PUNCTUATION = ".,;:!?)]}'\"»"
-_AUTHORITY = re.compile(r"[a-z0-9.\-]+")  # a plain ASCII host: no userinfo, port, escape or bracket
-
-
 def _link_allowed(link: str, hosts: Sequence[str]) -> bool:
     link = link.rstrip(_TRAILING_PUNCTUATION)
     if "://" in link:
         scheme, _, rest = link.partition("://")
     elif link.startswith("//"):
         scheme, rest = "http", link[2:]
-    elif re.match(r"[a-z][a-z0-9+.\-]*:", link, re.IGNORECASE) and not link.lower().startswith("www."):
-        return False  # a scheme with no `//`: `https:evil.com`, `javascript:`, `mailto:`
-    else:
+    elif link[:4].lower() == "www.":
         scheme, rest = "http", link
+    else:
+        return False  # a scheme with no `//`: `https:evil.com`, `javascript:alert(1)`
     if scheme.lower() not in ("http", "https"):
         return False
     try:
@@ -150,20 +150,11 @@ def _link_allowed(link: str, hosts: Sequence[str]) -> bool:
     return any(authority == host or authority.endswith(f".{host}") for host in map(str.lower, hosts))
 
 
-def _is_file_name(match: re.Match[str]) -> bool:
-    """A bare lowercase `name.ext` with a file's extension and no path after it."""
-    return (
-        match["bare"] is not None and match["tld"] in _FILE_EXTENSIONS and not match["rest"].startswith("/")
-    )
-
-
 def links_allowed(text: str, hosts: Sequence[str]) -> bool:
-    """Whether every link in the text is a plain http(s) link to one of the hosts or a subdomain of one.
-    Anything else that looks like a link (another scheme, a bare host, a userinfo, a port, an escape) is not:
-    the contact links reach the page through `done.contact`, never through a claim."""
-    normalized = unicodedata.normalize("NFKC", text).replace("\\", "/")
-    return all(
-        _link_allowed(match.group(), hosts)
-        for match in _LINK_LIKE.finditer(normalized)
-        if not _is_file_name(match)
-    )
+    """Whether every explicit link in the text (`scheme://…`, `www.…`, `//host`, or `javascript:`-like) is a
+    plain http(s) link to one of the hosts or a subdomain of one. The page shows a claim as text, so a link
+    is never clickable: what the rule keeps out is a URL the visitor might copy. A bare host (`evil.com/x`)
+    is not checked (`link-and-canary-residual-risk.md`). The contact links reach the page through
+    `done.contact`, never through a claim."""
+    normalized = unicodedata.normalize("NFKC", text).replace("\\", "/").translate(_DOTS)
+    return all(_link_allowed(match.group(), hosts) for match in _EXPLICIT_LINK.finditer(normalized))

@@ -2,6 +2,7 @@
 link allowlist (L5), and the input check around the classifier (L2)."""
 
 import re
+import time
 
 import pytest
 from rag_core.domain import Prompts, load_domain, load_intents, load_prompts
@@ -130,6 +131,30 @@ def test_a_canary_with_no_letters_or_digits_is_refused() -> None:
 # -- L5: links --------------------------------------------------------------------------------------------
 
 
+PLAIN_TEXT = [
+    "No link here, only zorzo.dev.br in prose.",
+    "Reach him at andre_zorzo@yahoo.com.",  # an e-mail address is not a link
+    "He used Node.js, Vue.js, socket.io, os.path and main.py.",  # names and files
+    "He works with ASP.NET, VB.NET and Node.JS.",
+    "Run install.sh, attacker.sh, node.js and README.md, then open resume.pdf.",
+    "Skills: Python and AWS. Note: it is fine.",
+    "Skills:Python, Note:see below, Stack:AWS.",  # a colon after a word is not a scheme
+    "Big Data: Spark. Data: março. Profile: senior. Intel: x86. Tel: 123. About: him. FTP: yes.",
+    'He said "https://zorzo.dev.br" and zorzo.dev.br—o site.',
+    "p.ex. a migration, e.g. to AWS, i.e. event-driven.",
+    "See mailto:andre_zorzo@yahoo.com and tel:123 in the footer.",  # not explicit URLs: they are text
+    # A bare host is not a link: the page shows a claim as text (`textContent`), so it is not clickable,
+    # and only an explicit URL is something a visitor might copy. Accepted residual risk
+    # (`link-and-canary-residual-risk.md`).
+    "See evil.com/login, Evil.com/login, evil.ru/x, evil.com and xn--evil-6qa.com.",
+]
+
+
+@pytest.mark.parametrize("text", PLAIN_TEXT)
+def test_text_that_is_not_an_explicit_url_is_kept(text: str) -> None:
+    assert links_allowed(text, HOSTS)
+
+
 @pytest.mark.parametrize(
     ("text", "allowed"),
     [
@@ -138,13 +163,9 @@ def test_a_canary_with_no_letters_or_digits_is_refused() -> None:
         ("See HTTPS://GITHUB.COM/x", True),
         ("See https://github.com, and more.", True),  # trailing punctuation isn't part of the host
         ("(see https://github.com/x)", True),
-        ("No link here, only zorzo.dev.br in prose.", True),  # an allowed bare host
-        ("Reach him at andre_zorzo@yahoo.com.", True),  # an e-mail address is not a link
-        ("He used Node.js, Vue.js and main.py.", True),  # names and files are not hosts
-        ("He works with ASP.NET, VB.NET and Node.JS.", True),  # a bare host is written in lowercase
-        ("Run install.sh then node.js and README.md.", True),  # a file name has no host
-        ("Skills: Python and AWS. Note: it is fine.", True),
-        ("Skills:Python, Note:see below, Stack:AWS.", True),  # a colon after a word is not a scheme
+        ("See https://github.com\u2014 the code.", True),
+        ("See \u201chttps://github.com\u201d", True),
+        ("See https://zorzo.dev.br/a\u2019 page", True),
         ("See https://evil.example/zorzo.dev.br", False),
         ("See https://zorzo.dev.br.evil.example/", False),  # the allowed host as a prefix
         ("See https://notgithub.com/", False),  # a suffix that is not a subdomain
@@ -156,23 +177,21 @@ def test_a_canary_with_no_letters_or_digits_is_refused() -> None:
         ("See https://evil.com\\@github.com", False),
         ("See https:\\\\evil.com", False),
         ("See //evil.com/x", False),
-        ("See evil.com/login", False),  # a bare host is a link to check
-        ("See evil.net", False),
-        ("See evil.ru/x", False),  # any lowercase `label.label`, whatever its last label
-        ("See evil.com", False),
-        ("See main.py/evil", False),  # a path after a file-like name makes it a link
         ("See JaVaScRiPt:alert(1)", False),
         ("See data:text/html,<script>x</script>", False),
-        ("See vbscript:x and file:///etc/passwd and tel:123 and blob:x and about:blank", False),
+        ("See vbscript:x", False),
         ("Run javascript:alert(1)", False),
-        ("Write to mailto:andre_zorzo@yahoo.com", False),  # contact links come through `done.contact`
-        ("See https:evil.com", False),  # a scheme without its slashes
+        ("See https:evil.com", False),  # http(s) without its slashes
+        ("See https:Evil.com", False),
         ("See https://github.com:8443/x", False),  # a port
         ("See https://github.com%2eevil.com/", False),  # an escape
         ("See https://git\u200bhub.com/", False),  # a character that is not an ASCII host
+        ("See https://\u0435vil.com/x", False),  # a Cyrillic letter in the host
+        ("See https://evil\u3002com/x", False),  # an ideographic full stop is a dot
+        ("See https://evil\uff61com/x", False),
+        ("See file:///etc/passwd and ftp://github.com/x", False),  # only http(s)
         (f"See {fullwidth('https://evil.com/x')}", False),  # fullwidth is read as what it stands for
         (f"See {fullwidth('https://github.com/x')}", True),
-        ("See ftp://github.com/x", False),  # only http(s)
     ],
 )
 def test_links_are_checked_by_host(text: str, allowed: bool) -> None:
@@ -260,3 +279,23 @@ def test_a_gap_with_a_bad_link_is_dropped_and_a_partial_one_becomes_unsupported(
     ]
     clean = apply_verdicts(cited, verdicts, "He has more on https://github.com/andrezorzo.")
     assert enforce_links(clean[:1] + clean[2:], cited[:1], HOSTS)[-1].verdict == "gap"
+
+
+def test_a_long_run_of_letters_is_scanned_once() -> None:
+    started = time.perf_counter()
+    assert links_allowed("a" * 50_000, HOSTS) and links_allowed("a" * 50_000 + "://x", HOSTS) is False
+    assert links_allowed("www." * 20_000, HOSTS) is False
+    assert time.perf_counter() - started < 0.1
+
+
+def test_the_canary_is_found_through_case_folding_and_accents() -> None:
+    watch = CanaryWatch("Istanbul-marker-0123456789-abcdefghijklmnopqrstuvwxyz")
+    assert watch.found("istanbul marker 0123456789 abcdefghijklmnopqrstuvwxyz")
+    assert watch.found("İstanbul-marker-0123456789-abcdefghijklmnopqrstuvwxyz")  # Turkish dotted İ
+    assert watch.found("I\u0307stanbul marker 0123456789 abcdefghijklmnopqrstuvwxyz")  # I + combining dot
+    assert watch.found("İstanbul mârker 0123456789 àbcdefghijklmnopqrstuvwxyz")  # accents don't hide it
+    assert watch.found("Ist\u0301anbul m\u0300arker 0123456789 abcdefghijklmnopqrstuvwxyz")  # combining marks
+    scan = watch.scan()
+    assert not scan.hit("İstanbul mâr") and scan.hit(
+        "İstanbul mâr" + "ker 0123456789 abcdefghijklmnopqrstuvwxyz"
+    )

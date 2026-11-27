@@ -27,6 +27,7 @@ MODEL_FILES_SHA256 = {
 MAX_TOKENS = 512  # the model's `max_position_embeddings`; a question is far shorter
 MALICIOUS = 1  # the label index of `id2label`
 GUARD_SLOTS = 2
+BUSY_RETRY_S = 0.05  # between looks at a model whose slots are all held by threads still running
 
 
 def softmax_malicious(logits: Any) -> float:
@@ -41,6 +42,7 @@ class PromptGuardClassifier(shared.LazyModel[tuple[Any, Any]]):
 
     def __init__(self, cache_dir: Path) -> None:
         super().__init__(cache_dir, GUARD_SLOTS)
+        self._limiter: anyio.CapacityLimiter | None = None  # made on the first question, inside the loop
 
     def _build(self) -> tuple[Any, Any]:
         snapshot = shared.download_snapshot(MODEL, MODEL_REVISION, list(MODEL_FILES_SHA256), self.cache_dir)
@@ -48,13 +50,18 @@ class PromptGuardClassifier(shared.LazyModel[tuple[Any, Any]]):
         return _open(snapshot)
 
     async def score(self, text: str) -> float:
-        # CPU-bound: keep it off the event loop. A visitor can fill the slots with questions, so a busy
-        # model is waited for, never reported as a failure (which fails open): the caller's deadline ends it.
+        # CPU-bound: keep it off the event loop. A visitor can fill the slots with questions, so a busy model
+        # is waited for, never reported as a failure (which fails open): the caller's deadline ends the wait.
+        # The limiter makes the waiters queue on the event loop, holding no worker thread.
+        limiter = self._limiter or anyio.CapacityLimiter(GUARD_SLOTS)
+        self._limiter = limiter
         while True:
             try:
-                return await anyio.to_thread.run_sync(self._score, text, abandon_on_cancel=True)
-            except shared.ModelBusyError:
-                continue
+                return await anyio.to_thread.run_sync(
+                    self._score, text, abandon_on_cancel=True, limiter=limiter
+                )
+            except shared.ModelBusyError:  # a thread the deadline abandoned still holds a slot
+                await anyio.sleep(BUSY_RETRY_S)
 
     def _score(self, text: str) -> float:
         with self.slot():

@@ -37,6 +37,12 @@ class RowWriter:
         self._pending += 1
         self._background.spawn(self._write(params, context))
 
+    def _report_dropped(self) -> None:
+        """Say how many rows were dropped since the last warning (a burst's tail, once it has drained)."""
+        if self._dropped:
+            log.warning("rows_dropped", writer=self._failure_event, dropped=self._dropped)
+            self._dropped = 0
+
     def _drop(self) -> None:
         self._dropped += 1
         now = time.monotonic()
@@ -52,6 +58,9 @@ class RowWriter:
             log.error(self._failure_event, error=type(exc).__name__, **context)
         finally:
             self._pending -= 1
+            if self._pending == 0:  # the burst has drained: its tail is reported in full
+                self._report_dropped()
 
     async def drain(self, timeout: float | None = None) -> None:
         await self._background.drain(timeout)
+        self._report_dropped()
