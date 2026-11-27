@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator
+from typing import Any
 from uuid import UUID
 
 import structlog
@@ -11,12 +12,13 @@ from rag_core.agent.context import AgentContext
 from rag_core.agent.graph import run_agent
 from rag_core.errors import ApiError, ErrorCode
 from rag_core.events import Done, StreamEvent
-from rag_core.ports import StoreUnavailableError
+from rag_core.ports import StoreUnavailableError, TraceSink
 from rag_core.services import corpus as corpus_service
 from rag_core.services.client_ip import VIEWER_HEADER
 from rag_core.services.gate import Asker
 from rag_core.services.gateway import RequestSpend
-from rag_core.services.search_only import end_with_error, run_search_only
+from rag_core.services.search_only import run_search_only
+from rag_core.services.stream import end_with_error
 from rag_core.services.trace import FanOutSink
 from sse_starlette import EventSourceResponse, ServerSentEvent
 
@@ -40,6 +42,23 @@ class QueueSink:
 
     def record(self, event: StreamEvent) -> None:
         self.queue.put_nowait(event)
+
+
+def _agent_context(state: Any, sink: TraceSink, corpus_version: int, deadline_at: float) -> AgentContext:
+    """The graph's services and this request's limits, from what the app wired at startup."""
+    return AgentContext(
+        gateway=state.gateway,
+        embedder=state.embedder,
+        store=state.vector_store,
+        rerankers=state.rerankers,
+        limits=state.limits,
+        prompts=state.prompts,
+        languages=state.domain.languages,
+        sink=sink,
+        corpus_version=corpus_version,
+        deadline_at=deadline_at,
+        spend=RequestSpend(state.limits.request_cost_cap_usd),
+    )
 
 
 @router.post("/api/v1/ask")
@@ -93,19 +112,7 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                         deadline_at=deadline_at,
                     )
                 else:
-                    context = AgentContext(
-                        gateway=state.gateway,
-                        embedder=state.embedder,
-                        store=state.vector_store,
-                        rerankers=rerankers,
-                        limits=state.limits,
-                        prompts=state.prompts,
-                        languages=state.domain.languages,
-                        sink=sink,
-                        corpus_version=corpus.version,
-                        deadline_at=deadline_at,
-                        spend=RequestSpend(state.limits.request_cost_cap_usd),
-                    )
+                    context = _agent_context(state, sink, corpus.version, deadline_at)
                     await run_agent(question, UUID(trace_id), agent=state.agent, context=context)
             except Exception:
                 # Whatever escaped the service, the visitor's stream still ends with `done`.

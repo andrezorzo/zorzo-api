@@ -77,7 +77,6 @@ class SearchHit:
     title: str
     content: str
     score: float
-    kind: str = ""  # the document's kind (`faq`, `resume` …)
 
 
 @dataclass(frozen=True)

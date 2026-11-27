@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict
 from rag_core.ports import SearchHit
 
 Verdict = Literal["supported", "partial", "unsupported"]
-CheckedVerdict = Literal["supported", "partial", "unsupported", "gap"]
+CheckedVerdict = Literal[Verdict, "gap"]  # `gap`: the sentence naming what the passages don't cover
 
 _STRICT = ConfigDict(extra="forbid", frozen=True)
 
@@ -103,23 +103,23 @@ def judge_input(claims: Sequence[CitedClaim]) -> str:
     return "\n\n".join(blocks)
 
 
-def apply_verdicts(claims: Sequence[CitedClaim], verdicts: Verdicts, gap: str | None) -> list[CheckedClaim]:
-    """The published claims: a missing verdict is `unsupported`; a `partial` one keeps only its supported
-    part (without one it is `unsupported`); the gap sentence comes last."""
-    by_index = {v.i: v for v in verdicts.verdicts}
+def apply_verdicts(
+    claims: Sequence[CitedClaim], verdicts: Verdicts | None, gap: str | None
+) -> list[CheckedClaim]:
+    """The published claims: a claim without a valid citation or a verdict is `unsupported`; a `partial`
+    one keeps only its supported part (without one it is `unsupported`); the gap sentence comes last."""
+    by_index = {v.i: v for v in verdicts.verdicts} if verdicts else {}
     checked: list[CheckedClaim] = []
     for i, claim in enumerate(claims):
         sources = tuple(hit.id for hit in claim.passages)
         vote = by_index.get(i) if claim.passages else None
-        if vote is None or vote.verdict == "unsupported":
-            checked.append(CheckedClaim(claim.text, sources, "unsupported"))
-        elif vote.verdict == "partial":
-            if vote.supported_text and vote.supported_text.strip():
-                checked.append(CheckedClaim(vote.supported_text.strip(), sources, "partial"))
-            else:
-                checked.append(CheckedClaim(claim.text, sources, "unsupported"))
-        else:
+        kept = (vote.supported_text or "").strip() if vote else ""
+        if vote and vote.verdict == "supported":
             checked.append(CheckedClaim(claim.text, sources, "supported"))
+        elif vote and vote.verdict == "partial" and kept:
+            checked.append(CheckedClaim(kept, sources, "partial"))
+        else:
+            checked.append(CheckedClaim(claim.text, sources, "unsupported"))
     if gap and gap.strip():
         checked.append(CheckedClaim(gap.strip(), (), "gap"))
     return checked
@@ -128,7 +128,3 @@ def apply_verdicts(claims: Sequence[CitedClaim], verdicts: Verdicts, gap: str | 
 def coherent(claims: Sequence[CheckedClaim]) -> bool:
     """Something is left to publish: at least one claim `supported` or `partial`."""
     return any(c.verdict in ("supported", "partial") for c in claims)
-
-
-def needs_judge(claims: Sequence[CitedClaim]) -> bool:
-    return any(c.passages for c in claims)

@@ -6,8 +6,9 @@ reformulate → answer → verify → optional repair, with abstain, decline and
 
 import asyncio
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 from uuid import UUID
 
 import structlog
@@ -19,13 +20,12 @@ from rag_core.agent import nodes
 from rag_core.agent.context import AgentContext
 from rag_core.agent.state import AgentState
 from rag_core.events import Done, Outcome, Usage
-from rag_core.services.search_only import emit_degraded, end_with_error
+from rag_core.services.stream import emit_degraded, end_with_error
 from rag_core.units import MS_PER_S
 
 log = structlog.get_logger()
 
 Agent = CompiledStateGraph[AgentState, AgentContext, AgentState, AgentState]
-Step = Literal["route", "retrieve", "assess", "reformulate", "answer", "verify", "repair", "search_only"]
 
 
 @dataclass(frozen=True)
@@ -34,34 +34,28 @@ class RunResult:
     public_ok: bool | None  # None when `route` didn't answer
 
 
-def _after(next_step: Step) -> Any:
-    """The edge out of a step: the run's end, search-only, or `next_step`."""
+def _edge(next_step: Callable[[AgentState], str]) -> Callable[[AgentState], str]:
+    """The edge out of a step: the run's end when it set an outcome, search-only when it degraded,
+    otherwise `next_step`."""
 
     def edge(state: AgentState) -> str:
         if "outcome" in state:
             return END
         if "degraded" in state:
             return "search_only"
-        return next_step
+        return next_step(state)
 
     return edge
 
 
-def _after_retrieve(state: AgentState) -> str:
-    if "outcome" in state:
-        return END
-    # One pass: no second `assess` after a rewrite; strong evidence skips it.
-    return "answer" if state.get("reformulated") or state.get("skip_assess") else "assess"
+def _to(step: str) -> Callable[[AgentState], str]:
+    return _edge(lambda _: step)
 
 
-def _after_assess(state: AgentState) -> str:
-    if "degraded" in state:
-        return "search_only"
-    return "reformulate" if state.get("reformulate") else "answer"
-
-
-def _after_verify(state: AgentState) -> str:
-    return END if "outcome" in state else "repair"
+# One pass: no second `assess` after a rewrite; strong evidence skips it.
+_after_retrieve = _edge(lambda s: "answer" if s.get("reformulated") or s.get("skip_assess") else "assess")
+_after_assess = _edge(lambda s: "reformulate" if s.get("reformulate") else "answer")
+_after_verify = _to("repair")
 
 
 def build_graph() -> Agent:
@@ -75,13 +69,13 @@ def build_graph() -> Agent:
     graph.add_node("repair", nodes.repair_step)
     graph.add_node("search_only", nodes.search_only_step)
     graph.add_edge(START, "route")
-    graph.add_conditional_edges("route", _after("retrieve"), ["retrieve", "search_only", END])
-    graph.add_conditional_edges("retrieve", _after_retrieve, ["assess", "answer", END])
-    graph.add_conditional_edges("assess", _after_assess, ["reformulate", "answer", "search_only"])
-    graph.add_conditional_edges("reformulate", _after("retrieve"), ["retrieve", "search_only", END])
-    graph.add_conditional_edges("answer", _after("verify"), ["verify", "search_only", END])
-    graph.add_conditional_edges("verify", _after_verify, ["repair", END])
-    graph.add_conditional_edges("repair", _after("verify"), ["verify", "search_only", END])
+    graph.add_conditional_edges("route", _to("retrieve"), ["retrieve", "search_only", END])
+    graph.add_conditional_edges("retrieve", _after_retrieve, ["assess", "answer", "search_only", END])
+    graph.add_conditional_edges("assess", _after_assess, ["reformulate", "answer", "search_only", END])
+    graph.add_conditional_edges("reformulate", _to("retrieve"), ["retrieve", "search_only", END])
+    graph.add_conditional_edges("answer", _to("verify"), ["verify", "search_only", END])
+    graph.add_conditional_edges("verify", _after_verify, ["repair", "search_only", END])
+    graph.add_conditional_edges("repair", _to("verify"), ["verify", "search_only", END])
     graph.add_edge("search_only", END)
     return graph.compile()
 
@@ -108,7 +102,13 @@ async def run_agent(question: str, trace_id: UUID, *, agent: Agent, context: Age
         if context.drafted:
             outcome = "abstained"  # a draft is never published unverified
         else:
-            emit_degraded(context.sink, context.passages, context.corpus_version, "deadline", context.limits)
+            emit_degraded(
+                context.sink,
+                context.found,
+                context.corpus_version,
+                "deadline",
+                context.limits.degraded_max_passages,
+            )
             outcome = "degraded"
     except Exception:
         log.exception("agent_failed")

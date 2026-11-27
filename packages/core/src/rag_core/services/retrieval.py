@@ -5,7 +5,8 @@ from collections.abc import Sequence
 import structlog
 
 from rag_core.limits import Limits
-from rag_core.ports import Embedder, Reranker, SearchHit, VectorStore
+from rag_core.ports import Embedder, Reranker, SearchHit, TraceSink, VectorStore
+from rag_core.services.stream import stage
 
 log = structlog.get_logger()
 
@@ -36,3 +37,22 @@ async def rerank(
         except Exception:
             log.warning("rerank_level_failed", level=type(level).__name__, exc_info=True)
     return hits[: limits.rerank_top_n]
+
+
+async def retrieve(
+    question: str,
+    corpus_version: int,
+    sink: TraceSink,
+    embedder: Embedder,
+    store: VectorStore,
+    rerankers: Sequence[Reranker],
+    limits: Limits,
+    kinds: Sequence[str] | None = None,
+) -> list[SearchHit]:
+    """Search, then rerank, each as a step of the stream."""
+    with stage(sink, "retrieve"):
+        hits = await search(
+            question, corpus_version, embedder=embedder, store=store, limits=limits, kinds=kinds
+        )
+    with stage(sink, "rerank"):
+        return await rerank(question, hits, rerankers=rerankers, limits=limits)

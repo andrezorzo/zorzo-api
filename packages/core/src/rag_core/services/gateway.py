@@ -487,7 +487,7 @@ class ModelGateway:
     ) -> _Reservation | None:
         """Reserve the paid entry's estimate against the request and the day; None skips the entry."""
         assert entry.price is not None  # the config requires a price on a paid entry
-        prompt_tokens = math.ceil(chars / CHARS_PER_TOKEN)
+        prompt_tokens = estimate_tokens(chars)
         max_tokens = self.config.stage(stage).max_tokens
         estimate = (
             prompt_tokens * entry.price.input_per_mtok + max_tokens * entry.price.output_per_mtok
@@ -572,6 +572,11 @@ class ModelGateway:
             )
         except StoreUnavailableError as exc:
             log.error("budget_settle_failed", error=str(exc))
+
+
+def estimate_tokens(chars: int) -> int:
+    """Tokens in `chars` characters of text, rounded up, without a tokenizer."""
+    return math.ceil(chars / CHARS_PER_TOKEN)
 
 
 async def _aclose(chunks: AsyncIterator[object]) -> None:

@@ -1,7 +1,6 @@
 """F01-T06 AC2: reaching LangGraph's recursion backstop is a bug; the run abstains and logs it."""
 
 import asyncio
-from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
@@ -11,11 +10,10 @@ from rag_core.agent.graph import Agent, run_agent
 from rag_core.agent.state import AgentState
 from rag_core.domain import load_prompts
 from rag_core.events import StreamEvent
-from rag_core.limits import load_limits
 from rag_core.services.gateway import RequestSpend
 from structlog.testing import capture_logs
 
-LIMITS = load_limits(Path(__file__).resolve().parents[2] / "config/limits.yaml")
+from tests.core.test_gateway import LIMITS
 
 
 class Recorder:

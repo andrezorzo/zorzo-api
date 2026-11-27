@@ -5,11 +5,14 @@ import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
+from pydantic import BaseModel
+
 from rag_core.domain import Prompts
 from rag_core.events import Model, StageName
 from rag_core.limits import Limits
+from rag_core.models_config import StageName as ModelStage
 from rag_core.ports import Embedder, Reranker, SearchHit, TraceSink, VectorStore
-from rag_core.services.gateway import Completion, ModelGateway, RequestSpend
+from rag_core.services.gateway import Completion, ModelGateway, ModelsUnavailableError, RequestSpend
 
 
 @dataclass
@@ -28,15 +31,31 @@ class AgentContext:
     tokens_in: int = 0
     tokens_out: int = 0
     cost_usd: float = 0.0
-    drafted: bool = False  # a `token` reached the visitor
-    passages: list[SearchHit] = field(default_factory=list)  # the latest found, for a search-only end
+    # Read by the runner when the deadline cuts a step, outside the graph's state: whether a `token` reached
+    # the visitor, and the passages last found (untrimmed), for a search-only end.
+    drafted: bool = False
+    found: list[SearchHit] = field(default_factory=list)
 
-    def left(self) -> float:
+    def seconds_left(self) -> float:
         return self.deadline_at - asyncio.get_running_loop().time()
 
-    def count(self, step: StageName, completion: Completion) -> None:
+    def record(self, step: StageName, completion: Completion) -> None:
         """Add a model call's usage and cost, and tell the visitor which model answered."""
         self.tokens_in += completion.usage.tokens_in
         self.tokens_out += completion.usage.tokens_out
         self.cost_usd += completion.cost_usd
         self.sink.record(Model(stage=step, model=completion.model, provider=completion.provider))
+
+    async def call(
+        self, step: StageName, stage: ModelStage, messages: list[dict[str, str]], schema: type[BaseModel]
+    ) -> BaseModel | None:
+        """One schema-bound model call under the request's deadline and spend; None when the chain can't
+        answer."""
+        try:
+            completion = await self.gateway.complete(
+                stage, messages, schema=schema, deadline_at=self.deadline_at, spend=self.spend
+            )
+        except ModelsUnavailableError:
+            return None
+        self.record(step, completion)
+        return completion.parsed

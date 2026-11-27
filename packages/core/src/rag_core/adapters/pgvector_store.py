@@ -44,7 +44,7 @@ WITH vec AS (
     FROM (SELECT * FROM vec UNION ALL SELECT * FROM fts) ranked
     GROUP BY id
 )
-SELECT c.id, d.title, c.content, f.score, d.kind
+SELECT c.id, d.title, c.content, f.score
 FROM fused f
 JOIN chunks c ON c.id = f.id
 JOIN documents d ON d.id = c.document_id
@@ -95,7 +95,7 @@ class PgVectorStore:
                     "kinds": list(kinds) if kinds is not None else None,
                 },
             )
-            return [SearchHit(r.id, r.title, r.content, float(r.score), r.kind) for r in rows]
+            return [SearchHit(r.id, r.title, r.content, float(r.score)) for r in rows]
 
 
 class PgCorpusStore:
