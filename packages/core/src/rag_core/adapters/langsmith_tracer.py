@@ -46,8 +46,13 @@ class LangSmithTracer:
         return RunSink(self._client, self._project, trace_id, question, redactor)
 
     def flush(self, timeout: float) -> None:
-        """At shutdown: wait up to `timeout` for the queue to drain; what is left is dropped."""
+        """Wait up to `timeout` for the queue to drain (the tests read what the endpoint got)."""
         self._client.flush(timeout=timeout)
+
+    def close(self, timeout: float) -> None:
+        """At shutdown: wait up to `timeout` for the queue to drain, then stop the client's background
+        thread and close its session; what is left is dropped."""
+        self._client.close(timeout=timeout)
 
 
 class RunSink:

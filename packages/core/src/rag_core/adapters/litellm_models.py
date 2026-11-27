@@ -170,8 +170,11 @@ class LiteLLMModels:
             for deployment, value in active or []
         }
 
-    async def close(self) -> None:
+    def discard(self) -> None:
         self._router.discard()  # type: ignore[no-untyped-call]
+
+    async def close(self) -> None:
+        self.discard()
         await close_litellm_async_clients()  # type: ignore[no-untyped-call]
 
     async def _stream(

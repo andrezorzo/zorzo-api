@@ -231,6 +231,7 @@ def build_app(
     )
     # The gateway again, wired as the app wires it, with the stand-in's transport and the test limits.
     old: ModelGateway = app.state.gateway
+    old.models.discard()  # its Router's callbacks would otherwise pile up in LiteLLM's global lists
     app.state.openrouter = fake = openrouter or FakeOpenRouter()
     app.state.alerter = RecordingAlerter()
     config = served(old.config, fake)

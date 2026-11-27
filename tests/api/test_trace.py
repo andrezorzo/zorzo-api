@@ -36,6 +36,7 @@ PAID = "test/answer-paid"
 PAID_COST = 0.000321
 ROUTE_A, ROUTE_B = "test/route:free", "test/route-b:free"
 AMBIENT_WAIT_S = 1.0  # how long a background post would take to reach the fake endpoint
+HUNG_SHUTDOWN_DRAIN_S = 0.5
 HUNG_LANGSMITH_BOUND_S = 10  # the stream of a hung LangSmith ends well within the request deadline
 MIN_PROMPT_LINE_CHARS = 12  # a shorter line (a heading, a bullet) is too common to prove a leak
 TRACE_TABLES = ("questions_log", "public_traces", "log_events", "budget_daily")
@@ -232,6 +233,7 @@ def test_every_ending_leaves_the_trace_done_names(
 
 def with_two_route_entries(app: FastAPI, fake: FakeOpenRouter) -> None:
     """The route chain with a second free entry, which the test config doesn't have."""
+    app.state.gateway.models.discard()  # as `build_app` does for the gateway it replaces
     config = app.state.gateway.config
     route = config.stages.route
     second = Entry(provider="openrouter", model=ROUTE_B)
@@ -342,7 +344,10 @@ def test_langsmith_is_off_without_a_key(
     assert langsmith.received == []
 
 
-def test_a_hung_langsmith_never_holds_the_stream(corpus_database: str, fake: FakeOpenRouter) -> None:
+def test_a_hung_langsmith_never_holds_the_stream(
+    corpus_database: str, fake: FakeOpenRouter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("rag_api.main.SHUTDOWN_DRAIN_S", HUNG_SHUTDOWN_DRAIN_S)  # the hang isn't waited out
     langsmith = FakeLangSmith()
     langsmith.mode = "hang"
     script(fake)
@@ -354,8 +359,6 @@ def test_a_hung_langsmith_never_holds_the_stream(corpus_database: str, fake: Fak
         assert "claim" in stream.names()
         trace = trace_of(corpus_database, stream)
         assert trace["outcome"] == "answered"
-        app: Any = client.app
-        app.state.tracer.flush = lambda timeout: None  # don't wait out the hang at shutdown here
 
 
 def all_stored_text(url: str) -> str:

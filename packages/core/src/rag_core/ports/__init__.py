@@ -197,6 +197,11 @@ class ModelRouter(Protocol):
     async def cooldowns(self) -> dict[str, Cooldown]:
         """The entries cooling down now, by entry id."""
 
+    def discard(self) -> None:
+        """Release what the router registered in process-wide state (LiteLLM's callback lists), without
+        awaiting. A router that is replaced while the process lives, as the tests do, calls this; `close`
+        does it too."""
+
     async def close(self) -> None: ...
 
 

@@ -48,10 +48,10 @@ async def _warm_rerankers(app: FastAPI) -> None:
             log.warning("rerank_warmup_failed", level=type(level).__name__, exc_info=True)
 
 
-async def _flush_tracer(app: FastAPI) -> None:
-    """Give LangSmith's queue a moment to drain at shutdown; what is left is dropped."""
+async def _close_tracer(app: FastAPI) -> None:
+    """Give LangSmith's queue a moment to drain at shutdown, then stop its client; what is left is dropped."""
     if app.state.tracer is not None:
-        await anyio.to_thread.run_sync(app.state.tracer.flush, SHUTDOWN_DRAIN_S)
+        await anyio.to_thread.run_sync(app.state.tracer.close, SHUTDOWN_DRAIN_S)
 
 
 def _alerter(settings: ApiSettings) -> Alerter:
@@ -100,7 +100,7 @@ def create_app(settings: ApiSettings) -> FastAPI:
                         await app.state.trace_writes.drain(SHUTDOWN_DRAIN_S)
                     finally:
                         try:
-                            await _flush_tracer(app)
+                            await _close_tracer(app)
                         finally:
                             await db.close()
 
