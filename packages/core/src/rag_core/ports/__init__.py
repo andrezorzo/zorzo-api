@@ -3,14 +3,12 @@
 from collections.abc import AsyncIterator, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import Any, Literal, Protocol
+from uuid import UUID
 
 from rag_core.events import StreamEvent
-
-if TYPE_CHECKING:  # the services import these ports
-    from rag_core.services.trace import StoredTrace
 
 # Every candidate embedding model has 1024 dimensions (LLD "Open questions"); the dashboard's models
 # declare the same size for the `vector` columns.
@@ -197,11 +195,6 @@ class ModelRouter(Protocol):
     async def cooldowns(self) -> dict[str, Cooldown]:
         """The entries cooling down now, by entry id."""
 
-    def discard(self) -> None:
-        """Release what the router registered in process-wide state (LiteLLM's callback lists), without
-        awaiting. A router that is replaced while the process lives, as the tests do, calls this; `close`
-        does it too."""
-
     async def close(self) -> None: ...
 
 
@@ -327,9 +320,55 @@ class CorpusStore(Protocol):
     async def published_chunks(self, version: int) -> list[PublishedChunk]: ...
 
 
+@dataclass(frozen=True)
+class TraceFacts:
+    """What the request knows that no stream event carries."""
+
+    trace_id: UUID
+    question: str  # scrubbed (the redactor's `text`), as the trace and LangSmith store it
+    intent: str | None  # from `route`, None when it didn't answer
+    lang: str | None
+    public_ok: bool | None
+    corpus_version: int | None
+    model_config_version: str | None
+    retention: timedelta  # how long the trace lives (`RETENTION_PUBLIC_TRACES`)
+
+
+@dataclass(frozen=True)
+class SpanRow:
+    """One step that ended: a `trace_spans` row."""
+
+    step: str
+    started_at: datetime
+    latency_ms: int
+    model: str | None  # the model that answered last; None for a step with no model call
+    provider: str | None
+    fallback_reason: str | None
+    tokens_in: int | None
+    tokens_out: int | None
+    cost_usd: float
+
+
+@dataclass(frozen=True)
+class StoredTrace:
+    """What the trace store writes at the end of a request, already redacted."""
+
+    facts: TraceFacts
+    outcome: str
+    latency_ms: int
+    cost_usd: float
+    expires_at: datetime
+    payload: dict[str, Any]
+    spans: list[SpanRow]
+
+
 class TraceSink(Protocol):
     """Receives the step events: one fan-out per request hands each to the visitor's stream, the trace
-    recorder and, only with a LangSmith key, LangSmith (LLD "Components and dependencies")."""
+    recorder and LangSmith (LLD "Components and dependencies").
+
+    A sink may also define `finish(facts: TraceFacts)`, called once after the request with what no event
+    carries; the fan-out isolates its failures as it does those of `record`.
+    """
 
     def record(self, event: StreamEvent) -> None:
         """Never blocks."""
@@ -338,7 +377,7 @@ class TraceSink(Protocol):
 class TraceStore(Protocol):
     """Writes the trace of a finished request (LLD "Transactions")."""
 
-    async def write(self, trace: "StoredTrace") -> None:
+    async def write(self, trace: StoredTrace) -> None:
         """The public trace, its spans and the questions-log row in one transaction; a store that fails
         raises `StoreUnavailableError`."""
 
@@ -392,7 +431,10 @@ __all__ = [
     "Reranker",
     "SearchHit",
     "SecretScanner",
+    "SpanRow",
     "StoreUnavailableError",
+    "StoredTrace",
+    "TraceFacts",
     "TraceSink",
     "TraceStore",
     "VectorStore",

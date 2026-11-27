@@ -7,19 +7,16 @@ key. It fails closed: a long token that isn't a key is replaced too.
 """
 
 import re
-import unicodedata
 from collections.abc import Iterable
 from typing import Any
 
 from rag_core import pii
+from rag_core.hidden import strip_hidden
 
 SECRET_MARK = "[secret]"
 MIN_SECRET_CHARS = 4  # a shorter value would replace its characters everywhere
 MIN_TOKEN_CHARS = 32  # an unbroken run this long, mixing letters and digits, is taken for a key
-# Characters hidden from a reader (Unicode `Cc` control and `Cf` format: zero-width, bidi marks), but not the
-# line breaks and tabs of ordinary text.
-KEPT_CONTROLS = frozenset("\n\t")
-HIDDEN_CATEGORIES = frozenset({"Cc", "Cf"})
+KEPT_CONTROLS = "\n\t"  # the hidden characters (`rag_core.hidden`) ordinary text keeps
 # Key shapes: a known provider prefix, a JWT, a private key header.
 KEY_SHAPE = re.compile(
     r"\b(?:sk-[A-Za-z0-9_-]{8,}|gsk_[A-Za-z0-9]{8,}|nvapi-[A-Za-z0-9_-]{8,}|AIza[A-Za-z0-9_-]{8,}"
@@ -36,21 +33,19 @@ class Redactor:
     `secret_values()`, plus whatever a later setting adds, such as the canary)."""
 
     def __init__(self, allowlist: Iterable[str] = (), secrets: Iterable[str] = ()) -> None:
-        self._allowlist = tuple(allowlist)
+        self._allowed = pii.allowed(allowlist)  # prepared once, not per string
         # Longest first, so a secret that holds another is replaced whole.
         values = sorted({v for v in secrets if len(v.strip()) >= MIN_SECRET_CHARS}, key=len, reverse=True)
         self._secrets = re.compile("|".join(re.escape(v) for v in values)) if values else None
 
     def text(self, value: str) -> str:
         """The text with nothing hidden, no personal data and no secret."""
-        value = "".join(
-            c for c in value if c in KEPT_CONTROLS or unicodedata.category(c) not in HIDDEN_CATEGORIES
-        )
+        value = strip_hidden(value, keep=KEPT_CONTROLS)
         if self._secrets is not None:
             value = self._secrets.sub(SECRET_MARK, value)
         value = KEY_SHAPE.sub(SECRET_MARK, value)
         value = TOKEN.sub(lambda m: SECRET_MARK if _mixes_letters_and_digits(m.group()) else m.group(), value)
-        return pii.scrub(value, self._allowlist)
+        return pii.scrub(value, self._allowed)
 
     def walk(self, value: Any) -> Any:
         """A copy of a JSON-like value with every string redacted; other scalars pass unchanged."""

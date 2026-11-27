@@ -124,3 +124,7 @@ def test_the_whole_payload_is_walked() -> None:
 )
 def test_personal_data_hidden_from_the_plain_text_is_found(text: str, leaked: str) -> None:
     assert leaked not in REDACTOR.text(text)
+
+
+def test_a_lone_surrogate_is_removed() -> None:
+    assert REDACTOR.text("a\ud800b") == "ab"  # JSON lets it through, UTF-8 can't encode it

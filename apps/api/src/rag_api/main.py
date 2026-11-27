@@ -1,9 +1,11 @@
 """FastAPI app factory: validates settings, loads the domain and reflects the schema at startup."""
 
+import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 import anyio
+import langsmith
 import structlog
 from fastapi import FastAPI
 from rag_core.adapters.alerts import LogAlerter, TelegramAlerter
@@ -48,10 +50,20 @@ async def _warm_rerankers(app: FastAPI) -> None:
             log.warning("rerank_warmup_failed", level=type(level).__name__, exc_info=True)
 
 
-async def _close_tracer(app: FastAPI) -> None:
-    """Give LangSmith's queue a moment to drain at shutdown, then stop its client; what is left is dropped."""
-    if app.state.tracer is not None:
-        await anyio.to_thread.run_sync(app.state.tracer.close, SHUTDOWN_DRAIN_S)
+async def _shut_down(app: FastAPI) -> None:
+    """The independent closes, at once: the bot check's client, the gateway's background work (budget
+    settles, alerts), the trace writes and LangSmith's queue. Each failure is logged, never stops the rest;
+    the whole takes about `SHUTDOWN_DRAIN_S`, within Docker's 10 s."""
+    closing = {
+        "bot_check": app.state.gate.bot_check.close(),
+        "gateway": app.state.gateway.close(),
+        "trace_writes": app.state.trace_writes.drain(SHUTDOWN_DRAIN_S),
+        "tracer": anyio.to_thread.run_sync(app.state.tracer.close, SHUTDOWN_DRAIN_S),
+    }
+    results = await asyncio.gather(*closing.values(), return_exceptions=True)
+    for name, result in zip(closing, results, strict=True):
+        if isinstance(result, BaseException):
+            log.error("shutdown_failed", part=name, error=type(result).__name__)
 
 
 def _alerter(settings: ApiSettings) -> Alerter:
@@ -80,29 +92,15 @@ def create_app(settings: ApiSettings) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        try:
+        async with AsyncExitStack() as shutdown:  # unwinds last in, first out
+            shutdown.push_async_callback(db.close)  # the database closes last, after everything that writes
+            shutdown.push_async_callback(_shut_down, app)
             await db.reflect()
             await check_text_search(
                 db, domain.languages.values()
             )  # a language Postgres can't search stops it
             await _warm_rerankers(app)
             yield
-        finally:
-            # Each close runs even when an earlier one raises; the database closes last, after the
-            # gateway's pending budget settles and alerts, and the trace writes.
-            try:
-                await app.state.gate.bot_check.close()
-            finally:
-                try:
-                    await app.state.gateway.close()
-                finally:
-                    try:
-                        await app.state.trace_writes.drain(SHUTDOWN_DRAIN_S)
-                    finally:
-                        try:
-                            await _close_tracer(app)
-                        finally:
-                            await db.close()
 
     app = FastAPI(title="rag-api", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.domain = domain
@@ -126,7 +124,12 @@ def create_app(settings: ApiSettings) -> FastAPI:
         settings.app_env,
     )
     app.state.trace_sinks = []  # extra sinks next to the stream and the recorder, for the tests
-    app.state.tracer = build_tracer(settings)  # LangSmith only with a key; ambient tracing off either way
+    # LangChain's own tracing would send the graph's state unredacted: off, key or not (LLD "Tracing").
+    langsmith.configure(enabled=False)
+    key = settings.langsmith_api_key
+    app.state.tracer = build_tracer(
+        key.get_secret_value() if key else None, settings.langsmith_project, settings.langsmith_endpoint
+    )
     app.state.trace_store = PostgresTraceStore(db)
     app.state.trace_writes = BackgroundTasks()  # the end-of-request writes, drained at shutdown
     # Everything the stored trace gets passes this first (LLD "Security", trace redaction).

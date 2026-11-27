@@ -1,9 +1,7 @@
 """Builds the adapters chosen by settings; the apps call these at startup."""
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Protocol, get_args
-
-from pydantic import SecretStr
+from typing import TYPE_CHECKING, get_args
 
 from rag_core.adapters.postgres import Database
 from rag_core.limits import Limits
@@ -102,27 +100,8 @@ def rerank_chain(gateway: ModelGateway, local: list[Reranker]) -> list[Reranker]
     return [*remote, *local]
 
 
-class LangSmithSettings(Protocol):
-    """The settings of an app that can trace to LangSmith."""
+def build_tracer(api_key: str | None, project: str | None, endpoint: str | None) -> "LangSmithTracer":
+    """LangSmith's tracer: it sends runs only when `api_key` is set, and is a no-op otherwise."""
+    from rag_core.adapters.langsmith_tracer import LangSmithTracer
 
-    @property
-    def langsmith_api_key(self) -> SecretStr | None: ...
-
-    @property
-    def langsmith_project(self) -> str | None: ...
-
-    @property
-    def langsmith_endpoint(self) -> str | None: ...
-
-
-def build_tracer(settings: LangSmithSettings) -> "LangSmithTracer | None":
-    """LangSmith's tracer, only when a key is set; LangChain's own tracing is off either way (see
-    `adapters/langsmith_tracer.py`)."""
-    from rag_core.adapters.langsmith_tracer import LangSmithTracer, disable_ambient_tracing
-
-    disable_ambient_tracing()
-    if settings.langsmith_api_key is None:
-        return None
-    return LangSmithTracer(
-        settings.langsmith_api_key.get_secret_value(), settings.langsmith_project, settings.langsmith_endpoint
-    )
+    return LangSmithTracer(api_key, project, endpoint)

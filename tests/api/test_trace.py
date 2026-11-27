@@ -21,13 +21,12 @@ from psycopg.rows import dict_row
 from rag_core.adapters.factory import build_gateway, rerank_chain
 from rag_core.events import StreamEvent
 from rag_core.models_config import Entry
-from rag_core.ports import StoreUnavailableError
-from rag_core.services.trace import StoredTrace
+from rag_core.ports import StoredTrace, StoreUnavailableError
 from structlog.testing import capture_logs
 
 from tests.api.test_answer import ANSWER_A, ANSWER_B, CLAIMS, answer, routed, script, stages, verdicts
 from tests.api.test_ask import QUESTION, ask
-from tests.conftest import api_settings, build_app, reset_tables, seed_budget
+from tests.conftest import api_settings, build_app, discard_models, reset_tables, seed_budget
 from tests.contract.sse import Stream
 from tests.fakes.langsmith import FakeLangSmith
 from tests.fakes.openrouter import FakeOpenRouter, Reply
@@ -55,6 +54,16 @@ def client(corpus_database: str, fake: FakeOpenRouter) -> Iterator[TestClient]:
     reset_tables(corpus_database, "budget_daily")
 
 
+def asked(client: TestClient, body: dict[str, Any] | None = None) -> Stream:
+    """A question asked and its trace written: the write runs in the background after the stream ends, so
+    the app's writes are drained (not slept on) before anything reads the database."""
+    stream = ask(client, body)
+    app: Any = client.app
+    assert client.portal is not None
+    client.portal.call(app.state.trace_writes.drain)  # the app's own loop
+    return stream
+
+
 def trace_of(url: str, stream: Stream) -> dict[str, Any]:
     """The `public_traces` row `done` names, with its spans in order."""
     trace_id = stream.only("done")[0].data["trace_id"]
@@ -79,7 +88,7 @@ def test_the_stored_trace_comes_from_the_streams_events(
     fake.scripts[ANSWER_A].appendleft("error")  # the free answer entries fail, so the paid one answers
     fake.scripts[ANSWER_B].appendleft("error")
     fake.script(PAID, paid_answer())
-    stream = ask(client)
+    stream = asked(client)
     trace = trace_of(corpus_database, stream)
 
     ends = {(e.data["name"]): e.data["ms"] for e in stream.only("stage") if e.data["status"] == "end"}
@@ -135,7 +144,7 @@ def test_the_trace_is_written_after_the_stream(
     app.state.trace_sinks.append(LooksUp())
     script(fake)
     try:
-        stream = ask(client)
+        stream = asked(client)
     finally:
         app.state.trace_sinks.clear()
     assert [kind for kind, _ in seen] == stream.names()  # every event, `done` last
@@ -156,7 +165,7 @@ def test_a_failed_trace_write_still_ends_the_stream(client: TestClient, fake: Fa
     app.state.trace_store = Down()
     script(fake)
     with capture_logs(processors=[structlog.contextvars.merge_contextvars]) as logs:
-        stream = ask(client)
+        stream = asked(client)
     done = stream.only("done")[0].data
     assert stream.names()[-1] == "done"
     [failed] = [line for line in logs if line["event"] == "trace_write_failed"]
@@ -218,7 +227,7 @@ def test_every_ending_leaves_the_trace_done_names(
     routed_facts: tuple[str | None, str | None, bool],
 ) -> None:
     ending(fake=fake, url=corpus_database, monkeypatch=monkeypatch)
-    stream = ask(client)
+    stream = asked(client)
     trace = trace_of(corpus_database, stream)
     assert stream.only("done")[0].data["outcome"] == outcome
     assert trace["outcome"] == outcome
@@ -233,7 +242,7 @@ def test_every_ending_leaves_the_trace_done_names(
 
 def with_two_route_entries(app: FastAPI, fake: FakeOpenRouter) -> None:
     """The route chain with a second free entry, which the test config doesn't have."""
-    app.state.gateway.models.discard()  # as `build_app` does for the gateway it replaces
+    discard_models(app.state.gateway)  # as `build_app` does for the gateway it replaces
     config = app.state.gateway.config
     route = config.stages.route
     second = Entry(provider="openrouter", model=ROUTE_B)
@@ -267,7 +276,7 @@ def test_a_fallback_is_recorded_in_the_model_event_and_the_span(
         else:
             fake.script_schema("RouteResult", first)
         script(fake)
-        stream = ask(client)
+        stream = asked(client)
     trace = trace_of(corpus_database, stream)
     route = next(e.data for e in stream.only("model") if e.data["stage"] == "route")
     assert (route["model"], route["fallback_reason"]) == (ROUTE_B, reason)
@@ -308,7 +317,7 @@ def test_langsmith_gets_the_same_steps(corpus_database: str, fake: FakeOpenRoute
     langsmith = FakeLangSmith()
     script(fake)
     with traced_client(corpus_database, fake, langsmith) as client:
-        stream = ask(client)
+        stream = asked(client)
         flush(client)
     root_id = stream.only("done")[0].data["trace_id"]
     runs = langsmith.runs()
@@ -353,7 +362,7 @@ def test_a_hung_langsmith_never_holds_the_stream(
     script(fake)
     with traced_client(corpus_database, fake, langsmith) as client:
         started = time.monotonic()
-        stream = ask(client)
+        stream = asked(client)
         assert time.monotonic() - started < HUNG_LANGSMITH_BOUND_S
         assert stream.names()[-1] == "done"
         assert "claim" in stream.names()
@@ -379,7 +388,7 @@ def test_the_stored_trace_and_langsmith_are_redacted(corpus_database: str, fake:
         judge=verdicts((0, "supported"), (1, "supported"), (2, "supported")),
     )
     with traced_client(corpus_database, fake, langsmith) as client:
-        stream = ask(client, {**QUESTION, "q": HIDDEN_QUESTION})
+        stream = asked(client, {**QUESTION, "q": HIDDEN_QUESTION})
         flush(client)
         app: Any = client.app
         prompts = [line.strip() for p in app.state.prompts.model_dump().values() for line in p.splitlines()]

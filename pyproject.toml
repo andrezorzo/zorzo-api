@@ -116,6 +116,7 @@ ignore_imports = [
     "rag_core.adapters.** -> litellm",
     "rag_core.adapters.** -> openai",
     "rag_core.adapters.** -> langsmith",
+    "rag_api.main -> langsmith",  # turns LangChain's own tracing off at startup
 ]
 # Apps wire adapters at startup, so an app reaching a client through an adapter is allowed.
 allow_indirect_imports = true

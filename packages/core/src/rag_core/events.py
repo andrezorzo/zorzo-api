@@ -139,6 +139,12 @@ class Done(StreamEvent):
         description="Id of the closest example question, on an abstention or decline"
     )
 
+    @property
+    def stored_outcome(self) -> str:
+        """The outcome the stored trace and the questions log keep: `cached` when the answer came from the
+        cache (LLD "Stream events")."""
+        return "cached" if self.cached else self.outcome
+
 
 EVENTS: tuple[type[StreamEvent], ...] = (
     Stage,

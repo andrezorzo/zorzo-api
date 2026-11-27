@@ -13,6 +13,7 @@ import math
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
+from enum import StrEnum
 
 import structlog
 from langchain_core.utils.json import parse_json_markdown
@@ -53,19 +54,28 @@ MAX_COST_OVER_ESTIMATE = 2
 # The background work gets this long at shutdown, its three kinds at once, plus a short wait for what it
 # cancels (`CANCEL_WAIT_S`): Docker kills the container 10 s after SIGTERM.
 SHUTDOWN_DRAIN_S = 6.0
-# Why an entry didn't answer, as the trace records it (`Completion.fallback_reason`). Not here: `budget` and
-# `request_cap`, the reasons for skipping the paid entry, which is last in the chain, so no later entry
-# answers with them (see the plan's AC5).
-COOLING_DOWN, RATE_LIMITED_REASON, TIMEOUT, FAILED = "cooling_down", "rate_limited", "timeout", "failed"
 
 
-def _reason(exc: BaseException) -> str:
+class Why(StrEnum):
+    """Why an entry didn't answer. The first four are what the trace records (`Completion.fallback_reason`);
+    not here: `budget` and `request_cap`, the reasons for skipping the paid entry, which is last in the chain,
+    so no later entry answers with them (see the plan's AC5). `OUT_OF_TIME` ends the walk: nothing answers
+    after it."""
+
+    COOLING_DOWN = "cooling_down"
+    RATE_LIMITED = "rate_limited"
+    TIMEOUT = "timeout"
+    FAILED = "failed"
+    OUT_OF_TIME = "out_of_time"
+
+
+def _reason(exc: BaseException) -> Why:
     """Why a failed call didn't answer, as the trace names it."""
     if isinstance(exc, CoolingDownError):
-        return COOLING_DOWN
+        return Why.COOLING_DOWN
     if isinstance(exc, RateLimitedError):
-        return RATE_LIMITED_REASON
-    return TIMEOUT if isinstance(exc, TimeoutError) else FAILED
+        return Why.RATE_LIMITED
+    return Why.TIMEOUT if isinstance(exc, TimeoutError) else Why.FAILED
 
 
 class ModelsUnavailableError(Exception):
@@ -108,7 +118,7 @@ class _Outcome:
 
     completion: Completion | None = None
     failed: bool = False
-    reason: str = FAILED  # why this entry didn't answer, when it didn't
+    reason: Why = Why.FAILED  # why this entry didn't answer, when it didn't
 
 
 @dataclass
@@ -163,12 +173,11 @@ class ModelGateway:
         json_schema = schema.model_json_schema() if schema is not None else None
         chain = self.config.stage(stage)
         await self._note_cooldowns()
-        why: str | None = None
+        why: Why | None = None
         for entry in chain.free:
             for _ in range(ATTEMPTS_PER_FREE_ENTRY):
-                if not self._callable(stage, entry, deadline_at):
-                    if self._cooling_down(stage, entry):
-                        why = COOLING_DOWN
+                if (skip := self._skip(stage, entry, deadline_at)) is not None:
+                    why = skip if skip is Why.COOLING_DOWN else why
                     break
                 try:
                     async with asyncio.timeout_at(deadline_at):
@@ -188,7 +197,7 @@ class ModelGateway:
                 completion = self._completion(stage, entry, result, schema, cost=0.0)
                 if completion is not None:
                     return replace(completion, fallback_reason=why)
-                why = FAILED  # the model's miss
+                why = Why.FAILED  # the model's miss
         reservation = await self._paid_reservation(stage, messages, deadline_at, spend)
         if reservation is not None:
             paid_result = await self._paid_call(
@@ -220,12 +229,11 @@ class ModelGateway:
         """
         chain = self.config.stage(stage)
         await self._note_cooldowns()
-        why: str | None = None
+        why: Why | None = None
         for entry in chain.free:
             for _ in range(ATTEMPTS_PER_FREE_ENTRY):
-                if not self._callable(stage, entry, deadline_at):
-                    if self._cooling_down(stage, entry):
-                        why = COOLING_DOWN
+                if (skip := self._skip(stage, entry, deadline_at)) is not None:
+                    why = skip if skip is Why.COOLING_DOWN else why
                     break
                 chunks = self.models.stream(
                     entry_id(stage, entry),
@@ -280,7 +288,7 @@ class ModelGateway:
         window_ends_at: float | None = None
         await self._note_cooldowns()
         for entry in self.config.stage("rerank").free:
-            if not self._callable("rerank", entry, min(deadline_at, window_ends_at or math.inf)):
+            if self._skip("rerank", entry, min(deadline_at, window_ends_at or math.inf)) is not None:
                 continue
             first = window_ends_at is None
             if window_ends_at is None:
@@ -369,12 +377,11 @@ class ModelGateway:
 
     # -- calls --------------------------------------------------------------------------------------------
 
-    def _cooling_down(self, stage: StageName, entry: Entry) -> bool:
-        return entry_id(stage, entry) in self._cooling
-
-    def _callable(self, stage: StageName, entry: Entry, deadline_at: float) -> bool:
-        """Time is left and the entry isn't cooling down."""
-        return not self._out_of_time(deadline_at) and entry_id(stage, entry) not in self._cooling
+    def _skip(self, stage: StageName, entry: Entry, deadline_at: float) -> Why | None:
+        """Why the entry isn't called (no time left, or it is cooling down); None when it can be."""
+        if self._out_of_time(deadline_at):
+            return Why.OUT_OF_TIME
+        return Why.COOLING_DOWN if entry_id(stage, entry) in self._cooling else None
 
     async def _relay(
         self,
@@ -434,7 +441,7 @@ class ModelGateway:
     ) -> _Reservation | None:
         """The paid entry's reservation, when the stage has one, time is left and it isn't cooling down."""
         paid = self.config.stage(stage).paid
-        if paid is None or not self._callable(stage, paid, deadline_at):
+        if paid is None or self._skip(stage, paid, deadline_at) is not None:
             return None
         return await self._reserve(stage, paid, _prompt_chars(messages), spend)
 

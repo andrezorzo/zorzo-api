@@ -174,39 +174,46 @@ def _allowed_phone_shapes(allowlist: tuple[str, ...]) -> _PhoneShapes:
     return _PhoneShapes(frozenset(international), frozenset(national))
 
 
-def _unlisted_phones(text: str, allowlist: tuple[str, ...], allowed_strings: set[str]) -> list[str]:
+@dataclass(frozen=True)
+class Allowed:
+    """The domain's `pii_allowlist`, prepared once: exact strings and the shapes of its phones."""
+
+    strings: frozenset[str]
+    phones: _PhoneShapes
+
+
+def allowed(allowlist: Iterable[str] = ()) -> Allowed:
+    entries = tuple(allowlist)
+    return Allowed(frozenset(_same_spaces(a) for a in entries), _allowed_phone_shapes(entries))
+
+
+def _unlisted_phones(text: str, ok: Allowed) -> list[str]:
     """The phones the allowlist doesn't cover: neither their exact text nor their shape in one of their
     countries."""
-    shapes = _allowed_phone_shapes(allowlist)
     return [
         raw
         for raw, countries in _phone_spans(text).items()
-        if _same_spaces(raw) not in allowed_strings
-        and _digit_groups(raw) not in shapes.international
-        and not any((country, _digit_groups(raw)) in shapes.national for country in countries)
+        if _same_spaces(raw) not in ok.strings
+        and _digit_groups(raw) not in ok.phones.international
+        and not any((country, _digit_groups(raw)) in ok.phones.national for country in countries)
     ]
-
-
-def _unlisted_phone(text: str, allowlist: tuple[str, ...], allowed_strings: set[str]) -> bool:
-    return bool(_unlisted_phones(text, allowlist, allowed_strings))
 
 
 def _same_spaces(value: str) -> str:
     return WHITESPACE.sub(" ", value).lower()
 
 
-def personal_data(text: str, allowlist: Iterable[str] = ()) -> list[str]:
+def personal_data(text: str, allowlist: Iterable[str] | Allowed = ()) -> list[str]:
     """The PII rules a text breaks; matches equal to an allowlisted string don't count."""
     # CRLF and non-breaking spaces would otherwise dodge the patterns and the allowlist.
     text = text.replace("\r\n", "\n")
-    allowlist = tuple(allowlist)
-    allowed = {_same_spaces(a) for a in allowlist}
+    ok = allowlist if isinstance(allowlist, Allowed) else allowed(allowlist)
     # Emails, CPFs and cards are also read as the page renders them: entities decoded, zero-width gone.
     texts = (text, ZERO_WIDTH.sub("", html.unescape(text)))
     rules = []
-    if any(_same_spaces(e) not in allowed for t in texts for e in _emails(t)):
+    if any(_same_spaces(e) not in ok.strings for t in texts for e in _emails(t)):
         rules.append("pii:email")
-    if _unlisted_phone(text, allowlist, allowed):
+    if _unlisted_phones(text, ok):
         rules.append("pii:phone")
     if any(_cpf_valid(m.group()) for t in texts for m in CPF.finditer(t)):
         rules.append("pii:cpf")
@@ -216,35 +223,36 @@ def personal_data(text: str, allowlist: Iterable[str] = ()) -> list[str]:
 
 
 EMAIL_MARK, PHONE_MARK, CPF_MARK, CARD_MARK = "[email]", "[phone]", "[cpf]", "[card]"
+# What can hide a match from the plain text: an entity, a wrapped line, markup, zero-width characters.
+HIDING_FORMS = re.compile(r"[&<\n\r*_`\\\u200b-\u200d\u2060\ufeff]")
 
 
-def scrub(text: str, allowlist: Iterable[str] = ()) -> str:
+def scrub(text: str, ok: Allowed) -> str:
     """The text with every email, phone, CPF and card number the rules of `personal_data` find replaced by
     its placeholder; allowlisted ones stay.
 
     A match hidden from the plain text (an HTML entity, a line wrapped inside a phone) is replaced in the
     text as the page renders it, which then replaces the original, so nothing the detectors find survives.
+    Only a text with a form that can hide a match gets that second look.
     """
-    allowlist = tuple(allowlist)
-    cleaned = _scrub_plain(text.replace("\r\n", "\n"), allowlist)
-    if personal_data(cleaned, allowlist):
-        cleaned = _scrub_plain(_prepare_for_phones(html.unescape(cleaned)), allowlist)
+    cleaned = _scrub_plain(text.replace("\r\n", "\n"), ok)
+    if HIDING_FORMS.search(cleaned) and personal_data(cleaned, ok):
+        cleaned = _scrub_plain(_prepare_for_phones(html.unescape(cleaned)), ok)
     return cleaned
 
 
-def _scrub_plain(text: str, allowlist: tuple[str, ...]) -> str:
-    allowed = {_same_spaces(a) for a in allowlist}
-    text = EMAIL_CHAIN.sub(lambda m: _email_mark(m.group(), allowed), text)
+def _scrub_plain(text: str, ok: Allowed) -> str:
+    text = EMAIL_CHAIN.sub(lambda m: _email_mark(m.group(), ok), text)
     text = CPF.sub(lambda m: CPF_MARK if _cpf_valid(m.group()) else m.group(), text)
     text = CARD.sub(lambda m: CARD_MARK if _luhn(m.group()) else m.group(), text)
     # Longest first, so a phone isn't half replaced through a shorter one inside it.
-    for raw in sorted(_unlisted_phones(text, allowlist, allowed), key=len, reverse=True):
+    for raw in sorted(_unlisted_phones(text, ok), key=len, reverse=True):
         text = text.replace(raw, PHONE_MARK)
     return text
 
 
-def _email_mark(chain: str, allowed: set[str]) -> str:
+def _email_mark(chain: str, ok: Allowed) -> str:
     """The placeholder for a chain of `@`s that holds an address the allowlist doesn't cover; else itself."""
-    if any(_same_spaces(e) not in allowed for e in _emails(chain)):
+    if any(_same_spaces(e) not in ok.strings for e in _emails(chain)):
         return EMAIL_MARK
     return chain
