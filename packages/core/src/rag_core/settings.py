@@ -24,6 +24,9 @@ class AppSettings(BaseSettings):
     reranker: Literal["local", "fake"] = "local"
     # Resolved when settings are built, not at import, so an unusual HOME is a config error, not a crash.
     rerank_cache_dir: Path = Field(default_factory=lambda: Path.home() / ".cache" / "rag-rerank")
+    # The L2 injection classifier; `fake` is deterministic and accepted only with APP_ENV=local.
+    guard_classifier: Literal["prompt_guard", "fake"] = "prompt_guard"
+    guard_cache_dir: Path = Field(default_factory=lambda: Path.home() / ".cache" / "rag-guard")
 
     @field_validator("database_url")
     @classmethod

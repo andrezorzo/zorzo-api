@@ -6,12 +6,12 @@ no business rules (LLD "Components and dependencies").
 ## Commands
 
 Run from the repository root, with Postgres up (`docker compose -f infra/compose.yaml up -d postgres --wait`; first copy
-`infra/.env.example` to `infra/.env`; an older `infra/.env` needs the `SALT_SEED` line added, since compose refuses to start without it).
+`infra/.env.example` to `infra/.env`; an older `infra/.env` needs the `SALT_SEED` and `CANARY` lines added, since compose refuses to start without them).
 
 | What | Command |
 | --- | --- |
-| Run the API locally | `DOMAIN=zorzo DATABASE_URL=postgresql://zorzo:zorzo@localhost:5432/zorzo APP_ENV=local TURNSTILE_SECRET=1x0000000000000000000000000000000AA SALT_SEED=local-salt-seed-change-me-0123456789 uv run python -m rag_api` (Turnstile's always-pass test secret; any token passes) |
-| Run with the fake embedder and reranker (no Ollama, no model download) | add `EMBEDDER=fake RERANKER=fake` |
+| Run the API locally | `DOMAIN=zorzo DATABASE_URL=postgresql://zorzo:zorzo@localhost:5432/zorzo APP_ENV=local TURNSTILE_SECRET=1x0000000000000000000000000000000AA SALT_SEED=local-salt-seed-change-me-0123456789 CANARY=local-canary-change-me-0123456789abcdef uv run python -m rag_api` (Turnstile's always-pass test secret; any token passes; the first start downloads the injection classifier, 1.1 GB, into `GUARD_CACHE_DIR`) |
+| Run with the fake embedder, reranker and injection classifier (no Ollama, no model download) | add `EMBEDDER=fake RERANKER=fake GUARD_CLASSIFIER=fake` |
 | Regenerate the stream contract after changing `rag_core.events` | `uv run python -m rag_core.events > contracts/sse-v1.schema.json` |
 | Tests of this app | `uv run pytest tests/api tests/contract -q` |
 

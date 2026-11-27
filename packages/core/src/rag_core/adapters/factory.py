@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, get_args
 from rag_core.adapters.postgres import Database
 from rag_core.limits import Limits
 from rag_core.models_config import ModelsConfig, StageName
-from rag_core.ports import Alerter, Embedder, Reranker
+from rag_core.ports import Alerter, Embedder, InjectionClassifier, Reranker
 from rag_core.services.gateway import ModelGateway
 from rag_core.settings import AppSettings
 
@@ -47,6 +47,18 @@ def build_rerankers(settings: AppSettings) -> list[Reranker]:
     from rag_core.adapters.local_reranker import LocalReranker
 
     return [LocalReranker(settings.rerank_cache_dir)]
+
+
+def build_classifier(settings: AppSettings) -> InjectionClassifier:
+    """The L2 injection classifier. Lazy imports: only the API loads onnxruntime for it."""
+    if settings.guard_classifier == "fake":
+        _require_local(settings, "GUARD_CLASSIFIER=fake")
+        from rag_core.adapters.fake_guard import FakeClassifier
+
+        return FakeClassifier()
+    from rag_core.adapters.prompt_guard import PromptGuardClassifier
+
+    return PromptGuardClassifier(settings.guard_cache_dir)
 
 
 def provider_keys(
