@@ -136,7 +136,7 @@ connection; the domain is chosen by `DOMAIN` and loaded by the apps, never by `c
 
 | Port | Operation | Receives | Returns | Guarantees |
 | --- | --- | --- | --- | --- |
-| VectorStore | `search` | Query vector, query text, k, filters, corpus version | Hits with ids and scores | Hybrid in one query (vector + full-text + RRF); reads only the given version; a vector hit counts only at `SEARCH_MIN_SIMILARITY` or above; full text matches any term of the question (OR), in English and Portuguese |
+| VectorStore | `search` | Query vector, query text, k, filters, corpus version | Hits with ids and scores | Hybrid in one query (vector + full-text + RRF); reads only the given version; a vector hit counts only at `SEARCH_MIN_SIMILARITY` or above; full text matches any term of the question (OR), in each of the domain's languages |
 | VectorStore | `upsert` | Chunks, candidate version | Written count | Idempotent by content hash |
 | VectorStore | `activate` | Version | — | Atomic; exactly one active version (section 6.1) |
 | ModelGateway | `complete` / `stream` | Stage, messages, optional output schema, deadline, the request's spend | Result, usage, cost, provider | Walks the stage's chain entry by entry, skipping entries in cooldown (section 6.6): the free entries, then the paid one under the day's budget and `REQUEST_COST_CAP_USD` (section 6.2); respects the deadline; records cost; raises "unavailable" when the chain is exhausted; `stream` falls back only before the first token |
@@ -271,6 +271,13 @@ domain pieces, not ports (section 6.5).
   `SHORT_STATEMENT_TIMEOUT`; the server ends a stuck statement, so there is no client-side timeout to cancel
   half-way. TCP keepalives and `tcp_user_timeout` end a connection to a dead server in seconds, and a request
   waits at most `POOL_WAIT` for a pooled connection.
+- **Domain values:** `domain.yaml` declares the domain's `document_kinds` and its `languages`, a mapping
+  from ISO 639-1 code to the Postgres text search configuration of that language (zorzo: `en: english`,
+  `pt: portuguese`); the first language is the default. Each intent in `intents.yaml` has a `description`,
+  and the `route` prompt's `$intents` slot is filled with the intents and their descriptions at startup; a
+  prompt without the slot, an intent without a description, an intent kind or an example question language
+  the domain doesn't declare, or a configuration Postgres doesn't have (`pg_ts_config`) stops the API and the
+  ingest before they serve or write.
 - **Shutdown:** the gateway drains its background work (reservation releases, alerts, event rows) within
   `SHUTDOWN_DRAIN`, then cancels what is left and logs it, so a stuck write never holds the process.
 
@@ -286,6 +293,9 @@ Conventions:
   and write SQL against it.
 - The LangGraph checkpointer owns its tables in the `langgraph` schema, outside Django.
 - Vector and chunk tables are ours, in the Django migrations (ADR 0013).
+- Values a domain defines (document kinds, languages) have no `CHECK`: the database can't know the domain,
+  so the writer validates them against it (the ingest for `documents`; the cache and eval writers take
+  values the domain already validated).
 - Defaults the API or ingest rely on are database defaults, and foreign-key delete rules (`CASCADE`, `SET NULL`)
   are set in Postgres by a hand-written migration: both apps write SQL directly, so Django's Python-side
   emulation of `on_delete` would not apply to them.
@@ -313,8 +323,8 @@ Columns, types, constraints and indexes live in the migrations. What is still pl
 | Table | Status | Notes |
 | --- | --- | --- |
 | `corpus_versions` | existing | Status per section 6.1; at most one `active` (unique partial index) |
-| `documents` | existing | Metadata from the document front matter |
-| `chunks` | existing | `tsv` is built by ingest with the document language's text search configuration over heading path and content |
+| `documents` | existing | Metadata from the document front matter; `kind` and `lang` are among the domain's |
+| `chunks` | existing | `tsv` is built by ingest with the text search configuration the domain maps to the document's language, over heading path and content |
 | `answer_cache` | existing | Looked up by embedding similarity (ADR 0014) |
 | `public_traces` | existing | outcome: `answered`, `abstained`, `declined`, `blocked`, `degraded`, `cached`; `public_ok` defaults to false |
 | `trace_spans` | existing | One row per step; feeds the latency and fallback charts |
@@ -423,7 +433,8 @@ States of a corpus version; arrows carry the event that causes the transition.
 - A change of `model_config_version` and a change of the judge model never ship in the same version: a
   new judge is used only after its agreement with a sample labeled by the owner reaches
   `JUDGE_AGREEMENT_MIN`, so quality is never measured with a new ruler and a new model at once.
-- Documents without `reviewed_by_owner: true`, with missing or invalid front matter, or with a scan hit
+- Documents without `reviewed_by_owner: true`, with missing or invalid front matter (a `kind` or `lang`
+  the domain doesn't declare is invalid; the finding names the field, never the value), or with a scan hit
   (gitleaks or the PII pass: emails, phone numbers, CPF, card numbers; entries of the domain's
   `pii_allowlist` pass; a symlinked file is refused, since gitleaks doesn't follow links: an exact string, case-insensitively, or a phone written with its +country code,
   which covers its international and national renderings), fail the run. The PII pass fails closed: text shaped like an
@@ -499,10 +510,11 @@ States of the day's budget row; the day is UTC, so every visitor sees the same "
   kinds its retrieval reads (all when absent; with none of them found, the run abstains without an answer
   call) and its action: `answer` (RAG) or `decline` (no answer call). For zorzo, `career_fact` (salary,
   availability, visa, time zone) reads only `faq`, `off_topic` declines, and `contact` answers through RAG
-  until `contact_options` (F01-T08). The core names no intent.
+  until `contact_options` (F01-T08). The `route` prompt gets the intent list and descriptions from
+  `intents.yaml` (section 3 "Configuration"), so neither the core nor the prompt names an intent.
 - **Edge questions:** a follow-up with no history is an abstention with a fixed message asking what the
-  visitor means; a question in a language other than English or Portuguese is answered in English, with one
-  line saying the site answers in both. The suggestion on an abstention or decline is the domain's example
+  visitor means; a question in a language the domain doesn't declare is answered in the domain's first
+  language (zorzo: English), with one line naming the languages the site answers in. The suggestion on an abstention or decline is the domain's example
   question closest to the question by local embedding similarity (no model call).
 - **Length:** answers aim at `ANSWER_WORDS_DEFAULT` words, and up to `ANSWER_WORDS_MAX` when the visitor asks
   for more detail; beyond that the answer suggests opening the sources.
