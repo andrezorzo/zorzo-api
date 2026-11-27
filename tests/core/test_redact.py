@@ -339,9 +339,9 @@ def test_a_key_after_a_url_or_in_its_query_is_found() -> None:
 def test_a_private_key_header_without_an_end_is_cut_alone_and_prose_between_blocks_stays() -> None:
     assert REDACTOR.text("see -----BEGIN RSA PRIVATE KEY----- here") == "see [secret] here"
     two = (
-        "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----"
+        "-----BEGIN PRIVATE KEY-----\nAAAAAAAAAAAAAAAAAAAA\n-----END PRIVATE KEY-----"
         " and in between he said hello there "
-        "-----BEGIN PRIVATE KEY-----\nBBBB\n-----END PRIVATE KEY-----"
+        "-----BEGIN PRIVATE KEY-----\nBBBBBBBBBBBBBBBBBBBB\n-----END PRIVATE KEY-----"
     )
     assert REDACTOR.text(two) == "[secret] and in between he said hello there [secret]"
 
@@ -421,3 +421,35 @@ def test_a_number_after_a_tag_is_cut_where_it_is() -> None:
 def test_a_single_case_letter_token_in_a_path_is_still_a_key() -> None:
     redacted = REDACTOR.text("token users/12345/ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGH")
     assert "ABCDEFGH" not in redacted and "[secret]" in redacted
+
+
+# -- the last round ------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "Ab3dEfGh/IjKlMn/OpQrSt9u/VwXyZa/bCdEfG",
+        "a1B2c3D4/EfGhIj/kL5mN6oP/QrStUv/wX7yZ8aB",
+    ],
+)
+def test_a_base64_key_with_short_random_case_parts_is_redacted(key: str) -> None:
+    assert REDACTOR.text(f"key {key} end") == "key [secret] end"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["(11)>98765-4321", "11<98765-4321", "(11) 9<8765-4321", "+55<11<98765<4321", "11 > 98765-4321"],
+)
+def test_a_phone_split_by_an_angle_bracket_is_found_without_a_tag(text: str) -> None:
+    assert REDACTOR.text(f"call {text} now") == "call [phone] now"
+
+
+def test_a_ranking_with_brackets_is_not_a_phone() -> None:
+    for text in ("ranking: 202 > 555 > 0173 votes, the rest", "sorted: 415 < 555 < 0132 ok"):
+        assert REDACTOR.text(text) == text
+
+
+def test_prose_between_the_pem_markers_is_not_swallowed() -> None:
+    text = 'Replace "-----BEGIN PRIVATE KEY-----" with "-----END PRIVATE KEY-----" in the file'
+    assert REDACTOR.text(text) == 'Replace "[secret]" with "-----END PRIVATE KEY-----" in the file'

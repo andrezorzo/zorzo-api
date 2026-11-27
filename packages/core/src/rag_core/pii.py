@@ -53,6 +53,9 @@ CARD = re.compile(r"\b(?:\d[ -]?){12,18}\d\b")
 
 # What `scrub` puts in the place of a match.
 EMAIL_MARK, PHONE_MARK, CPF_MARK, CARD_MARK = "[email]", "[phone]", "[cpf]", "[card]"
+# An angle bracket with a space on each side: what a list of numbers, such as a ranking, is separated by.
+SPACED_BRACKET = re.compile(r" [<>] ")
+MAX_SPACED_BRACKETS = 2  # a phone has one at most; two or more make it a list
 # Between the characters of a phone as written: spaces, a wrapped line, emphasis and code marks, a tag.
 PHONE_GLUE = r"(?:[\s*_`\\]|<[^<>\n]{0,200}>)*"
 
@@ -255,8 +258,13 @@ def spans(
         found += located or [(0, len(text), PHONE_MARK)]
     if same_length is not None:
         for raw in _unlisted_phones(same_length, ok):
-            located = [(m.start(), m.end(), PHONE_MARK) for m in _phone_in_text(raw).finditer(same_length)]
-            found += located or [(0, len(text), PHONE_MARK)]
+            matches = list(_phone_in_text(raw).finditer(same_length))
+            # Number groups apart by ` > ` or ` < ` twice or more are a ranking, not a phone.
+            found += [
+                (m.start(), m.end(), PHONE_MARK)
+                for m in matches
+                if len(SPACED_BRACKET.findall(text, m.start(), m.end())) < MAX_SPACED_BRACKETS
+            ] or ([] if matches else [(0, len(text), PHONE_MARK)])
     return found
 
 

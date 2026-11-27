@@ -54,8 +54,10 @@ KEY_SHAPE = re.compile(
 )
 # A private key block: its header, then (within `MAX_PEM_CHARS`) its body and END line, so the whole is cut.
 PEM_HEADER = re.compile(r"-----BEGIN ([A-Z ]*)PRIVATE KEY-----")
-PEM_BODY = re.compile(r"[A-Za-z0-9+/=\s:,.\\>\"'-]*")  # as written in a JSON string or a quote block
+PEM_BASE64_LINE = re.compile(r"[A-Za-z0-9+/=]*")
+PEM_QUOTING = re.compile(r"^(?:>\s*)+")  # a quote block's marks
 MAX_PEM_CHARS = 8192
+MIN_PEM_BODY_CHARS = 16  # a key's body is hundreds; a word between two mentions of the markers is not one
 # A run of key characters, with its `=` padding (`KEY=VALUE` and `?api_key=VALUE` are two runs).
 TOKEN = re.compile(rf"(?<![A-Za-z0-9_+-])[A-Za-z0-9_+-]{{{MIN_TOKEN_CHARS},}}=*(?![A-Za-z0-9_+-])")
 # A base64 run, which has `/`; one whose parts are all ordinary words or numbers is a path, not a key.
@@ -92,9 +94,9 @@ class Redactor:
             return REDACTED_MARK
         value = layers[-1]
         # A phone can hide in a layer the next one turns into markup (`&lt;b (11) 98765-4321&gt;`).
-        # A phone can also hide in a tag or an attribute (`<a title="(11) 91234-5678">`): read with the angle
-        # brackets as spaces, but only where the text has a tag, so `202 > 555 > 0173` stays a ranking.
-        untagged = value.replace("<", " ").replace(">", " ") if pii.HTML_TAG.search(value) else None
+        # A phone can also hide in a tag, an attribute or behind a bracket (`11<98765-4321`): read with the
+        # angle brackets as spaces (`pii.spans` leaves out a list of numbers, `202 > 555 > 0173`).
+        untagged = value.replace("<", " ").replace(">", " ") if "<" in value or ">" in value else None
         spans = [*self._secret_spans(value), *pii.spans(value, self._allowed, layers[:-1], untagged)]
         return _replace(value, self._outside_the_allowlist(value, spans))
 
@@ -184,27 +186,44 @@ def _pem_spans(text: str) -> list[Span]:
     for header in PEM_HEADER.finditer(text):
         end_line = f"-----END {header.group(1)}PRIVATE KEY-----"
         end = text.find(end_line, header.end(), header.end() + MAX_PEM_CHARS + len(end_line))
-        if end != -1 and PEM_BODY.fullmatch(text, header.end(), end):
+        if end != -1 and _is_a_pem_body(text[header.end() : end]):
             found.append((header.start(), end + len(end_line), SECRET_MARK))
         else:
             found.append((header.start(), header.end(), SECRET_MARK))
     return found
 
 
+def _is_a_pem_body(body: str) -> bool:
+    """Lines of base64, as the block is written in a file, a JSON string (`\\n` escapes) or a quote block
+    (`> ` marks, quotes), and enough of them to be a key."""
+    lines = [
+        PEM_QUOTING.sub("", line.strip()).strip().strip("\"'").strip()
+        for line in body.replace("\\n", "\n").split("\n")
+    ]
+    return (
+        all(PEM_BASE64_LINE.fullmatch(line) for line in lines) and sum(map(len, lines)) >= MIN_PEM_BODY_CHARS
+    )
+
+
 def _is_a_path(run: str) -> bool:
-    """A run with `/` whose every part is an ordinary word, number or slug: a path, not a base64 key."""
-    return all(_is_a_word(part) or _is_a_slug(part) for part in run.split("/") if part)
+    """A run with `/` whose every part is an ordinary word, number or slug: a path, not a base64 key. Parts
+    that mix letters and digits (`v2`) are the minority, as in a slug: a key cut in groups is mostly them."""
+    parts = [part for part in run.split("/") if part]
+    mixed = sum(not part.isalpha() and not part.isdigit() for part in parts)
+    return all(_is_a_word(part) or _is_a_slug(part) for part in parts) and mixed * 2 < len(parts)
 
 
 def _is_a_word(part: str) -> bool:
-    """All digits; a word of letters in one case, capitalized or CamelCase (shorter than a token); or a short
-    mixed word such as `v2`. A part of letters in random case (`wJalrXUtnFEMI`) is not a word."""
+    """All digits; a word of letters in one case, capitalized or CamelCase, shorter than a token (letters in
+    random case, `wJalrXUtnFEMI`, are not, whatever their length); or CamelCase with a short number, or a
+    short mixed word such as `v2`."""
     if part.isdigit():
         return True
-    if len(part) < MIN_TOKEN_CHARS and (
-        (part.isalpha() and (part.islower() or part.isupper() or part[1:].islower()))
-        or CAMEL_CASE.fullmatch(part)
-    ):
+    if part.isalpha():
+        return len(part) < MIN_TOKEN_CHARS and (
+            part.islower() or part.isupper() or part[1:].islower() or bool(CAMEL_CASE.fullmatch(part))
+        )
+    if len(part) < MIN_TOKEN_CHARS and CAMEL_CASE.fullmatch(part):
         return True
     return part.isalnum() and len(part) <= MAX_MIXED_WORD_CHARS
 
