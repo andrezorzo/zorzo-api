@@ -31,9 +31,6 @@ from rag_core.services.verification import (
     read_answer,
 )
 
-# The document kinds an intent's retrieval reads; the rest read every kind (LLD "6.3 Agent run": career
-# facts come from the FAQ only).
-KINDS_BY_INTENT = {"career_fact": ("faq",)}
 # While the draft streams, its JSON is parsed again once this many characters arrived (or a string closed).
 DRAFT_PARSE_EVERY = 24
 
@@ -72,13 +69,14 @@ async def route_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any]
                 state["question"],
                 gateway=ctx.gateway,
                 prompt=ctx.prompts.route,
+                schema=ctx.route_schema,
                 deadline_at=ctx.before_answer,
                 spend=ctx.spend,
             )
         except ModelsUnavailableError:
             return {"degraded": ctx.unavailable()}
         ctx.record("route", completion)
-    if result.intent == "off_topic":
+    if ctx.intents[result.intent].action == "decline":
         return {"route": result, "outcome": "declined"}
     return {"route": result, "query": result.standalone_question}
 
@@ -93,7 +91,7 @@ async def retrieve_step(state: AgentState, runtime: AgentRuntime) -> dict[str, A
         ctx.store,
         ctx.rerankers,
         ctx.limits,
-        KINDS_BY_INTENT.get(state["route"].intent),
+        ctx.intents[state["route"].intent].kinds or None,  # the intent's document kinds, or all
     )
     # A rewritten query that finds nothing keeps the passages the first one found.
     if not ranked and state.get("passages"):

@@ -19,12 +19,13 @@ from rag_core.adapters.postgres import Database
 from rag_core.adapters.rate_limit import PostgresRateLimiter
 from rag_core.adapters.turnstile import TurnstileBotCheck
 from rag_core.agent.graph import build_graph
-from rag_core.domain import load_domain, load_prompts
+from rag_core.domain import load_domain, load_intents, load_prompts
 from rag_core.limits import Limits, load_limits
 from rag_core.models_config import config_version, load_models
 from rag_core.ports import Alerter
 from rag_core.services.gate import Gate
 from rag_core.services.gateway import ModelGateway
+from rag_core.services.route import route_schema
 from rag_core.telemetry import configure_logging
 
 from rag_api import ask, errors, health
@@ -88,6 +89,8 @@ def create_app(settings: ApiSettings) -> FastAPI:
     app = FastAPI(title="rag-api", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.domain = domain
     app.state.prompts = load_prompts(settings.domain)
+    app.state.intents = load_intents(settings.domain)
+    app.state.route_schema = route_schema(list(app.state.intents))
     app.state.agent = build_graph()
     app.state.db = db
     app.state.limits = limits

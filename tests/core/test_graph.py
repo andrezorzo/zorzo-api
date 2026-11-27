@@ -11,6 +11,7 @@ from rag_core.agent.state import AgentState
 from rag_core.domain import load_prompts
 from rag_core.events import StreamEvent
 from rag_core.services.gateway import RequestSpend
+from rag_core.services.route import route_schema
 from structlog.testing import capture_logs
 
 from tests.core.test_gateway import LIMITS
@@ -39,10 +40,20 @@ def looping() -> Agent:
 async def test_the_recursion_backstop_abstains_and_logs() -> None:
     sink = Recorder()
     context = AgentContext(
-        gateway=cast(Any, None), embedder=cast(Any, None), store=cast(Any, None), rerankers=[],
-        limits=LIMITS, prompts=load_prompts("zorzo"), languages=["en"], sink=sink, corpus_version=1,
-        deadline_at=asyncio.get_running_loop().time() + 10, spend=RequestSpend(LIMITS.request_cost_cap_usd),
-    )  # fmt: skip
+        gateway=cast(Any, None),
+        embedder=cast(Any, None),
+        store=cast(Any, None),
+        rerankers=[],
+        limits=LIMITS,
+        prompts=load_prompts("zorzo"),
+        intents={},
+        route_schema=route_schema(["any"]),
+        languages=["en"],
+        sink=sink,
+        corpus_version=1,
+        deadline_at=asyncio.get_running_loop().time() + 10,
+        spend=RequestSpend(LIMITS.request_cost_cap_usd),
+    )
     with capture_logs() as logs:
         result = await run_agent("q", uuid4(), agent=looping(), context=context)
     assert result.outcome == "abstained"

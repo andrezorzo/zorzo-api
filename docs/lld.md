@@ -47,7 +47,7 @@ zorzo-api/
                         examples.yaml, prompts/, intents.yaml, tools/, evals/ (datasets),
                         loaders.yaml, public.yaml                                             (existing: domain.yaml,
                                                                                               corpus/, examples.yaml,
-                                                                                              prompts/)
+                                                                                              prompts/, intents.yaml)
   config/               models.yaml, models.local.yaml, limits.yaml                           (existing)
   contracts/            sse-v1.schema.json, openapi.json snapshot                             (existing: sse-v1)
   infra/                terraform/, compose files, Caddyfiles, systemd units and timers       (existing: compose,
@@ -488,15 +488,18 @@ States of the day's budget row; the day is UTC, so every visitor sees the same "
 
 ### 6.3 Agent run
 
-- **Routing:** `route` classifies the intent (`career_fact`, `about_andre`, `about_system`, `projects_live`,
-  `contact`, `off_topic`) with structured output and rewrites a follow-up into a standalone question. Its
-  output is `intent`, `standalone_question`, `language` (ISO 639-1), `follow_up` (the question refers to
-  earlier turns) and `public_ok`: `public_ok` is: whether the question may appear on public pages, judged by content
-  category (offensive, harassment, sexual content, attacks on other people, personal data), not by
-  sentiment. It adds no model call and never changes the answer, only what public pages show (section 8). In the
-  MVP `career_fact` (salary, availability, visa, time zone) goes through RAG over the FAQ only (retrieval
-  filtered to `kind = faq`; with no FAQ passage the run abstains without an answer call); `off_topic` →
-  decline, with no answer call; `contact` → `contact_options`; the other intents go through RAG.
+- **Routing:** `route` classifies the question into one of the domain's intents (`intents.yaml` in the domain
+  package, ADR 0011; for zorzo: `career_fact`, `about_andre`, `about_system`, `projects_live`, `contact`,
+  `off_topic`) with structured output, its schema narrowed to those names at startup, and rewrites a
+  follow-up into a standalone question. Its output is `intent`, `standalone_question`, `language` (ISO
+  639-1), `follow_up` (the question refers to earlier turns) and `public_ok`: `public_ok` is whether the
+  question may appear on public pages, judged by content category (offensive, harassment, sexual content,
+  attacks on other people, personal data), not by sentiment. It adds no model call and never changes the
+  answer, only what public pages show (section 8). Each intent in `intents.yaml` declares the document
+  kinds its retrieval reads (all when absent; with none of them found, the run abstains without an answer
+  call) and its action: `answer` (RAG) or `decline` (no answer call). For zorzo, `career_fact` (salary,
+  availability, visa, time zone) reads only `faq`, `off_topic` declines, and `contact` answers through RAG
+  until `contact_options` (F01-T08). The core names no intent.
 - **Edge questions:** a follow-up with no history is an abstention with a fixed message asking what the
   visitor means; a question in a language other than English or Portuguese is answered in English, with one
   line saying the site answers in both. The suggestion on an abstention or decline is the domain's example

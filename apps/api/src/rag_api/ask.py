@@ -53,6 +53,8 @@ def _agent_context(state: Any, sink: TraceSink, corpus_version: int, deadline_at
         rerankers=state.rerankers,
         limits=state.limits,
         prompts=state.prompts,
+        intents=state.intents,
+        route_schema=state.route_schema,
         languages=state.domain.languages,
         sink=sink,
         corpus_version=corpus_version,

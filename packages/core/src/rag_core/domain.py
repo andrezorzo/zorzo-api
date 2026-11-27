@@ -6,6 +6,7 @@ The core never imports a domain statically; the apps call `load_domain` at start
 import importlib
 from importlib.resources import files
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict
@@ -66,6 +67,25 @@ def load_examples(name: str) -> list[Example]:
         return [Example.model_validate(item) for item in raw]
     except Exception as exc:
         raise DomainError(f"invalid example questions in {_package(name)}/examples.yaml: {exc}") from exc
+
+
+class Intent(BaseModel):
+    """One intent `route` may return (`intents.yaml`): what its retrieval reads and what the run does."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kinds: tuple[str, ...] = ()  # document kinds its retrieval reads; empty means every kind
+    action: Literal["answer", "decline"] = "answer"
+
+
+def load_intents(name: str) -> dict[str, Intent]:
+    try:
+        raw = _read_yaml(name, "intents.yaml")
+        if not isinstance(raw, dict) or not raw:
+            raise ValueError("expected a mapping of intent names")
+        return {str(key): Intent.model_validate(value or {}) for key, value in raw.items()}
+    except Exception as exc:
+        raise DomainError(f"invalid intents in {_package(name)}/intents.yaml: {exc}") from exc
 
 
 class Prompts(BaseModel):

@@ -7,9 +7,9 @@ from collections.abc import AsyncIterator
 
 import pytest
 from rag_core.adapters.postgres import Database
-from rag_core.domain import load_prompts
+from rag_core.domain import load_intents, load_prompts
 from rag_core.services.gateway import ModelsUnavailableError, RequestSpend
-from rag_core.services.route import route
+from rag_core.services.route import route, route_schema
 
 from tests.conftest import reset_tables
 from tests.core.test_gateway import LIMITS, make_gateway
@@ -26,6 +26,7 @@ OUTPUT = {
     "public_ok": True,
 }
 PROMPTS = load_prompts("zorzo")
+SCHEMA = route_schema(list(load_intents("zorzo")))
 
 
 @pytest.fixture
@@ -44,6 +45,7 @@ async def run(fake: FakeOpenRouter, db: Database) -> object:
             QUESTION,
             gateway=gateway,
             prompt=PROMPTS.route,
+            schema=SCHEMA,
             deadline_at=deadline_at,
             spend=RequestSpend(LIMITS.request_cost_cap_usd),
         )

@@ -2,17 +2,18 @@
 the request has spent so far."""
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel
 
-from rag_core.domain import Prompts
+from rag_core.domain import Intent, Prompts
 from rag_core.events import DegradedReason, Model, Outcome, StageName
 from rag_core.limits import Limits
 from rag_core.models_config import StageName as ModelStage
 from rag_core.ports import Embedder, Reranker, SearchHit, TraceSink, VectorStore
 from rag_core.services.gateway import Completion, ModelGateway, ModelsUnavailableError, RequestSpend
+from rag_core.services.route import RouteResult
 
 
 @dataclass
@@ -23,6 +24,8 @@ class AgentContext:
     rerankers: Sequence[Reranker]
     limits: Limits
     prompts: Prompts
+    intents: Mapping[str, Intent]  # the domain's intents: what each one retrieves and does
+    route_schema: type[RouteResult]  # the route output narrowed to those intents
     languages: Sequence[str]  # the domain's answer languages; the first is the default
     sink: TraceSink
     corpus_version: int
