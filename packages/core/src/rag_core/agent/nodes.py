@@ -200,9 +200,9 @@ async def verify_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any
 
 
 def _send_claims(claims: Sequence[CheckedClaim], ctx: AgentContext) -> None:
-    ctx.settled = "answered"
     for i, claim in enumerate(claims):
         ctx.sink.record(Claim(i=i, text=claim.text, sources=list(claim.sources), verdict=claim.verdict))
+    ctx.settled = "answered"  # only once the whole ending is out
 
 
 async def repair_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any]:
@@ -231,6 +231,6 @@ async def search_only_step(state: AgentState, runtime: AgentRuntime) -> dict[str
     hits = ctx.found or await retrieval.retrieve(
         state["question"], ctx.corpus_version, ctx.sink, ctx.embedder, ctx.store, ctx.rerankers, ctx.limits
     )
-    ctx.settled = "degraded"
     emit_degraded(ctx.sink, hits, ctx.corpus_version, state["degraded"], ctx.limits.degraded_max_passages)
+    ctx.settled = "degraded"
     return {"outcome": "degraded"}

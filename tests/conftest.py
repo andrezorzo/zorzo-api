@@ -18,6 +18,7 @@ from rag_api.main import create_app
 from rag_api.settings import ApiSettings
 from rag_core.adapters.factory import build_gateway, rerank_chain
 from rag_core.adapters.turnstile import TurnstileBotCheck
+from rag_core.limits import Limits
 from rag_core.models_config import ModelsConfig
 from rag_core.services.gateway import ModelGateway
 from sqlalchemy import make_url
@@ -155,7 +156,10 @@ def build_app(
     on `app.state.alerter` and the given limits."""
     app = create_app(settings)
     gate = app.state.gate
-    gate.limits = app.state.limits = app.state.limits.model_copy(update={**ROOMY_LIMITS, **(limits or {})})
+    # Validated like the file, so a test never runs with values the app would refuse at startup.
+    gate.limits = app.state.limits = Limits.model_validate(
+        {**app.state.limits.model_dump(), **ROOMY_LIMITS, **(limits or {})}
+    )
     gate.bot_check = TurnstileBotCheck(
         settings.turnstile_secret.get_secret_value(),
         gate.limits.timeout_turnstile,

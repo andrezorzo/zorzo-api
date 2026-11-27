@@ -223,7 +223,7 @@ def test_a_stuck_database_is_unavailable_in_seconds(make_api: Any, corpus_databa
 
 def test_the_gate_never_outlives_the_request_deadline(make_api: Any, corpus_database: str) -> None:
     # The bot check passes after the request's deadline: the rate limit is never tried, and no token is taken.
-    api, session = make_api(limits={"request_deadline": 0.2}), uuid.uuid4()
+    api, session = make_api(limits={"request_deadline": 0.2, "answer_reserve": 0.1}), uuid.uuid4()
     api.siteverify.mode = "slow"
     with capture_logs() as logs:
         response = api.ask(**asking(session=session))
@@ -240,7 +240,10 @@ def test_the_gate_never_outlives_the_request_deadline(make_api: Any, corpus_data
 
 def test_a_take_cut_by_the_deadline_takes_nothing(make_api: Any, corpus_database: str) -> None:
     # The deadline must cut the take before Postgres ends the lock wait itself.
-    api, session = make_api(limits={"request_deadline": LOCK_TIMEOUT_S / 2}), uuid.uuid4()
+    api, session = (
+        make_api(limits={"request_deadline": LOCK_TIMEOUT_S / 2, "answer_reserve": LOCK_TIMEOUT_S / 4}),
+        uuid.uuid4(),
+    )
     key = f"session:{session}:burst"
     with psycopg.connect(corpus_database) as conn:  # holds the row past the deadline, below the lock timeout
         conn.execute("INSERT INTO rate_buckets (key, tokens, refilled_at) VALUES (%s, 5, now())", (key,))

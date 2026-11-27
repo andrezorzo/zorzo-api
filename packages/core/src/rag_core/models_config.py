@@ -10,6 +10,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Literal, Self
+from urllib.parse import urlparse
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -75,9 +76,14 @@ class Provider(BaseModel):
         """Reads `${VAR}`s in the base URL, then defaults the kind from the resolved URL."""
         if isinstance(data, dict) and isinstance(data.get("base_url"), str):
             data = {**data, "base_url": _VARIABLE.sub(_variable, data["base_url"])}
-        if isinstance(data, dict) and "kind" not in data and "openrouter.ai" in str(data.get("base_url", "")):
+        if isinstance(data, dict) and "kind" not in data and _is_openrouter(str(data.get("base_url", ""))):
             return {**data, "kind": "openrouter"}
         return data
+
+
+def _is_openrouter(url: str) -> bool:
+    host = urlparse(url).hostname or ""
+    return host == "openrouter.ai" or host.endswith(".openrouter.ai")
 
 
 def _variable(match: re.Match[str]) -> str:

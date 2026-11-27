@@ -220,7 +220,9 @@ def hung_search(client: TestClient) -> Stream:
             return []
 
     app.state.embedder = Hung()
-    app.state.limits = app.state.limits.model_copy(update={"request_deadline": 0.2, "ping_interval": 0.05})
+    app.state.limits = app.state.limits.model_copy(
+        update={"request_deadline": 0.2, "answer_reserve": 0.1, "ping_interval": 0.05}
+    )
     try:
         return ask(client)
     finally:

@@ -21,9 +21,10 @@ STANDALONE = "Which AWS services has André used?"
 # A request whose answer reserve leaves one second for the steps before the answer.
 SHORT_DEADLINE_S, LONG_RESERVE_S = 4, 3
 # Verification out of time: the judge hangs past a short request deadline, with the answer allowed to start.
-JUDGE_DEADLINE_S, SMALL_RESERVE_S = 2.5, 0.5
+VERIFY_REQUEST_DEADLINE_S, SMALL_RESERVE_S = 2.5, 0.5
 PING_S = 0.2
-RESERVE_PAST_DEADLINE_S = 60  # longer than the whole request: no step before the answer can run
+# A reserve that leaves no time for the steps before the answer (the default request deadline is 20 s).
+RESERVE_BEYOND_THE_STEPS_S = 19.95
 CLAIMS = [("André used Lambda and Kinesis on AWS.", [1]), ("He built serverless pipelines.", [1, 2])]
 
 
@@ -113,8 +114,10 @@ def test_verification_out_of_time_abstains_after_the_draft(
 ) -> None:
     script(fake, judge="hang")
     limits: dict[str, object] = {
-        "request_deadline": JUDGE_DEADLINE_S, "answer_reserve": SMALL_RESERVE_S, "ping_interval": PING_S,
-    }  # fmt: skip
+        "request_deadline": VERIFY_REQUEST_DEADLINE_S,
+        "answer_reserve": SMALL_RESERVE_S,
+        "ping_interval": PING_S,
+    }
     with TestClient(build_app(api_settings(corpus_database), limits=limits, openrouter=fake)) as client:
         stream = ask(client)
     assert stream.only("token") and not stream.only("claim")
@@ -174,7 +177,9 @@ def test_too_little_time_for_the_answer_goes_search_only(corpus_database: str, f
     script(fake)
     with TestClient(
         build_app(
-            api_settings(corpus_database), limits={"answer_reserve": RESERVE_PAST_DEADLINE_S}, openrouter=fake
+            api_settings(corpus_database),
+            limits={"answer_reserve": RESERVE_BEYOND_THE_STEPS_S},
+            openrouter=fake,
         )
     ) as c:
         stream = ask(c)
@@ -318,7 +323,18 @@ def test_steps_before_the_answer_keep_its_reserve(corpus_database: str, fake: Fa
     assert ANSWER_A not in fake.models_called()
 
 
-def test_a_draft_after_prose_with_braces_still_streams(client: TestClient, fake: FakeOpenRouter) -> None:
-    script(fake, draft=Reply("Answer {json} follows:\n```json\n" + answer(CLAIMS).text + "\n```"))
+@pytest.mark.parametrize(
+    "wrapped",
+    [
+        'Use {"x"} then:\n```json\n{answer}\n```',  # a quoted brace in prose before a fence
+        "Here is the answer {as JSON}: {answer}",  # prose with a brace, then unfenced JSON
+    ],
+)
+def test_a_draft_after_prose_streams_and_is_the_published_answer(
+    client: TestClient, fake: FakeOpenRouter, wrapped: str
+) -> None:
+    script(fake, draft=Reply(wrapped.replace("{answer}", answer(CLAIMS).text)))
     stream = ask(client)
     assert "".join(e.data["text"] for e in stream.only("token")).startswith("André used Lambda")
+    assert [c["text"] for c in claims(stream)] == [CLAIMS[0][0], CLAIMS[1][0]]
+    assert fake.models_called().count(ANSWER_A) == 1  # read as streamed: no second answer call
