@@ -165,8 +165,8 @@ answer.
   replaced by an abstention with the sources found.
 - Degraded mode: the `degraded` event sends its `retrieval` hits first, then `done`; the front shows up to
   `DEGRADED_MAX_PASSAGES` passages or the "no matching sources" message.
-- A cached answer sends `stage`, the cached `claim` events, `usage` with cost 0 and `done {cached: true}`,
-  with no `token`.
+- A cached answer sends `stage`, the cached `claim` events, `usage` with no answer or judge cost (0 unless
+  `route` ran on the paid entry) and `done {cached: true}`, with no `token`.
 
 ## Testing decisions
 

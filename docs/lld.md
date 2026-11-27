@@ -74,6 +74,7 @@ means adding `domains/<other>/`, not changing `core`.
 | Embeddings | langchain-ollama `OllamaEmbeddings`; pinned tag starts at `bge-m3:567m`, 1024 dimensions | ADR 0008; 1024 fits every candidate model (section 12), so changing model is a re-ingest, not a migration |
 | Local rerank | fastembed (ONNX) with `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` registered as a custom model (`onnx/model_quint8_avx2.onnx`), baked into the API image and loaded offline; every model file is checked against a pinned SHA-256, so a changed model is refused | ADR 0009; small (130 MB) and multilingual on CPU; fastembed has no built-in copy of it |
 | Injection classifier (guard layer L2) | Llama Prompt Guard 2 86M (mDeBERTa, labels benign and malicious) in the ONNX export `gravitee-io/Llama-Prompt-Guard-2-86M-onnx` (`model.onnx`), run with onnxruntime and `tokenizers`; every file is checked against a pinned revision and SHA-256, baked into the API image and loaded offline | Multilingual, Portuguese included, and local on CPU, so a block costs no model call (HLD flow "Ask a question"); onnxruntime and `tokenizers` are already in the image for rerank. The quantized file (`model.quant.onnx`) lost a sixth of its recall in the exporter's own test, so it replaces the full one only if the full one doesn't fit the VPS's memory. Discarded: LLM Guard (archived in 2026), NeMo Guardrails and Guardrails AI (they wrap the model call, which belongs to the gateway, ADR 0016), an LLM classifier (a model call before every question). Llama 4 Community License: credited "Built with Llama" |
+| Language detection (degraded-mode cache lookup) | fast-langdetect, pinned, with its bundled `lite` model (fastText `lid.176.ftz`, 176 languages, CC BY-SA 3.0), always called with `model="lite"` | About 1 MB and under 1 ms a question, offline; tied with lingua on short questions (measured 2026-11-27), where lingua's wheel is 292 MB; the default `auto` model would download 126 MB at the first call |
 | Validation and settings | Pydantic v2 + pydantic-settings | Tool arguments, answer contract, config files, fail-fast settings |
 | Extraction and chunking | LangChain document loaders (Markdown in the MVP; PDF loaders pluggable per domain) + `MarkdownHeaderTextSplitter` / `RecursiveCharacterTextSplitter` | The loader interface makes the PDF library a configuration choice; Docling is too heavy for the VPS. The résumé enters as owner-reviewed Markdown converted once from the PDF |
 | Tracing | langsmith SDK (`Client` and `RunTree`), fed by the TraceSink fan-out | One fan-out of step events feeds the SSE stream, the stored trace and LangSmith; the SDK's background queue posts the runs. LangChain's ambient tracing (`LANGSMITH_TRACING`) is forced off: it would send the graph state unredacted, and misses the LiteLLM calls and the search-only path |
@@ -146,6 +147,9 @@ connection; the domain is chosen by `DOMAIN` and loaded by the apps, never by `c
 | ModelRouter | `complete` / `stream` / `rerank` / `strike` / `cooldowns` | One entry's id, its messages or rerank input, timeout | Result with usage and the provider-reported cost; active cooldowns (entry, status, start, length) | The LiteLLM adapter, one entry per call; counts each of the entry's failures toward its cooldown once (`strike` counts a cut the gateway made at the entry's own time limit); no network call at import; never chains LiteLLM's exception (its text can quote the request) |
 | Embedder | `embed` | Texts | Vectors + model tag | Always the pinned tag |
 | Reranker | `rerank` (async) | Query, candidates, k | Ordered candidates + level used | A level may raise; the retrieval service falls to the next level, then to the fused order (ADR 0009) |
+| AnswerCache | `lookup` | Query vector, language, corpus version, model config version, minimum similarity | The nearest entry's claims and similarity, or none | Filters and nearest neighbour in one query (ADR 0014); expired rows never match; a hit adds one to its `hits` |
+| AnswerCache | `store` | Question, language, versions, claims, vector, TTL | — | One row; `expires_at` from the database clock |
+| LanguageDetector | `detect` | Text | ISO 639-1 code, or none | Local, no network call |
 | BotCheck | `verify` | Token | Pass or fail | Fails closed when the provider errors |
 | InjectionClassifier | `score` (async) | Text | Probability that the text is an attack, 0 to 1 | Runs on CPU in a thread, with no network call; may raise (section 3 "Security", guard layers) |
 | DefenseLog | `record` | Layer, category, action, trace id | — | One `defense_events` row, written in the background; never blocks the caller; never receives the question |
@@ -298,10 +302,11 @@ domain pieces, not ports (section 6.5).
   before it serves (fail fast).
 - `config/limits.yaml`, `config/models*.yaml` and the domain files are loaded into Pydantic models at
   startup; an invalid file stops the app.
-- `model_config_version` is the SHA-256 of the canonical JSON of the loaded models config, limits and
-  prompts, recorded with every answer; formatting and comments don't change it, so they don't invalidate the
-  answer cache. The models file is `MODELS_FILE`, by default `config/models.yaml`, or `config/models.local.yaml`
-  with `APP_ENV=local`.
+- `model_config_version` is the SHA-256 of the canonical JSON of the loaded models config, limits, prompts
+  (the `route` prompt as rendered with the intents) and the domain's intents, recorded with every answer;
+  the canary is a secret and never enters it (the prompts are hashed as loaded, before it is added); formatting and
+  comments don't change it, so they don't invalidate the answer cache. The models file is `MODELS_FILE`, by
+  default `config/models.yaml`, or `config/models.local.yaml` with `APP_ENV=local`.
 - **Models config:** `providers` (each with `base_url`, where `${VAR}` is read from the environment at load, so
   the local profile's Ollama is `${OLLAMA_URL}/v1`; optional `key_env` and `kind`: `openrouter`, whose
   reported cost is read, or `openai` for any other OpenAI-compatible endpoint) and `stages`, exactly `route`, `rerank`, `answer` and `judge`, each with
@@ -329,8 +334,9 @@ domain pieces, not ports (section 6.5).
   keeps the configuration of its ingest, so changing a language's configuration needs a new corpus
   version.
 - **Shutdown:** the gateway drains its background work (reservation releases, alerts, event rows), the API
-  its pending trace writes, and the LangSmith client its queue, each within `SHUTDOWN_DRAIN`; what is left
-  is cancelled (or, in LangSmith's queue, dropped) and logged, so a stuck write never holds the process.
+  its pending trace writes, the answer cache its pending writes, and the LangSmith client its queue, each
+  within `SHUTDOWN_DRAIN`; what is left is cancelled (or, in LangSmith's queue, dropped) and logged, so a
+  stuck write never holds the process.
 
 ## 4. Data
 
@@ -379,7 +385,7 @@ Columns, types, constraints and indexes live in the migrations. What is still pl
 | `corpus_versions` | existing | Status per section 6.1; at most one `active` (unique partial index) |
 | `documents` | existing | Metadata from the document front matter; `kind` and `lang` are among the domain's |
 | `chunks` | existing | `tsv` is built by ingest with the text search configuration the domain maps to the document's language, over heading path and content |
-| `answer_cache` | existing | Looked up by embedding similarity (ADR 0014) |
+| `answer_cache` | existing | Looked up by embedding similarity (ADR 0014); `answer` holds the claims as they were sent (section 6.9) |
 | `public_traces` | existing | outcome: `answered`, `abstained`, `declined`, `blocked`, `degraded`, `cached`, `error`; `cached` when `done.cached` is true, otherwise `done.outcome`; `public_ok` defaults to false; `expires_at` is the write time plus `RETENTION_PUBLIC_TRACES`; `cost_usd` and `latency_ms` are the request's; `payload` is the stored trace below |
 | `trace_spans` | existing | One row per step that ended (its `stage` end), with the tokens and cost of its model calls, the model that answered last and its fallback reason (why the last earlier entry of the stage's chain didn't answer: `cooling_down`, `rate_limited`, `timeout`, `failed`, `budget` or `request_cap`; null when the first entry tried answered); feeds the latency and fallback charts |
 | `trace_removals` | existing | Private record of the owner's manual removals; never shown in public |
@@ -451,8 +457,9 @@ Ordering rules (each one a contract test):
 - `blocked` and `error` are followed only by `done`; `degraded` is followed only by its `retrieval` hits,
   then `done`.
 - Every `token` comes before the first `claim`; after the first `claim` there are no more tokens.
-- A cached answer sends `stage`, the cached `claim` events, `usage` (cost 0) and `done {cached: true}`, with no
-  `token`.
+- A cached answer sends `stage`, the cached `claim` events, `usage` and `done {cached: true}`, with no
+  `token` and no `model` event besides `route`'s: its cost is `route`'s only, 0 unless `route` ran on the
+  paid entry, and always 0 in degraded mode.
 
 v1 freezes at launch. Until then, the task that first sends an event may narrow its payload (enums), and a
 task before launch may add optional fields to an event, since no client depends on it yet; after launch a
@@ -775,14 +782,35 @@ gateway walks the chain.
 
 ### 6.9 Answer cache
 
-- **Lookup:** after `guard` and `route` (it uses the standalone question and its language), before `retrieve`.
-- **Hit:** similarity ≥ `CACHE_SIMILARITY`, same language, same `corpus_version` and `model_config_version`,
-  not expired.
-- **Stored:** only answered and verified responses; never abstentions, declines, blocks or degraded answers.
-- **Expiry:** `CACHE_TTL`; a new corpus or model version invalidates entries by not matching.
-- **In degraded mode:** the first question of a conversation (no history) is looked up with the raw question
-  and a local language detector, without `route`; follow-ups go straight to search-only. Serving a hit
-  without the model-based guard is safe: the stored answer was verified and the question can't change it.
+- **Lookup:** after `guard` and `route` (it uses the standalone question and its language), before `retrieve`,
+  as the `cache` step, which sends its `stage` on every lookup, hit or miss. The key is the standalone
+  question's embedding by the pinned embedder; a miss keeps that vector for the row it may store. A question
+  whose language isn't one of the domain's is neither looked up nor stored, so its answer keeps the note of
+  section 6.3 "Edge questions". Nor is a standalone question in which the ingest's PII pass (section 6.1,
+  with the domain's `pii_allowlist`) finds personal data: every stored question then has nothing to scrub.
+- **Hit:** similarity ≥ `CACHE_SIMILARITY` (cosine), same language, same `corpus_version` and
+  `model_config_version`, not expired; the nearest such entry is served, and its `hits` count goes up by one.
+- **A hit streams** the stored claims as they were first sent (verdicts and the `gap` sentence included),
+  then `usage` with what the request spent (`route` only) and `done {outcome: answered, cached: true}`, which
+  carries the contact options and a null `suggestion`, with no `token`, no `retrieval` and no `answer` or
+  `judge` call (section 5 "Stream events").
+- **Stored:** only a run that ended as `answered` after verification, with the claims it sent; never
+  abstentions, declines, blocks, contact replies, degraded answers, a hit, or a run cut after its claims were
+  sent. The row is
+  written in the background after `done`, so it never holds the stream. A lookup or a write that fails is a
+  miss, logged at `warning`, never an error for the visitor; a stored answer that no longer reads as the
+  stream's claims is a miss too.
+- **Expiry:** `expires_at` is the write time plus `CACHE_TTL`; lookups ignore expired rows, and the retention
+  job deletes them (section 6.11). A new corpus or model version invalidates entries by not matching; since
+  the whole limits file is part of `model_config_version` (section 3 "Configuration"), any change to it
+  starts an empty cache.
+- **In degraded mode:** the first question of a conversation (no earlier turn in its conversation state; one
+  idle past `SESSION_TTL` starts over, and a state that can't be read counts as a follow-up) is looked up with
+  the raw question and a local language detector (section 1, language detection), without `route`; a language
+  that isn't one of the domain's, or personal data in the question, is a miss. A hit streams as above with
+  cost 0 and no `degraded` event; a miss goes on to search-only. Follow-ups go straight to search-only.
+  Serving a hit without the model-based guard is safe: the stored answer was verified and the question can't
+  change it.
 
 ### 6.10 Alerts
 
@@ -961,7 +989,7 @@ endpoints and per-environment switches.
 | `ALERT_REPEAT_AFTER` | 12 h | Alert reminders | `limits.yaml` |
 | `ALERT_CHECK_INTERVAL` | 60 s | Per-kind alert check (section 6.10) | Code (`services/alerts.py`) |
 | `SHORT_STATEMENT_TIMEOUT` / `POOL_WAIT` | 2 s / 5 s | Database bounds (section 3 "Configuration") | Code (`adapters/postgres.py`) |
-| `SHUTDOWN_DRAIN` | 6 s | Gateway background work at shutdown | Code (`services/gateway.py`) |
+| `SHUTDOWN_DRAIN` | 6 s | Gateway background work, trace writes, answer cache writes and the LangSmith queue at shutdown | Code (`services/gateway.py`) |
 | `SNAPSHOT_INTERVAL` | 15 min | Snapshot pull timer | systemd timer |
 | `GITHUB_CACHE_TTL` | 10 min | `github_activity` | `limits.yaml` |
 | `GITHUB_COMMITS_MAX` | 3 | `github_activity` | `limits.yaml` |
