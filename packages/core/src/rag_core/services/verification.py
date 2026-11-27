@@ -173,6 +173,21 @@ def apply_verdicts(
     return checked
 
 
+def enforce_links(
+    checked: Sequence[CheckedClaim], cited: Sequence[CitedClaim], link_hosts: Sequence[str]
+) -> list[CheckedClaim]:
+    """The published texts held to the link allowlist (the citation check saw only the claims as drafted): a
+    gap with a bad link is dropped, and a `partial` claim whose kept text has one goes back to its own text,
+    `unsupported`."""
+    result: list[CheckedClaim] = []
+    for i, claim in enumerate(checked):
+        if links_allowed(claim.text, link_hosts) or claim.verdict not in ("partial", "gap"):
+            result.append(claim)  # an `unsupported` claim shows struck through, as text, never as a link
+        elif claim.verdict == "partial":
+            result.append(CheckedClaim(cited[i].text, claim.sources, "unsupported"))
+    return result
+
+
 def coherent(claims: Sequence[CheckedClaim]) -> bool:
     """Something is left to publish: at least one claim `supported` or `partial`."""
     return any(c.verdict in ("supported", "partial") for c in claims)

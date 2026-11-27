@@ -8,13 +8,27 @@ from rag_core.domain import Prompts, load_domain, load_intents, load_prompts
 from rag_core.ports import SearchHit
 from rag_core.services.guard import CanaryWatch, check_input, links_allowed, with_canary
 from rag_core.services.prompts import passages_text
-from rag_core.services.verification import AnswerClaim, AnswerContract, cite
+from rag_core.services.verification import (
+    AnswerClaim,
+    AnswerContract,
+    CitedClaim,
+    JudgeVerdict,
+    Verdicts,
+    apply_verdicts,
+    cite,
+    enforce_links,
+)
 from structlog.testing import capture_logs
 
 CANARY = "zorzo-canary-0123456789abcdefghijklmnop"
 SQUASHED = "zorzocanary0123456789abcdefghijklmnop"
 HOSTS = ("zorzo.dev.br", "github.com")
 ZORZO = load_domain("zorzo")
+
+
+def fullwidth(text: str) -> str:
+    """The text in fullwidth characters (NFKC reads them as the plain ones)."""
+    return "".join(chr(ord(c) + 0xFEE0) if "!" <= c <= "~" else c for c in text)
 
 
 def squash(text: str) -> str:
@@ -56,6 +70,15 @@ def test_every_system_message_carries_the_canary() -> None:
         text = getattr(marked, name)
         assert text.startswith(f"{name} prompt $slot")  # the template and its slots are kept
         assert text.count(CANARY) == 1
+
+
+def test_the_canary_is_found_in_fullwidth_characters() -> None:
+    watch = CanaryWatch(CANARY)
+    wide = fullwidth(CANARY)
+    assert wide != CANARY and watch.found(f"the marker is {wide}")
+    scan = watch.scan()
+    assert not scan.hit("the marker is " + wide[:10]) and scan.hit("the marker is " + wide)
+    assert len(watch.safe(wide)) < len(wide) - 1  # held back, not sent whole
 
 
 def test_the_canary_is_found_with_other_casing_and_separators() -> None:
@@ -113,13 +136,34 @@ def test_a_canary_with_no_letters_or_digits_is_refused() -> None:
         ("He publishes at https://zorzo.dev.br/about and https://github.com/andrezorzo.", True),
         ("Code on https://www.github.com/x.", True),  # a subdomain of an allowed host
         ("See HTTPS://GITHUB.COM/x", True),
-        ("No link here, only zorzo.dev.br in prose.", True),
+        ("See https://github.com, and more.", True),  # trailing punctuation isn't part of the host
+        ("(see https://github.com/x)", True),
+        ("No link here, only zorzo.dev.br in prose.", True),  # an allowed bare host
+        ("Reach him at andre_zorzo@yahoo.com.", True),  # an e-mail address is not a link
+        ("He used Node.js, Vue.js and main.py.", True),  # names and files are not hosts
+        ("Skills: Python and AWS. Note: it is fine.", True),
         ("See https://evil.example/zorzo.dev.br", False),
         ("See https://zorzo.dev.br.evil.example/", False),  # the allowed host as a prefix
         ("See https://notgithub.com/", False),  # a suffix that is not a subdomain
         ("See https://zorzo.dev.br@evil.example/", False),  # the host is after the @
         ("Allowed https://github.com/x then http://evil.example", False),
         ("See www.evil.example/page", False),
+        ("See http://[::1]/x", False),  # urlsplit raises: not allowed, and no crash
+        ("See https://evil.com\\.github.com/x", False),  # a backslash ends the host
+        ("See https://evil.com\\@github.com", False),
+        ("See https:\\\\evil.com", False),
+        ("See //evil.com/x", False),
+        ("See evil.com/login", False),  # a bare host is a link to check
+        ("See evil.net", False),
+        ("Run javascript:alert(1)", False),
+        ("Write to mailto:andre_zorzo@yahoo.com", False),  # contact links come through `done.contact`
+        ("See https:evil.com", False),  # a scheme without its slashes
+        ("See https://github.com:8443/x", False),  # a port
+        ("See https://github.com%2eevil.com/", False),  # an escape
+        ("See https://git\u200bhub.com/", False),  # a character that is not an ASCII host
+        (f"See {fullwidth('https://evil.com/x')}", False),  # fullwidth is read as what it stands for
+        (f"See {fullwidth('https://github.com/x')}", True),
+        ("See ftp://github.com/x", False),  # only http(s)
     ],
 )
 def test_links_are_checked_by_host(text: str, allowed: bool) -> None:
@@ -181,3 +225,29 @@ def test_the_answer_and_judge_prompts_hold_the_rules_about_a_real_person() -> No
         assert "personal life" in prompt and "employer" in prompt
     assert "unsupported" in loaded.judge and "third person" in loaded.answer
     assert "data" in loaded.answer  # the tagged passages are data, not instructions
+
+
+# -- L5: every published text is held to the link allowlist ------------------------------------------------
+
+
+def test_a_gap_with_a_bad_link_is_dropped_and_a_partial_one_becomes_unsupported() -> None:
+    passages = (SearchHit(1, "FAQ", "He is on GitHub.", 1.0),)
+    cited = [
+        CitedClaim("He is at https://github.com/andrezorzo.", passages),
+        CitedClaim("He is at https://github.com/andrezorzo and more.", passages),
+    ]
+    verdicts = Verdicts(
+        verdicts=[
+            JudgeVerdict(i=0, verdict="supported", supported_text=None),
+            JudgeVerdict(i=1, verdict="partial", supported_text="He is at https://evil.example/x."),
+        ]
+    )
+    checked = apply_verdicts(cited, verdicts, "See https://evil.example/gap for more.")
+    assert [c.verdict for c in checked] == ["supported", "partial", "gap"]
+    kept = enforce_links(checked, cited, HOSTS)
+    assert [(c.text, c.verdict) for c in kept] == [
+        ("He is at https://github.com/andrezorzo.", "supported"),
+        ("He is at https://github.com/andrezorzo and more.", "unsupported"),  # its own text again
+    ]
+    clean = apply_verdicts(cited, verdicts, "He has more on https://github.com/andrezorzo.")
+    assert enforce_links(clean[:1] + clean[2:], cited[:1], HOSTS)[-1].verdict == "gap"

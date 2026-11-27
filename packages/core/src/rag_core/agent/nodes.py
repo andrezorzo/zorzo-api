@@ -31,6 +31,7 @@ from rag_core.services.verification import (
     cite,
     coherent,
     draft_text,
+    enforce_links,
     judge_input,
     read_answer,
 )
@@ -258,7 +259,7 @@ async def verify_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any
             verdicts = cast(Verdicts | None, await ctx.call("verify", "judge", prompt, Verdicts))
             if verdicts is None:
                 return {"outcome": "abstained"}  # verification is never skipped
-        checked = apply_verdicts(cited, verdicts, answer.gap)
+        checked = enforce_links(apply_verdicts(cited, verdicts, answer.gap), cited, ctx.link_hosts)
     if coherent(checked):
         # What goes out is checked last: the judge's `supported_text` and the gap are model text too.
         if any(ctx.canary.found(c.text) for c in checked):

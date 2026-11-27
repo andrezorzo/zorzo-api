@@ -4,6 +4,7 @@
 The classifier is the fake one (a marker in the question decides); the provider is the fake OpenRouter.
 """
 
+import asyncio
 import json
 import re
 import uuid
@@ -178,6 +179,27 @@ def test_a_link_outside_the_allowlist_removes_the_claim(client: TestClient, fake
     judge_calls = [r for r in fake.requests if r.model == JUDGE]
     assert len(judge_calls) == 1 and "evil.example" not in json.dumps(judge_calls[0].body)
     assert "github.com/andrezorzo" in json.dumps(judge_calls[0].body)
+
+
+def test_a_classifier_that_never_answers_sends_the_run_search_only(
+    corpus_database: str, fake: FakeOpenRouter
+) -> None:
+    class Stuck:
+        def warm(self) -> None:
+            pass
+
+        async def score(self, text: str) -> float:
+            await asyncio.sleep(60)
+            return 0.0
+
+    limits: dict[str, object] = {"request_deadline": 3, "answer_reserve": 2.5}  # the guard may take 0.5 s
+    with TestClient(build_app(api_settings(corpus_database), limits=limits, openrouter=fake)) as client:
+        app: Any = client.app
+        app.state.classifier = Stuck()
+        stream = ask(client)
+    assert stream.only("degraded")[0].data == {"mode": "search_only", "reason": "deadline"}
+    assert done(stream)["outcome"] == "degraded"
+    assert fake.requests == [] or all(r.path == "/rerank" for r in fake.requests)  # no model call
 
 
 # -- AC2: decline and block ----------------------------------------------------------------------------------

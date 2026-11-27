@@ -19,6 +19,10 @@ class ModelIntegrityError(RuntimeError):
     pass
 
 
+class ModelBusyError(RuntimeError):
+    """Every work slot of the model is taken: the model is fine, there is just no room for this call yet."""
+
+
 def verify_model_files(snapshot: Path, hashes: Mapping[str, str], label: str) -> None:
     """Raise unless this exact snapshot folder holds the files with these SHA-256 digests."""
     for name, digest in hashes.items():
@@ -91,7 +95,7 @@ class LazyModel[M]:
     @contextmanager
     def slot(self) -> Iterator[None]:
         if not self._slots.acquire(timeout=LOCK_WAIT_S):
-            raise RuntimeError("every model slot is busy")
+            raise ModelBusyError("every model slot is busy")
         try:
             yield
         finally:

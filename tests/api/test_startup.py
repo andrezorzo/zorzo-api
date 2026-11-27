@@ -206,7 +206,7 @@ def test_the_guarded_seed_is_the_published_example() -> None:
 def test_the_canary_is_required_and_real_in_production(database_url: str) -> None:
     result = _start({"DOMAIN": "zorzo", "DATABASE_URL": database_url, "CANARY": ""})
     assert result.returncode != 0 and "canary" in result.stderr.lower()
-    for bad in ("short-canary", "a canary with spaces that is quite long enough ok"):
+    for bad in ("short-canary", "a canary with spaces that is quite long enough ok", "_" * 40 + "a1"):
         with pytest.raises(ValidationError, match=r"(?i)canary"):
             api_settings(database_url, canary=bad)
     with pytest.raises(ValidationError, match=r"(?i)canary"):

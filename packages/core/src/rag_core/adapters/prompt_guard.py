@@ -48,8 +48,13 @@ class PromptGuardClassifier(shared.LazyModel[tuple[Any, Any]]):
         return _open(snapshot)
 
     async def score(self, text: str) -> float:
-        # CPU-bound: keep it off the event loop; the request deadline ends the wait.
-        return await anyio.to_thread.run_sync(self._score, text, abandon_on_cancel=True)
+        # CPU-bound: keep it off the event loop. A visitor can fill the slots with questions, so a busy
+        # model is waited for, never reported as a failure (which fails open): the caller's deadline ends it.
+        while True:
+            try:
+                return await anyio.to_thread.run_sync(self._score, text, abandon_on_cancel=True)
+            except shared.ModelBusyError:
+                continue
 
     def _score(self, text: str) -> float:
         with self.slot():
