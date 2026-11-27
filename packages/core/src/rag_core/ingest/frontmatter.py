@@ -1,13 +1,9 @@
 """YAML front matter of a corpus document."""
 
 import datetime
-from typing import Literal, get_args
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, ValidationError
-
-DocumentKind = Literal["resume", "narrative", "faq", "repo", "project_doc", "site_doc", "post"]
-DOCUMENT_KINDS: tuple[str, ...] = get_args(DocumentKind)
 
 
 class DocumentMeta(BaseModel):
@@ -15,8 +11,8 @@ class DocumentMeta(BaseModel):
 
     doc_key: str = Field(min_length=1, pattern=r"^[a-z0-9][a-z0-9-]*$")
     title: str = Field(min_length=1)
-    kind: DocumentKind
-    lang: Literal["en", "pt"]
+    kind: str = Field(min_length=1)  # one of the domain's `document_kinds` (checked by the gate)
+    lang: str = Field(min_length=1)  # one of the domain's `languages` (checked by the gate)
     authority: int = Field(ge=1, le=3)
     source_url: HttpUrl | None = None
     updated: datetime.date | None = None

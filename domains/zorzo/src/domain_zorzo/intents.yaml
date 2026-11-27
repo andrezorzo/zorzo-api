@@ -1,11 +1,19 @@
-# The intents `route` classifies a question into (LLD "6.3 Agent run"); the route prompt describes each one.
-# `kinds`: the document kinds the intent's retrieval reads (all when absent). `action`: `answer` (default, the
-# RAG path) or `decline` (no answer call).
-career_fact:  # salary or rates, availability, visa, time zone: answered from the FAQ only
+# The intents `route` classifies a question into (LLD "6.3 Agent run"). `description`: what the route prompt
+# is told the intent covers (its `$intents` slot). `kinds`: the document kinds the intent's retrieval reads
+# (all when absent). `action`: `answer` (default, the RAG path) or `decline` (no answer call).
+career_fact:
+  description: salary or rates, availability, visa or work authorization, time zone or working hours
   kinds: [faq]
-about_andre: {}
-about_system: {}
-projects_live: {}
-contact: {}
+about_andre:
+  description: his career, experience, skills, employers, education
+about_system:
+  description: how this site or its AI agent works, its design, code or decisions
+projects_live:
+  description: what he is working on now, or a specific project of his
+contact:
+  description: how to reach or hire him
 off_topic:
+  description: >-
+    anything else (general-purpose requests, other people, his personal life, opinions about former
+    employers or colleagues)
   action: decline

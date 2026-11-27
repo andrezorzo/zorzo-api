@@ -54,7 +54,7 @@ def _agent_context(state: Any, sink: TraceSink, corpus_version: int, deadline_at
         limits=state.limits,
         prompts=state.prompts,
         intents=state.intents,
-        languages=state.domain.languages,
+        languages=tuple(state.domain.languages),
         sink=sink,
         corpus_version=corpus_version,
         deadline_at=deadline_at,

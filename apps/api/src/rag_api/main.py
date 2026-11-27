@@ -14,7 +14,7 @@ from rag_core.adapters.factory import (
     provider_keys,
     rerank_chain,
 )
-from rag_core.adapters.pgvector_store import PgVectorStore
+from rag_core.adapters.pgvector_store import PgVectorStore, check_text_search
 from rag_core.adapters.postgres import Database
 from rag_core.adapters.rate_limit import PostgresRateLimiter
 from rag_core.adapters.turnstile import TurnstileBotCheck
@@ -72,6 +72,9 @@ def create_app(settings: ApiSettings) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             await db.reflect()
+            await check_text_search(
+                db, domain.languages.values()
+            )  # a language Postgres can't search stops it
             await _warm_rerankers(app)
             yield
         finally:
@@ -87,8 +90,8 @@ def create_app(settings: ApiSettings) -> FastAPI:
 
     app = FastAPI(title="rag-api", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.domain = domain
-    app.state.prompts = load_prompts(settings.domain)
-    app.state.intents = load_intents(settings.domain)
+    app.state.intents = load_intents(settings.domain, domain.document_kinds)
+    app.state.prompts = load_prompts(settings.domain, app.state.intents)
     app.state.agent = build_graph()
     app.state.db = db
     app.state.limits = limits
@@ -97,7 +100,7 @@ def create_app(settings: ApiSettings) -> FastAPI:
     # Degraded questions use the local levels only, so they make no model call.
     app.state.local_rerankers = build_rerankers(settings)
     app.state.rerankers = rerank_chain(app.state.gateway, app.state.local_rerankers)
-    app.state.vector_store = PgVectorStore(db, limits.rrf_k, limits.search_min_similarity)
+    app.state.vector_store = PgVectorStore(db, limits.rrf_k, limits.search_min_similarity, domain.languages)
     app.state.gate = Gate(
         TurnstileBotCheck(settings.turnstile_secret.get_secret_value(), limits.timeout_turnstile),
         PostgresRateLimiter(db),

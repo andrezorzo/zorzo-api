@@ -1,0 +1,7 @@
+# A second domain for tests (F01-T14 AC5): other document kinds and another language than zorzo's, so a
+# test proves the core runs it with no change outside this folder.
+name: sample
+languages:
+  en: english
+  es: spanish
+document_kinds: [manual, faq]

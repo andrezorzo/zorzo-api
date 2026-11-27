@@ -274,10 +274,13 @@ domain pieces, not ports (section 6.5).
 - **Domain values:** `domain.yaml` declares the domain's `document_kinds` and its `languages`, a mapping
   from ISO 639-1 code to the Postgres text search configuration of that language (zorzo: `en: english`,
   `pt: portuguese`); the first language is the default. Each intent in `intents.yaml` has a `description`,
-  and the `route` prompt's `$intents` slot is filled with the intents and their descriptions at startup; a
-  prompt without the slot, an intent without a description, an intent kind or an example question language
-  the domain doesn't declare, or a configuration Postgres doesn't have (`pg_ts_config`) stops the API and the
-  ingest before they serve or write.
+  and the `route` prompt's `$intents` slot, its only slot, is filled with the intents and their
+  descriptions at startup. A configuration Postgres doesn't have (resolved by the queries' own cast to
+  `regconfig`) stops the API and the ingest before they serve or write; a `route` prompt with any other
+  slot or none, an intent without a description or an intent kind the domain doesn't declare stops the
+  API; an example question in a language the domain doesn't declare stops the ingest. A chunk's `tsv`
+  keeps the configuration of its ingest, so changing a language's configuration needs a new corpus
+  version.
 - **Shutdown:** the gateway drains its background work (reservation releases, alerts, event rows) within
   `SHUTDOWN_DRAIN`, then cancels what is left and logs it, so a stuck write never holds the process.
 

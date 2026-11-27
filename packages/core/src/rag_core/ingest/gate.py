@@ -16,6 +16,7 @@ from pathlib import Path
 
 import phonenumbers
 
+from rag_core.domain import DomainConfig
 from rag_core.ingest.frontmatter import DocumentMeta, FrontMatterError, parse
 from rag_core.ports import Finding, SecretScanner
 
@@ -222,8 +223,21 @@ def personal_data(text: str, allowlist: Iterable[str] = ()) -> list[str]:
     return rules
 
 
+def _undeclared(meta: DocumentMeta, domain: DomainConfig) -> list[str]:
+    """Front matter values the domain doesn't declare, named by field with the domain's own list."""
+    declared = (
+        ("kind", meta.kind, "kinds", domain.document_kinds),
+        ("lang", meta.lang, "languages", domain.languages),
+    )
+    return [
+        f"invalid front matter ({field}); the domain's {plural}: {', '.join(values)}"
+        for field, value, plural, values in declared
+        if value not in values
+    ]
+
+
 async def check(
-    source: Path, scanner: SecretScanner, allowlist: tuple[str, ...]
+    source: Path, scanner: SecretScanner, domain: DomainConfig
 ) -> tuple[list[Document], list[Finding]]:
     documents: list[Document] = []
     problems: list[Finding] = []
@@ -244,13 +258,14 @@ async def check(
         except FrontMatterError as exc:
             problems.append(Finding(path.name, str(exc)))
             continue
+        problems.extend(Finding(path.name, rule) for rule in _undeclared(meta, domain))
         if not meta.reviewed_by_owner:
             problems.append(Finding(path.name, "not reviewed_by_owner"))
         if meta.doc_key in seen:
             problems.append(Finding(path.name, "duplicate doc_key"))
         seen.add(meta.doc_key)
         # The whole text: front matter values (the title) are published and indexed too.
-        problems.extend(Finding(path.name, rule) for rule in personal_data(text, allowlist))
+        problems.extend(Finding(path.name, rule) for rule in personal_data(text, domain.pii_allowlist))
         documents.append(Document(meta, body, hashlib.sha256(raw).hexdigest()))
     problems.extend(await scanner.scan(source))
     return documents, problems

@@ -5,10 +5,12 @@ The migrations run once per test session into a template database; each test dat
 """
 
 import os
+import re
+import shutil
 import subprocess
 import sys
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import psycopg
@@ -28,6 +30,8 @@ from tests.fakes.openrouter import FakeOpenRouter, stop_all
 from tests.fakes.turnstile import PASS_SECRET, FakeSiteverify
 
 ROOT = Path(__file__).resolve().parents[1]
+# Test-only domain packages (`domain_<name>`), importable once this folder is on the path.
+FIXTURE_DOMAINS = ROOT / "tests/fixtures/domains"
 ADMIN_URL = os.environ.get("TEST_DATABASE_ADMIN_URL", "postgresql://zorzo:zorzo@localhost:5432/postgres")
 
 
@@ -82,9 +86,17 @@ def database_url() -> Iterator[str]:
 
 
 def run_ingest(
-    url: str, data_dir: Path, *args: str, app_env: str = "local", embedder: str = "fake"
+    url: str,
+    data_dir: Path,
+    *args: str,
+    app_env: str = "local",
+    embedder: str = "fake",
+    domain: str = "zorzo",
+    domains_dir: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """The real ingest command (fake embedder by default) against the given database."""
+    """The real ingest command (fake embedder by default) against the given database; `domains_dir` puts a
+    folder of test domain packages on the path."""
+    path = {"PYTHONPATH": str(domains_dir)} if domains_dir else {}
     return subprocess.run(
         [sys.executable, "-m", "rag_ingest", *args],
         cwd=ROOT,
@@ -92,16 +104,68 @@ def run_ingest(
             **os.environ,
             "DATABASE_URL": url,
             "APP_ENV": app_env,
-            "DOMAIN": "zorzo",
+            "DOMAIN": domain,
             "EMBEDDER": embedder,
             # Nothing listens here: with EMBEDDER=ollama, embedding fails at once.
             "OLLAMA_URL": "http://127.0.0.1:9",
             "DATA_DIR": str(data_dir),
+            **path,
         },
         capture_output=True,
         text=True,
         timeout=120,
     )
+
+
+class DomainFactory:
+    """Builds throwaway `domain_<name>` packages in `folder`, which is on the import path for the test (and
+    can be passed as `PYTHONPATH` to a subprocess); each package's import is dropped after the test."""
+
+    def __init__(self, folder: Path, request: pytest.FixtureRequest) -> None:
+        self.folder = folder
+        self._request = request
+
+    def __call__(
+        self, name: str, texts: Mapping[str, str] | None = None, *, from_sample: bool = False
+    ) -> str:
+        """An empty package, or a copy of the `sample` test domain, with the given files (`__` in a key
+        stands for `/`, e.g. `prompts__route.md`); returns the domain name."""
+        package = self.folder / f"domain_{name}"  # one package per name: imports are cached by name
+        if from_sample:
+            shutil.copytree(FIXTURE_DOMAINS / "domain_sample", package)
+        else:
+            package.mkdir()
+            (package / "__init__.py").write_text("")
+        for relative, text in (texts or {}).items():
+            path = package / relative.replace("__", "/")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        self._request.addfinalizer(lambda: sys.modules.pop(f"domain_{name}", None))
+        return name
+
+
+@pytest.fixture
+def make_domain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> DomainFactory:
+    folder = tmp_path / "domains"
+    folder.mkdir()
+    monkeypatch.syspath_prepend(str(folder))
+    return DomainFactory(folder, request)
+
+
+CORE = ROOT / "packages/core/src/rag_core"
+
+
+def named_in_core(names: set[str]) -> dict[str, list[str]]:
+    """The given names written as a quoted string in a core source file, by file."""
+    found: dict[str, list[str]] = {}
+    for path in CORE.rglob("*.py"):
+        text = path.read_text()
+        hits = sorted(n for n in names if re.search(rf"[\"']{re.escape(n)}[\"']", text))
+        if hits:
+            found[str(path.relative_to(CORE))] = hits
+    return found
 
 
 def ingest_fixture_corpus(url: str, data_dir: Path) -> None:
