@@ -141,7 +141,10 @@ def test_a_canary_with_no_letters_or_digits_is_refused() -> None:
         ("No link here, only zorzo.dev.br in prose.", True),  # an allowed bare host
         ("Reach him at andre_zorzo@yahoo.com.", True),  # an e-mail address is not a link
         ("He used Node.js, Vue.js and main.py.", True),  # names and files are not hosts
+        ("He works with ASP.NET, VB.NET and Node.JS.", True),  # a bare host is written in lowercase
+        ("Run install.sh then node.js and README.md.", True),  # a file name has no host
         ("Skills: Python and AWS. Note: it is fine.", True),
+        ("Skills:Python, Note:see below, Stack:AWS.", True),  # a colon after a word is not a scheme
         ("See https://evil.example/zorzo.dev.br", False),
         ("See https://zorzo.dev.br.evil.example/", False),  # the allowed host as a prefix
         ("See https://notgithub.com/", False),  # a suffix that is not a subdomain
@@ -155,6 +158,12 @@ def test_a_canary_with_no_letters_or_digits_is_refused() -> None:
         ("See //evil.com/x", False),
         ("See evil.com/login", False),  # a bare host is a link to check
         ("See evil.net", False),
+        ("See evil.ru/x", False),  # any lowercase `label.label`, whatever its last label
+        ("See evil.com", False),
+        ("See main.py/evil", False),  # a path after a file-like name makes it a link
+        ("See JaVaScRiPt:alert(1)", False),
+        ("See data:text/html,<script>x</script>", False),
+        ("See vbscript:x and file:///etc/passwd and tel:123 and blob:x and about:blank", False),
         ("Run javascript:alert(1)", False),
         ("Write to mailto:andre_zorzo@yahoo.com", False),  # contact links come through `done.contact`
         ("See https:evil.com", False),  # a scheme without its slashes

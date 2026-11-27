@@ -4,7 +4,6 @@ L2 `check_input` runs the local injection classifier; L5 holds the canary back f
 claims for it, and `links_allowed` keeps a claim from linking outside the domain's hosts.
 """
 
-import functools
 import re
 import unicodedata
 from collections.abc import Sequence
@@ -108,28 +107,24 @@ class CanaryScan:
         return self._canary in squashed
 
 
-# Top-level domains a bare host (`evil.com/login`, no scheme) is recognized by: these generic ones and the
-# ones of the allowed hosts. A filename (`main.py`) or a name (`Node.js`) isn't a link.
-_GENERIC_TLDS = frozenset((
-    "com", "net", "org", "io", "dev", "app", "ai", "co", "me", "info", "biz", "edu", "gov", "xyz", "tech",
-    "cloud", "site", "online", "ly",
+# Schemes refused even without `//` (`javascript:alert(1)`); other `word:` is plain text (`Skills:Python`).
+_DANGEROUS_SCHEMES = "javascript|data|vbscript|file|mailto|tel|ftp|blob|about"
+# A bare host is written in lowercase (`evil.com/login`): `ASP.NET` and `Node.JS` are names. Names and files
+# in lowercase (`main.py`, `install.sh`) are not hosts either, unless a path follows (`main.py/x`).
+_FILE_EXTENSIONS = frozenset((
+    "py", "js", "ts", "md", "sh", "json", "yaml", "yml", "txt", "html", "css", "java", "go", "rs", "rb",
+    "php", "sql", "toml", "lock", "cfg", "ini",
 ))  # fmt: skip
-
-
-@functools.cache
-def _link_like(tlds: frozenset[str]) -> re.Pattern[str]:
-    bare_tld = "|".join(sorted(tlds))
-    return re.compile(
-        rf"""
-        [a-z][a-z0-9+.\-]*:[^\s]+       # a scheme (`javascript:alert(1)`, `mailto:x`), whatever follows it
-        | //[^\s]+                       # a scheme-relative link
-        | www\.[^\s]*
-        | (?<![@\w.\-])(?:[a-z0-9\-]+\.)+(?:{bare_tld})\b[^\s]*   # a bare host, not an e-mail's
-        """,
-        re.IGNORECASE | re.VERBOSE,
-    )
-
-
+_LINK_LIKE = re.compile(
+    rf"""
+    (?i: [a-z][a-z0-9+.\-]*://[^\s]*             # a scheme with its slashes
+       | (?:{_DANGEROUS_SCHEMES}):[^\s]*          # a scheme that is refused without them
+       | //[^\s]+                                 # a scheme-relative link
+       | www\.[^\s]* )
+    | (?<![@\w.\-])(?P<bare>(?:[a-z0-9\-]+\.)+(?P<tld>[a-z]{{2,24}}))\b(?P<rest>[^\s]*)   # a bare host
+    """,
+    re.VERBOSE,
+)
 _TRAILING_PUNCTUATION = ".,;:!?)]}'\"»"
 _AUTHORITY = re.compile(r"[a-z0-9.\-]+")  # a plain ASCII host: no userinfo, port, escape or bracket
 
@@ -155,12 +150,20 @@ def _link_allowed(link: str, hosts: Sequence[str]) -> bool:
     return any(authority == host or authority.endswith(f".{host}") for host in map(str.lower, hosts))
 
 
+def _is_file_name(match: re.Match[str]) -> bool:
+    """A bare lowercase `name.ext` with a file's extension and no path after it."""
+    return (
+        match["bare"] is not None and match["tld"] in _FILE_EXTENSIONS and not match["rest"].startswith("/")
+    )
+
+
 def links_allowed(text: str, hosts: Sequence[str]) -> bool:
     """Whether every link in the text is a plain http(s) link to one of the hosts or a subdomain of one.
     Anything else that looks like a link (another scheme, a bare host, a userinfo, a port, an escape) is not:
     the contact links reach the page through `done.contact`, never through a claim."""
     normalized = unicodedata.normalize("NFKC", text).replace("\\", "/")
-    tlds = _GENERIC_TLDS | {host.lower().rsplit(".", 1)[-1] for host in hosts}
     return all(
-        _link_allowed(match.group(), hosts) for match in _link_like(frozenset(tlds)).finditer(normalized)
+        _link_allowed(match.group(), hosts)
+        for match in _LINK_LIKE.finditer(normalized)
+        if not _is_file_name(match)
     )
