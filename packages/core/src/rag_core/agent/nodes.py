@@ -71,11 +71,11 @@ async def route_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any]
                 state["question"],
                 gateway=ctx.gateway,
                 prompt=ctx.prompts.route,
-                deadline_at=ctx.deadline_at,
+                deadline_at=ctx.before_answer,
                 spend=ctx.spend,
             )
         except ModelsUnavailableError:
-            return {"degraded": "models_unavailable"}
+            return {"degraded": ctx.unavailable()}
         ctx.record("route", completion)
     if result.intent == "off_topic":
         return {"route": result, "outcome": "declined"}
@@ -112,9 +112,9 @@ async def assess_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any
         ctx.prompts.assess, state["query"], question=state["query"], passages=passages_text(state["passages"])
     )
     with stage(ctx.sink, "assess"):
-        result = await ctx.call("assess", "route", prompt, AssessResult)
+        result = await ctx.call("assess", "route", prompt, AssessResult, ctx.before_answer)
     if result is None:
-        return {"degraded": "models_unavailable"}
+        return {"degraded": ctx.unavailable()}
     weak = not cast(AssessResult, result).sufficient
     return {"reformulate": weak and state.get("reformulated", 0) < ctx.limits.max_reformulate}
 
@@ -123,9 +123,9 @@ async def reformulate_step(state: AgentState, runtime: AgentRuntime) -> dict[str
     ctx = runtime.context
     prompt = messages(ctx.prompts.reformulate, state["query"], question=state["query"])
     with stage(ctx.sink, "reformulate"):
-        result = await ctx.call("reformulate", "route", prompt, ReformulateResult)
+        result = await ctx.call("reformulate", "route", prompt, ReformulateResult, ctx.before_answer)
     if result is None:
-        return {"degraded": "models_unavailable"}
+        return {"degraded": ctx.unavailable()}
     query = cast(ReformulateResult, result).query.strip() or state["query"]
     return {"query": query, "reformulated": state.get("reformulated", 0) + 1}
 
@@ -201,6 +201,7 @@ async def verify_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any
 
 
 def _send_claims(claims: Sequence[CheckedClaim], ctx: AgentContext) -> None:
+    ctx.settled = "answered"
     for i, claim in enumerate(claims):
         ctx.sink.record(Claim(i=i, text=claim.text, sources=list(claim.sources), verdict=claim.verdict))
 
@@ -226,5 +227,6 @@ async def search_only_step(state: AgentState, runtime: AgentRuntime) -> dict[str
     hits = ctx.found or await retrieval.retrieve(
         state["question"], ctx.corpus_version, ctx.sink, ctx.embedder, ctx.store, ctx.rerankers, ctx.limits
     )
+    ctx.settled = "degraded"
     emit_degraded(ctx.sink, hits, ctx.corpus_version, state["degraded"], ctx.limits.degraded_max_passages)
     return {"outcome": "degraded"}

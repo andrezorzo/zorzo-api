@@ -71,8 +71,11 @@ def read_answer(text: str) -> AnswerContract | None:
 
 def draft_text(partial: str) -> str:
     """The claims' text so far, read from the answer's JSON as it grows; never JSON or passage numbers."""
+    start = partial.find("{")  # past a Markdown fence or a sentence before the JSON
+    if start < 0:
+        return ""
     try:
-        parsed: Any = parse_partial_json(partial)
+        parsed: Any = parse_partial_json(partial[start:])
     except ValueError:
         return ""
     claims = parsed.get("claims") if isinstance(parsed, dict) else None

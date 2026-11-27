@@ -275,3 +275,23 @@ def test_abstention_and_decline_are_distinct_outcomes(client: TestClient, fake: 
 
     script(fake)
     assert outcome(ask(client)) == "answered"
+
+
+def test_a_fenced_draft_still_streams_its_claims(client: TestClient, fake: FakeOpenRouter) -> None:
+    script(fake, draft=Reply("```json\n" + answer(CLAIMS).text + "\n```"))
+    stream = ask(client)
+    draft = "".join(e.data["text"] for e in stream.only("token"))
+    assert draft == "André used Lambda and Kinesis on AWS. He built serverless pipelines."
+    assert outcome(stream) == "answered"
+
+
+def test_steps_before_the_answer_keep_its_reserve(corpus_database: str, fake: FakeOpenRouter) -> None:
+    script(fake)
+    fake.script_schema("AssessResult", "hang")
+    fake.schema_scripts["AssessResult"].rotate(-1)  # the hang first, before the scripted reply
+    limits: dict[str, object] = {"request_deadline": 4, "answer_reserve": 3, "ping_interval": 0.2}
+    with TestClient(build_app(api_settings(corpus_database), limits=limits, openrouter=fake)) as c:
+        stream = ask(c)
+    assert stream.only("degraded")[0].data["reason"] == "deadline"
+    assert stream.only("retrieval")[-1].data["hits"]  # cut with a second left: the passages still show
+    assert ANSWER_A not in fake.models_called()

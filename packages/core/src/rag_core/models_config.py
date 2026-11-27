@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Literal, Self
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from rag_core.limits import Limits
 
@@ -69,11 +69,14 @@ class Provider(BaseModel):
     key_env: str | None = None  # absent for a keyless provider (Ollama)
     kind: ProviderKind = "openai"
 
+    @field_validator("base_url", mode="before")
+    @classmethod
+    def _read_variables(cls, value: Any) -> Any:
+        return _VARIABLE.sub(_variable, value) if isinstance(value, str) else value
+
     @model_validator(mode="before")
     @classmethod
     def _openrouter_by_default(cls, data: Any) -> Any:
-        if isinstance(data, dict) and isinstance(data.get("base_url"), str):
-            data = {**data, "base_url": _VARIABLE.sub(_variable, data["base_url"])}
         if isinstance(data, dict) and "kind" not in data and "openrouter.ai" in str(data.get("base_url", "")):
             return {**data, "kind": "openrouter"}
         return data
@@ -81,7 +84,7 @@ class Provider(BaseModel):
 
 def _variable(match: re.Match[str]) -> str:
     name, default = match.group(1), match.group(2)
-    value = os.environ.get(name, default)
+    value = os.environ.get(name) or default  # set but empty counts as unset, as in the shell
     if value is None:
         raise ValueError(f"base_url needs the environment variable {name}")
     return value

@@ -5,7 +5,6 @@ reformulate → answer → verify → optional repair, with abstain, decline and
 """
 
 import asyncio
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -82,10 +81,10 @@ def build_graph() -> Agent:
 
 async def run_agent(question: str, trace_id: UUID, *, agent: Agent, context: AgentContext) -> RunResult:
     """Runs the graph for one question and ends the stream with `usage` (unless search-only) and `done`."""
-    started = time.perf_counter()
     state: dict[str, Any] = {}
+    deadline = asyncio.timeout_at(context.deadline_at)
     try:
-        async with asyncio.timeout_at(context.deadline_at):
+        async with deadline:
             async for chunk in agent.astream(
                 {"question": question},
                 context=context,
@@ -98,10 +97,16 @@ async def run_agent(question: str, trace_id: UUID, *, agent: Agent, context: Age
         log.error("recursion_limit")  # a bug: the graph looped past its backstop
         outcome = "abstained"
     except TimeoutError:
+        if not deadline.expired():  # a step's own timeout escaped it: a bug, not the request's deadline
+            log.exception("agent_failed")
+            end_with_error(context.sink, trace_id)
+            return RunResult("error", _public_ok(state))
         log.warning("deadline_exceeded", stage="agent")
-        if context.drafted:
+        if context.settled is not None:  # a step already sent the ending: keep it
+            outcome = context.settled
+        elif context.drafted:
             outcome = "abstained"  # a draft is never published unverified
-        else:
+        elif context.found:
             emit_degraded(
                 context.sink,
                 context.found,
@@ -110,6 +115,9 @@ async def run_agent(question: str, trace_id: UUID, *, agent: Agent, context: Age
                 context.limits.degraded_max_passages,
             )
             outcome = "degraded"
+        else:  # nothing found in time: "no matching sources" would be untrue
+            end_with_error(context.sink, trace_id)
+            return RunResult("error", _public_ok(state))
     except Exception:
         log.exception("agent_failed")
         end_with_error(context.sink, trace_id)
@@ -120,11 +128,17 @@ async def run_agent(question: str, trace_id: UUID, *, agent: Agent, context: Age
                 tokens_in=context.tokens_in,
                 tokens_out=context.tokens_out,
                 cost_usd=context.cost_usd,
-                latency_ms=round((time.perf_counter() - started) * MS_PER_S),
+                latency_ms=round(_elapsed(context) * MS_PER_S),
             )
         )
     context.sink.record(Done(trace_id=trace_id, outcome=outcome, cached=False, suggestion=None))
     return RunResult(outcome, _public_ok(state))
+
+
+def _elapsed(context: AgentContext) -> float:
+    """Seconds since the request started: its deadline is `REQUEST_DEADLINE` after the start."""
+    started = context.deadline_at - context.limits.request_deadline
+    return asyncio.get_running_loop().time() - started
 
 
 def _public_ok(state: dict[str, Any]) -> bool | None:

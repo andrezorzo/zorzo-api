@@ -28,7 +28,8 @@ StageName = Literal[
     "finish",
 ]
 DegradedReason = Literal["models_unavailable", "budget_exhausted", "quota_exhausted", "deadline"]
-# The result of a request, named as the stored outcomes are (`questions_log.outcome`); `error` is a bug.
+# The result of a request, named as the stored outcomes are (`questions_log.outcome`); `error` (a bug) is
+# this stream's only, and storing it is F01-T10's to map.
 Outcome = Literal["answered", "abstained", "declined", "blocked", "degraded", "error"]
 
 

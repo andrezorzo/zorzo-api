@@ -238,10 +238,9 @@ def test_a_hung_search_in_a_degraded_mode_ends_with_error_then_done(
     assert hung_search(client).names()[-2:] == ["error", "done"]
 
 
-def test_a_hung_search_in_the_agent_ends_search_only_on_the_deadline(client: TestClient) -> None:
-    stream = hung_search(client)
-    assert stream.only("degraded")[0].data["reason"] == "deadline"
-    assert stream.only("retrieval")[-1].data["hits"] == []
+def test_a_hung_search_in_the_agent_ends_with_error_then_done(client: TestClient) -> None:
+    # Nothing was found in time: "no matching sources" would be untrue.
+    assert hung_search(client).names()[-2:] == ["error", "done"]
 
 
 # AC5 (F01-T05): the remote rerank level leads, and falls to the local one.

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pydantic import BaseModel
 
 from rag_core.domain import Prompts
-from rag_core.events import Model, StageName
+from rag_core.events import DegradedReason, Model, Outcome, StageName
 from rag_core.limits import Limits
 from rag_core.models_config import StageName as ModelStage
 from rag_core.ports import Embedder, Reranker, SearchHit, TraceSink, VectorStore
@@ -35,9 +35,19 @@ class AgentContext:
     # the visitor, and the passages last found (untrimmed), for a search-only end.
     drafted: bool = False
     found: list[SearchHit] = field(default_factory=list)
+    settled: Outcome | None = None  # set once a step sent the stream's ending (claims, or search-only)
 
     def seconds_left(self) -> float:
         return self.deadline_at - asyncio.get_running_loop().time()
+
+    @property
+    def before_answer(self) -> float:
+        """The deadline of the steps before `answer`, which keeps `ANSWER_RESERVE` (LLD "6.3 Agent run")."""
+        return self.deadline_at - self.limits.answer_reserve
+
+    def unavailable(self) -> DegradedReason:
+        """Why a step before `answer` went search-only: out of time for the answer, or the models failed."""
+        return "deadline" if self.seconds_left() < self.limits.answer_reserve else "models_unavailable"
 
     def record(self, step: StageName, completion: Completion) -> None:
         """Add a model call's usage and cost, and tell the visitor which model answered."""
@@ -47,13 +57,18 @@ class AgentContext:
         self.sink.record(Model(stage=step, model=completion.model, provider=completion.provider))
 
     async def call(
-        self, step: StageName, stage: ModelStage, messages: list[dict[str, str]], schema: type[BaseModel]
+        self,
+        step: StageName,
+        stage: ModelStage,
+        messages: list[dict[str, str]],
+        schema: type[BaseModel],
+        deadline_at: float | None = None,
     ) -> BaseModel | None:
-        """One schema-bound model call under the request's deadline and spend; None when the chain can't
-        answer."""
+        """One schema-bound model call under the request's spend and the given deadline (the request's by
+        default); None when the chain can't answer."""
         try:
             completion = await self.gateway.complete(
-                stage, messages, schema=schema, deadline_at=self.deadline_at, spend=self.spend
+                stage, messages, schema=schema, deadline_at=deadline_at or self.deadline_at, spend=self.spend
             )
         except ModelsUnavailableError:
             return None
