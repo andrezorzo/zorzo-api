@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
-from rag_core.domain import Intent, load_intents
+from rag_core.domain import DomainError, load_intents
 from rag_core.services.route import route_schema
 
 CORE = Path(__file__).resolve().parents[2] / "packages/core/src/rag_core"
@@ -31,9 +31,23 @@ def test_the_core_names_no_domain_intent() -> None:
     names = load_intents("zorzo")
     for path in CORE.rglob("*.py"):
         text = path.read_text()
-        assert not [n for n in names if re.search(rf"[\"']{n}[\"']", text)], path
+        assert not [n for n in names if re.search(rf"[\"']{re.escape(n)}[\"']", text)], path
 
 
-def test_a_misspelled_kind_stops_the_app() -> None:
-    with pytest.raises(ValidationError, match="faqs"):
-        Intent(kinds=("faqs",))
+@pytest.mark.parametrize(
+    ("name", "yaml_text", "error"),
+    [
+        ("misspelled", "career_fact: {kinds: [faqs]}\n", "faqs"),  # a misspelled kind
+        ("keyword", "no: {}\nother: {}\n", "must be strings"),  # a bare YAML keyword read as a boolean
+    ],
+)
+def test_bad_intents_stop_the_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, yaml_text: str, error: str
+) -> None:
+    package = tmp_path / f"domain_{name}"  # one package per case: imports are cached by name
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "intents.yaml").write_text(yaml_text)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    with pytest.raises(DomainError, match=error):
+        load_intents(name)
