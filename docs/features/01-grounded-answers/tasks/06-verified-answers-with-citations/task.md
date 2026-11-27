@@ -1,6 +1,6 @@
 # 06: Verified answers with citations
 
-**Status:** to do
+**Status:** in progress
 
 **What to build:** A visitor asks about André's career, projects or how the site was built and gets a draft marked as being checked, then the checked answer with a numbered citation on every claim; unsupported claims show as removed, and questions the corpus doesn't cover get an abstention.
 
