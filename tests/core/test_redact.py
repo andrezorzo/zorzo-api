@@ -1,6 +1,7 @@
 """F01-T10 AC3 (unit): the redactor every stored or exported trace passes through."""
 
 import json
+import time
 from typing import Any
 
 import pytest
@@ -308,3 +309,59 @@ def test_a_text_that_decodes_past_the_layer_limit_is_replaced_whole() -> None:
     nested = "contact &amp;amp;amp;amp;#64; me"  # one layer more than the redactor decodes
     assert REDACTOR.text(nested) == "[redacted]"
     assert REDACTOR.text("Tom &amp;amp; Jerry") == "Tom & Jerry"  # within the limit
+
+
+# -- review round 4 ----------------------------------------------------------------------------------------
+
+AWS_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "/api/v1/users/12345/profile/settings",
+        "/usr/lib/python3/site/packages/numpy/core",
+        "src/rag_core/services/v2/handlers/authentication.py",
+        "2024/11/27/building/a/rag/pipeline/in/python3",
+    ],
+)
+def test_a_path_is_not_a_base64_key(text: str) -> None:
+    assert REDACTOR.text(text) == text
+    assert REDACTOR.text(f"open {text} now") == f"open {text} now"
+
+
+def test_a_key_after_a_url_or_in_its_query_is_found() -> None:
+    assert REDACTOR.text(f"https://example.com/cb?sig={AWS_KEY}") == "https://example.com/cb?sig=[secret]"
+    assert REDACTOR.text(f"https://example.com/x,{AWS_KEY}") == "https://example.com/x,[secret]"
+    assert REDACTOR.text(f"https://example.com/p#frag={AWS_KEY}") == "https://example.com/p#frag=[secret]"
+
+
+def test_a_private_key_header_without_an_end_is_cut_alone_and_prose_between_blocks_stays() -> None:
+    assert REDACTOR.text("see -----BEGIN RSA PRIVATE KEY----- here") == "see [secret] here"
+    two = (
+        "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----"
+        " and in between he said hello there "
+        "-----BEGIN PRIVATE KEY-----\nBBBB\n-----END PRIVATE KEY-----"
+    )
+    assert REDACTOR.text(two) == "[secret] and in between he said hello there [secret]"
+
+
+def test_many_private_key_headers_with_no_end_are_not_quadratic() -> None:
+    text = "-----BEGIN RSA PRIVATE KEY-----\n" * 8000
+    started = time.monotonic()
+    assert REDACTOR.text(text).count("[secret]") == 8000  # each header is cut alone
+    assert time.monotonic() - started < 2  # a loose bound: it takes a few tenths of a second
+
+
+def test_a_short_decoded_form_of_a_secret_does_not_destroy_other_text() -> None:
+    text = "AT&T p&q map&reduce"
+    assert Redactor(secrets=["p&amp;"]).text(text) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["call <b (11) 91234-5678> now", 'see <a title="(11) 91234-5678">x</a> ok'],
+)
+def test_a_phone_in_a_tag_or_an_attribute_is_found(text: str) -> None:
+    redacted = REDACTOR.text(text)
+    assert "91234" not in redacted and "[phone]" in redacted
