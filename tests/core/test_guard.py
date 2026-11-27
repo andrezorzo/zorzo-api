@@ -142,7 +142,10 @@ PLAIN_TEXT = [
     "Big Data: Spark. Data: março. Profile: senior. Intel: x86. Tel: 123. About: him. FTP: yes.",
     'He said "https://zorzo.dev.br" and zorzo.dev.br—o site.',
     "p.ex. a migration, e.g. to AWS, i.e. event-driven.",
-    "Data:12/03/2020, Big Data:Spark, HTTP:80 and http:8080. are not links.",  # no space after the colon
+    "Data:12/03/2020, Big Data:Spark, HTTP:80 and http:8080. are not links.",
+    "HTTP:1.1, HTTP:2.0, HTTP:GET request, HTTPS:true, HTTP:REST and HTTP:/1.1 are protocols.",
+    "Protocols (HTTP:) and http:localhost.",  # a one-label host isn't a link to check (residual risk)
+    "Data:Q1/Q2, DATA:Q3/Q4, data:a1/b and Data:;x are labels.",  # no space after the colon
     "Metadata:x and the www. prefix, then www.. and www. alone.",  # a lone `www.` is text
     "See mailto:andre_zorzo@yahoo.com and tel:123 in the footer.",  # not explicit URLs: they are text
     # A bare host is not a link: the page shows a claim as text (`textContent`), so it is not clickable,
@@ -197,9 +200,8 @@ def test_text_that_is_not_an_explicit_url_is_kept(text: str) -> None:
         ("See https:1.2.3.4/x", False),
         ("See https:%65vil.com", False),
         ("See https:a_b.evil.com", False),
-        ("See https:evil", False),
         ("See https:www.github.com/x", False),  # no slashes: refused even toward an allowed host
-        ("See data:;base64,AAA and data:;charset=utf-8,x and data:x-foo/bar,x", False),
+        ("See data:;base64,AAA and data:;charset=utf-8,x and data:text/html,x", False),
         ("See 1.https://github.com/andre and Projetos:-https://github.com/a", True),  # an allowed host
         ("See -https://evil.com/x and ahttps://github.com/x", False),
         ("See https://github.com/andre/www.zorzo.dev.br and e.g.www.github.com", True),

@@ -17,6 +17,9 @@ below was weighed and left, because closing it costs more than the harm it would
 - **A link written with letters that only look like the allowed host** (a Cyrillic `е` in a host) is refused
   by the plain-ASCII host rule, but text that merely *spells* an allowed name with look-alike letters in
   prose is not a link and is not checked.
+- **A one-label host after a slashless scheme (`http:localhost`) and a `data:` URL with a media type outside
+  the browser's top-level types (`data:x-foo/bar,x`).** Not checked: both are plain text that a browser
+  would not open as a link or render, and refusing them strikes true claims.
 - **A second link after a closer outside the delimiter set** (`https://github.com/a)//evil.com`,
   `https://github.com/a»//evil.com`). The nested-link check looks for another `://` anywhere, and for `www.`
   or `//` right after `, ; | " ' ( < [`; other closers aren't in that set. It needs a contrived output (a

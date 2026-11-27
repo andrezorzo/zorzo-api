@@ -41,14 +41,17 @@ _DOTS = {0x3002: ".", 0xFF61: ".", 0xFF0E: "."}
 # whatever it holds (`-https://x` is not `https`), and `_link_allowed` takes only exactly http and https.
 _LEFT_BOUNDARY = r"(?<![A-Za-z0-9+.\-])"
 _RUN = r"[a-z0-9+.\-]"
-_PORT = r"\d+(?=$|[^\w.]|\.(?:\s|$))"  # a number after `HTTP:`, as in a sentence: `HTTP:80.`
+_MEDIA_TYPES = "text|image|application|audio|video|font|model|multipart|message"
+# What follows a slashless `http:` when it is a destination, not prose (`HTTP:1.1`, `HTTP:GET`, `HTTP:80`): a
+# slash (but not `/1.1`, a version), an `@`, `%` or `_`, a dot and a letter (`evil.com`), or an IPv4 address.
+_DESTINATION = r"/(?!\d+(?:\.\d+){0,2}(?!\w))|[^\s]*[@%_]|[^\s]*\.[a-z]|\d{1,3}(?:\.\d{1,3}){3}"
 _EXPLICIT_LINK = re.compile(
     rf"""
     {_LEFT_BOUNDARY}(?:
         {_RUN}+://[^\s]*                       # a scheme with its slashes
       | (?:javascript|vbscript):[^\s]+         # schemes refused even without the slashes
-      | data:(?:[a-z][a-z0-9!#$&^_.+\-]*/|[;,])[^\s]*   # data: before a media type or parameters
-      | https?:(?!{_PORT})[^\s]+               # http or https without the slashes, a port aside (`HTTP:80`)
+      | data:(?:(?:{_MEDIA_TYPES})/|,|;(?:base64|charset=))[^\s]*
+      | https?:(?={_DESTINATION})[^\s]+          # http or https without the slashes, and a destination after
       | {_RUN}*www\.[^\s.][^\s]*              # `www.` and a host: a lone `www.` is text
     )
     | (?<![A-Za-z0-9+.\-:/])//[^\s]+          # a scheme-relative link
