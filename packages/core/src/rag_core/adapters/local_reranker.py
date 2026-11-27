@@ -9,6 +9,7 @@ import hashlib
 import os
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -133,5 +134,5 @@ class LocalReranker:
             scores = list(self.model().rerank(query, [h.content for h in hits]))
         finally:
             self._slots.release()
-        scored = [SearchHit(h.id, h.title, h.content, float(s)) for h, s in zip(hits, scores, strict=True)]
+        scored = [replace(h, score=float(s)) for h, s in zip(hits, scores, strict=True)]
         return sorted(scored, key=lambda h: h.score, reverse=True)

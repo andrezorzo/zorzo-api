@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 
 import structlog
+from langchain_core.utils.json import parse_json_markdown
 from pydantic import BaseModel, ValidationError
 
 from rag_core.background import BackgroundTasks
@@ -431,8 +432,9 @@ class ModelGateway:
             log.warning("model_empty_answer", stage=stage, model=entry.model)
             return None
         try:
-            parsed = schema.model_validate_json(result.text) if schema is not None else None
-        except ValidationError:
+            # JSON mode, or JSON inside a Markdown fence (LLD "6.4 Answer contract and verification").
+            parsed = schema.model_validate(parse_json_markdown(result.text)) if schema is not None else None
+        except (ValidationError, ValueError):
             log.warning("model_schema_miss", stage=stage, model=entry.model)
             return None
         usage = Usage(result.tokens_in, result.tokens_out)

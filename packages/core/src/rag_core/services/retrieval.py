@@ -11,10 +11,16 @@ log = structlog.get_logger()
 
 
 async def search(
-    question: str, version: int, *, embedder: Embedder, store: VectorStore, limits: Limits
+    question: str,
+    version: int,
+    *,
+    embedder: Embedder,
+    store: VectorStore,
+    limits: Limits,
+    kinds: Sequence[str] | None = None,
 ) -> list[SearchHit]:
     [vector] = await embedder.embed([question])
-    return await store.search(vector, question, limits.retrieval_top_k, version)
+    return await store.search(vector, question, limits.retrieval_top_k, version, kinds)
 
 
 async def rerank(

@@ -6,6 +6,8 @@ an invalid file stops the app.
 
 import hashlib
 import json
+import os
+import re
 from pathlib import Path
 from typing import Any, Literal, Self
 
@@ -17,6 +19,8 @@ from rag_core.limits import Limits
 StageName = Literal["route", "rerank", "answer", "judge"]
 
 _STRICT = ConfigDict(extra="forbid", frozen=True)
+# `${NAME}` or `${NAME:-default}` in a provider's base URL, read from the environment at load.
+_VARIABLE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
 
 
 class Price(BaseModel):
@@ -68,9 +72,19 @@ class Provider(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _openrouter_by_default(cls, data: Any) -> Any:
+        if isinstance(data, dict) and isinstance(data.get("base_url"), str):
+            data = {**data, "base_url": _VARIABLE.sub(_variable, data["base_url"])}
         if isinstance(data, dict) and "kind" not in data and "openrouter.ai" in str(data.get("base_url", "")):
             return {**data, "kind": "openrouter"}
         return data
+
+
+def _variable(match: re.Match[str]) -> str:
+    name, default = match.group(1), match.group(2)
+    value = os.environ.get(name, default)
+    if value is None:
+        raise ValueError(f"base_url needs the environment variable {name}")
+    return value
 
 
 class Stages(BaseModel):

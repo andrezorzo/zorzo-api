@@ -44,10 +44,14 @@ def active_chunk_ids(url: str) -> set[int]:
 
 
 def test_streams_search_only_passages(client: TestClient, corpus_database: str) -> None:
+    # The fake's default reply isn't route JSON: the models can't answer, so the run goes search-only.
     stream = ask(client)
-    assert stream.names() == ["stage", "stage", "stage", "stage", "degraded", "retrieval", "done"]
+    assert stream.names()[-3:] == ["degraded", "retrieval", "done"]
     stages = [(e.data["name"], e.data["status"]) for e in stream.only("stage")]
-    assert stages == [("retrieve", "start"), ("retrieve", "end"), ("rerank", "start"), ("rerank", "end")]
+    assert stages == [
+        ("route", "start"), ("route", "end"),
+        ("retrieve", "start"), ("retrieve", "end"), ("rerank", "start"), ("rerank", "end"),
+    ]  # fmt: skip
     assert stream.only("degraded")[0].data == {"mode": "search_only", "reason": "models_unavailable"}
 
     retrieval = stream.only("retrieval")[0].data
@@ -56,7 +60,7 @@ def test_streams_search_only_passages(client: TestClient, corpus_database: str) 
     assert retrieval["hits"][0]["title"] == "FAQ"  # the Cloud section names the AWS services
 
     done = stream.only("done")[0].data
-    assert done["cached"] is False and done["abstained"] is False and done["suggestion"] is None
+    assert done["cached"] is False and done["outcome"] == "degraded" and done["suggestion"] is None
 
 
 def test_streams_no_hits_when_nothing_matches(client: TestClient) -> None:
@@ -181,7 +185,7 @@ def test_a_failure_outside_the_search_ends_with_error_then_done(
     async def broken(*args: object, **kwargs: object) -> None:
         raise RuntimeError("bug")
 
-    monkeypatch.setattr("rag_api.ask.run_search_only", broken)
+    monkeypatch.setattr("rag_api.ask.run_agent", broken)
     stream = ask(client)
     assert stream.names() == ["error", "done"]
 
@@ -204,7 +208,7 @@ def test_rejects_an_oversized_body_sent_without_a_length(client: TestClient) -> 
     assert response.status_code == 422
 
 
-def test_a_hung_search_ends_with_error_then_done(client: TestClient) -> None:
+def hung_search(client: TestClient) -> Stream:
     app: Any = client.app
     real = app.state.embedder
 
@@ -218,10 +222,26 @@ def test_a_hung_search_ends_with_error_then_done(client: TestClient) -> None:
     app.state.embedder = Hung()
     app.state.limits = app.state.limits.model_copy(update={"request_deadline": 0.2, "ping_interval": 0.05})
     try:
-        stream = ask(client)
+        return ask(client)
     finally:
         app.state.embedder = real
-    assert stream.names()[-2:] == ["error", "done"]
+
+
+def test_a_hung_search_in_a_degraded_mode_ends_with_error_then_done(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def degraded() -> str:
+        return "models_unavailable"
+
+    app: Any = client.app
+    monkeypatch.setattr(app.state.gateway, "mode", degraded)
+    assert hung_search(client).names()[-2:] == ["error", "done"]
+
+
+def test_a_hung_search_in_the_agent_ends_search_only_on_the_deadline(client: TestClient) -> None:
+    stream = hung_search(client)
+    assert stream.only("degraded")[0].data["reason"] == "deadline"
+    assert stream.only("retrieval")[-1].data["hits"] == []
 
 
 # AC5 (F01-T05): the remote rerank level leads, and falls to the local one.
@@ -249,7 +269,7 @@ def test_remote_rerank_leads(client: TestClient) -> None:
     fake.rerank_scores = lambda docs: [float(i + 1) for i in range(len(docs))]  # the reverse of their order
     local = local_hits(client)
     remote = hits(ask(client))
-    [request] = fake.requests
+    [request] = [r for r in fake.requests if r.path == "/rerank"]
     assert request.path == "/rerank" and request.model == "test/rerank:free"
     n = len(request.body["documents"])
     assert n > 1
@@ -267,4 +287,4 @@ def test_falls_to_the_local_reranker_when_the_remote_one_fails(corpus_database: 
         stream = ask(client)
     assert hits(stream) == local
     assert stream.names()[-1] == "done"
-    assert len(fake.requests) == 1
+    assert len([r for r in fake.requests if r.path == "/rerank"]) == 1

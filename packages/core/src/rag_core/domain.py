@@ -68,6 +68,29 @@ def load_examples(name: str) -> list[Example]:
         raise DomainError(f"invalid example questions in {_package(name)}/examples.yaml: {exc}") from exc
 
 
+class Prompts(BaseModel):
+    """The agent's prompt templates (`prompts/<stage>.md`), with `$slot` placeholders the core fills."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    route: str
+    assess: str
+    reformulate: str
+    answer: str
+    judge: str
+    repair: str
+
+
+def load_prompts(name: str) -> Prompts:
+    try:
+        folder = files(_package(name)).joinpath("prompts")
+        return Prompts(
+            **{field: folder.joinpath(f"{field}.md").read_text() for field in Prompts.model_fields}
+        )
+    except Exception as exc:
+        raise DomainError(f"missing or invalid prompts in {_package(name)}/prompts: {exc}") from exc
+
+
 def corpus_dir(name: str) -> Path:
     """The domain package's `corpus/` folder, the ingest command's default source."""
     return Path(str(files(_package(name)).joinpath("corpus")))

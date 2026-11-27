@@ -6,7 +6,7 @@ import pytest
 
 from tests.contract.sse import Event, check_ordering
 
-DONE: dict[str, Any] = {"trace_id": "t", "cached": False, "abstained": False, "suggestion": None}
+DONE: dict[str, Any] = {"trace_id": "t", "outcome": "answered", "cached": False, "suggestion": None}
 
 
 def _events(*names: str, done: dict[str, Any] | None = None, cost: float = 0.0) -> list[Event]:

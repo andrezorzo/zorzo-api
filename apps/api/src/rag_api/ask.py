@@ -7,12 +7,15 @@ from uuid import UUID
 import structlog
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
+from rag_core.agent.context import AgentContext
+from rag_core.agent.graph import run_agent
 from rag_core.errors import ApiError, ErrorCode
 from rag_core.events import Done, StreamEvent
 from rag_core.ports import StoreUnavailableError
 from rag_core.services import corpus as corpus_service
 from rag_core.services.client_ip import VIEWER_HEADER
 from rag_core.services.gate import Asker
+from rag_core.services.gateway import RequestSpend
 from rag_core.services.search_only import end_with_error, run_search_only
 from rag_core.services.trace import FanOutSink
 from sse_starlette import EventSourceResponse, ServerSentEvent
@@ -76,19 +79,34 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
         # The stream outlives the middleware's log context, so the trace id is bound again here.
         with structlog.contextvars.bound_contextvars(trace_id=trace_id):
             try:
-                await run_search_only(
-                    question,
-                    corpus,
-                    UUID(trace_id),
-                    sink=sink,
-                    embedder=state.embedder,
-                    store=state.vector_store,
-                    rerankers=rerankers,
-                    limits=state.limits,
-                    # Until the agent graph exists (F01-T06), normal mode is search-only too.
-                    reason=reason or "models_unavailable",
-                    deadline_at=deadline_at,
-                )
+                if reason is not None:  # a degraded mode: search-only, with no model call
+                    await run_search_only(
+                        question,
+                        corpus,
+                        UUID(trace_id),
+                        sink=sink,
+                        embedder=state.embedder,
+                        store=state.vector_store,
+                        rerankers=rerankers,
+                        limits=state.limits,
+                        reason=reason,
+                        deadline_at=deadline_at,
+                    )
+                else:
+                    context = AgentContext(
+                        gateway=state.gateway,
+                        embedder=state.embedder,
+                        store=state.vector_store,
+                        rerankers=rerankers,
+                        limits=state.limits,
+                        prompts=state.prompts,
+                        languages=state.domain.languages,
+                        sink=sink,
+                        corpus_version=corpus.version,
+                        deadline_at=deadline_at,
+                        spend=RequestSpend(state.limits.request_cost_cap_usd),
+                    )
+                    await run_agent(question, UUID(trace_id), agent=state.agent, context=context)
             except Exception:
                 # Whatever escaped the service, the visitor's stream still ends with `done`.
                 log.exception("stream_failed")

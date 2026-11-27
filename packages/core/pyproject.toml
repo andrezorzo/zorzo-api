@@ -22,6 +22,9 @@ dependencies = [
     # Exact pin: 1.82.7 and 1.82.8 shipped malware (March 2026); upgrade only to a release two weeks old
     # with a matching GitHub release, in a reviewed PR (ADR 0016).
     "litellm==1.108.5",
+    # Exact pin, a release at least two weeks old (F01-T06); upgrades in a reviewed PR.
+    "langgraph==1.2.21",
+    "langchain-core>=1.8",
 ]
 
 [build-system]

@@ -1,5 +1,6 @@
 """AC4: the retrieval service orders hits by the reranker and falls back to the fused order."""
 
+from collections.abc import Sequence
 from pathlib import Path
 
 from rag_core.limits import load_limits
@@ -26,7 +27,9 @@ class Store:
     async def active_corpus(self) -> None:
         return None
 
-    async def search(self, vector: list[float], text: str, k: int, version: int) -> list[SearchHit]:
+    async def search(
+        self, vector: list[float], text: str, k: int, version: int, kinds: Sequence[str] | None = None
+    ) -> list[SearchHit]:
         self.calls.append((text, k, version))
         return FUSED
 

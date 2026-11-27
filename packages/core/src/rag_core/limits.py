@@ -37,6 +37,15 @@ class Limits(BaseModel):
     request_cost_cap_usd: float = Field(ge=0)
     breaker_cooldown: float = Field(gt=0)
     alert_repeat_after: float = Field(gt=0)
+    # Agent run (LLD "6.3 Agent run").
+    answer_reserve: float = Field(gt=0)
+    max_reformulate: int = Field(ge=0)
+    max_repair: int = Field(ge=0)
+    recursion_limit: int = Field(gt=0)
+    context_max_tokens: int = Field(gt=0)
+    # Off until they are calibrated on the eval set at M3: abstain only on no passage, always assess.
+    relevance_floor: float | None = None
+    assess_skip_score: float | None = None
 
 
 def load_limits(path: Path) -> Limits:

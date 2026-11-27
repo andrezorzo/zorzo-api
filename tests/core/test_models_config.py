@@ -96,3 +96,15 @@ def test_version_follows_content_not_formatting(tmp_path: Path) -> None:
     assert (
         config_version(load_models(write(tmp_path, VALID)), LIMITS.model_copy(update={"rrf_k": 61})) != base
     )
+
+
+def test_a_base_url_reads_its_variable_from_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    text = VALID.replace('"https://openrouter.ai/api/v1"', '"${GATEWAY_HOST:-http://localhost:1}/v1"')
+    monkeypatch.delenv("GATEWAY_HOST", raising=False)
+    assert load_models(write(tmp_path, text)).providers["openrouter"].base_url == "http://localhost:1/v1"
+    monkeypatch.setenv("GATEWAY_HOST", "http://ollama:11434")
+    assert load_models(write(tmp_path, text)).providers["openrouter"].base_url == "http://ollama:11434/v1"
+    with pytest.raises(ValidationError, match="NEEDED_HOST"):
+        load_models(write(tmp_path, text.replace("${GATEWAY_HOST:-http://localhost:1}", "${NEEDED_HOST}")))
