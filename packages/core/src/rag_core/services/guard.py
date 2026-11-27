@@ -41,13 +41,14 @@ _DOTS = {0x3002: ".", 0xFF61: ".", 0xFF0E: "."}
 # whatever it holds (`-https://x` is not `https`), and `_link_allowed` takes only exactly http and https.
 _LEFT_BOUNDARY = r"(?<![A-Za-z0-9+.\-])"
 _RUN = r"[a-z0-9+.\-]"
+_PORT = r"\d+(?=$|[^\w.]|\.(?:\s|$))"  # a number after `HTTP:`, as in a sentence: `HTTP:80.`
 _EXPLICIT_LINK = re.compile(
     rf"""
     {_LEFT_BOUNDARY}(?:
         {_RUN}+://[^\s]*                       # a scheme with its slashes
       | (?:javascript|vbscript):[^\s]+         # schemes refused even without the slashes
-      | data:(?:[a-z]+/|,)[^\s]*               # data: only before a MIME type (`Data:12/03` is text)
-      | https?:[a-z0-9\-]+\.[a-z][^\s]*        # http or https with no slashes and a host: `https:evil.com`
+      | data:(?:[a-z][a-z0-9!#$&^_.+\-]*/|[;,])[^\s]*   # data: before a media type or parameters
+      | https?:(?!{_PORT})[^\s]+               # http or https without the slashes, a port aside (`HTTP:80`)
       | {_RUN}*www\.[^\s.][^\s]*              # `www.` and a host: a lone `www.` is text
     )
     | (?<![A-Za-z0-9+.\-:/])//[^\s]+          # a scheme-relative link
@@ -55,7 +56,9 @@ _EXPLICIT_LINK = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 # Another link inside the rest of an allowed one: `https://github.com/a,https://evil.com`.
-_NESTED_LINK = re.compile(r"://|www\.|[,;|\"'(<\[]//", re.IGNORECASE)
+_NESTED_LINK = re.compile(r"://|[,;|\"'(<\[](?:www\.|//)", re.IGNORECASE)
+# The scheme of a link whose run before `://` carries digits or punctuation: `1.https`, `-https`.
+_SCHEME_SUFFIX = re.compile(r"[^a-z]*(https?)", re.IGNORECASE)
 _TRAILING_PUNCTUATION = ".,;:!?)]}>'\"\u00bb\u201d\u2019\u2014\u2013\u3001\u300d\u300f\u3011"  # and closers
 _AUTHORITY = re.compile(r"[a-z0-9.\-]+")  # a plain ASCII host: no userinfo, port, escape or bracket
 
@@ -136,12 +139,15 @@ class CanaryScan:
 
 def _link_allowed(link: str, hosts: Sequence[str]) -> bool:
     link = link.rstrip(_TRAILING_PUNCTUATION)
+    www = link.lower().find("www.")
     if "://" in link:
         scheme, _, rest = link.partition("://")
+        suffix = _SCHEME_SUFFIX.fullmatch(scheme)
+        scheme = suffix[1] if suffix else scheme  # `-https://` is https, the host decides; `ahttps://` is not
     elif link.startswith("//"):
         scheme, rest = "http", link[2:]
-    elif link[:4].lower() == "www.":
-        scheme, rest = "http", link
+    elif www >= 0 and ":" not in link[:www]:
+        scheme, rest = "http", link[www:]  # `www.` after digits or dots (`e.g.www.github.com`)
     else:
         return False  # a scheme with no `//`: `https:evil.com`, `javascript:alert(1)`
     if scheme.lower() not in ("http", "https"):

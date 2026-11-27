@@ -142,7 +142,7 @@ PLAIN_TEXT = [
     "Big Data: Spark. Data: março. Profile: senior. Intel: x86. Tel: 123. About: him. FTP: yes.",
     'He said "https://zorzo.dev.br" and zorzo.dev.br—o site.',
     "p.ex. a migration, e.g. to AWS, i.e. event-driven.",
-    "Data:12/03/2020, Big Data:Spark and HTTP:80 are not links.",  # no space after the colon
+    "Data:12/03/2020, Big Data:Spark, HTTP:80 and http:8080. are not links.",  # no space after the colon
     "Metadata:x and the www. prefix, then www.. and www. alone.",  # a lone `www.` is text
     "See mailto:andre_zorzo@yahoo.com and tel:123 in the footer.",  # not explicit URLs: they are text
     # A bare host is not a link: the page shows a claim as text (`textContent`), so it is not clickable,
@@ -192,6 +192,17 @@ def test_text_that_is_not_an_explicit_url_is_kept(text: str) -> None:
         ("See ...https://evil.com and 1https://evil.com", False),
         ("See +www.evil.com and 2www.evil.com and -www.evil.com", False),
         ("See https://github.com/a,https://evil.com", False),  # a second URL inside an allowed link
+        ("See https:/evil.com and https:\\\\evil.com and http:/evil.com/x and HTTPS:/EVIL.COM", False),
+        ("See https:user@evil.com", False),
+        ("See https:1.2.3.4/x", False),
+        ("See https:%65vil.com", False),
+        ("See https:a_b.evil.com", False),
+        ("See https:evil", False),
+        ("See https:www.github.com/x", False),  # no slashes: refused even toward an allowed host
+        ("See data:;base64,AAA and data:;charset=utf-8,x and data:x-foo/bar,x", False),
+        ("See 1.https://github.com/andre and Projetos:-https://github.com/a", True),  # an allowed host
+        ("See -https://evil.com/x and ahttps://github.com/x", False),
+        ("See https://github.com/andre/www.zorzo.dev.br and e.g.www.github.com", True),
         ("See https://github.com/a;www.evil.com and https://github.com/a|//evil.com", False),
         ("See https://github.com/a\u200dhttps://evil.com", False),  # a zero-width joiner between them
         ("See https://github.com/a//b and https://github.com/?u=1&v=2", True),

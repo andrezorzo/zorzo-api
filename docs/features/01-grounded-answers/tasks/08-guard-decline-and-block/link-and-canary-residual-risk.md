@@ -17,6 +17,11 @@ below was weighed and left, because closing it costs more than the harm it would
 - **A link written with letters that only look like the allowed host** (a Cyrillic `е` in a host) is refused
   by the plain-ASCII host rule, but text that merely *spells* an allowed name with look-alike letters in
   prose is not a link and is not checked.
+- **A second link after a closer outside the delimiter set** (`https://github.com/a)//evil.com`,
+  `https://github.com/a»//evil.com`). The nested-link check looks for another `://` anywhere, and for `www.`
+  or `//` right after `, ; | " ' ( < [`; other closers aren't in that set. It needs a contrived output (a
+  model writing a second URL glued to the first with such a character), and the text is shown as text, not
+  as a link.
 - **A URL split by the model across words or lines** (`https://` then a space) is two pieces of text, not a
   link.
 
