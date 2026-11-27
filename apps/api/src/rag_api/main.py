@@ -27,13 +27,13 @@ from rag_core.adapters.trace_store import PostgresTraceStore
 from rag_core.adapters.turnstile import TurnstileBotCheck
 from rag_core.agent.graph import build_graph
 from rag_core.background import BackgroundTasks
-from rag_core.domain import load_domain, load_examples, load_intents, load_prompts
+from rag_core.domain import check_domain, load_domain, load_examples, load_intents, load_prompts
 from rag_core.limits import Limits, load_limits
 from rag_core.models_config import config_version, load_models
 from rag_core.ports import Alerter
 from rag_core.services.gate import Gate
 from rag_core.services.gateway import SHUTDOWN_DRAIN_S, ModelGateway
-from rag_core.services.guard import with_canary
+from rag_core.services.guard import CanaryWatch, with_canary
 from rag_core.services.redact import Redactor
 from rag_core.services.suggestion import Suggestions
 from rag_core.telemetry import configure_logging
@@ -125,21 +125,26 @@ def create_app(settings: ApiSettings) -> FastAPI:
             await check_text_search(
                 db, domain.languages.values()
             )  # a language Postgres can't search stops it
-            await _warm_rerankers(app)
-            # Unlike the rerank levels, the classifier has no next level: a guard silently off is worse than
-            # a failed deploy, so a file that is missing or doesn't match its hash stops the API.
-            await anyio.to_thread.run_sync(app.state.classifier.warm)
-            await _warm_suggestions(app)
+            # Together: the models load in threads, the examples embed over the network. Unlike the rerank
+            # levels, the classifier has no next level: a guard silently off is worse than a failed deploy, so
+            # a file that is missing or doesn't match its hash stops the API.
+            await asyncio.gather(
+                _warm_rerankers(app),
+                anyio.to_thread.run_sync(app.state.classifier.warm),
+                _warm_suggestions(app),
+            )
             yield
 
     app = FastAPI(title="rag-api", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.domain = domain
-    app.state.intents = load_intents(settings.domain, domain.document_kinds, domain.contact)
+    app.state.intents = load_intents(settings.domain, domain.document_kinds)
+    check_domain(domain, app.state.intents)
     # The canary goes into the prompts once they are loaded and hashed (cross-task decision X5).
     app.state.prompts = with_canary(
         load_prompts(settings.domain, app.state.intents), settings.canary.get_secret_value()
     )
     app.state.canary = settings.canary.get_secret_value()
+    app.state.canary_watch = CanaryWatch(app.state.canary)
     # TODO(T10 rebase): hand `app.state.canary` to the shared redactor, so a stored trace never holds it.
     app.state.agent = build_graph()
     app.state.db = db
@@ -161,6 +166,7 @@ def create_app(settings: ApiSettings) -> FastAPI:
         limits,
         settings.salt_seed.get_secret_value().encode(),
         settings.app_env,
+        app.state.defenses,
     )
     app.state.trace_sinks = []  # extra sinks next to the stream and the recorder, for the tests
     # LangChain's own tracing would send the graph's state unredacted: off, key or not (LLD "Tracing").

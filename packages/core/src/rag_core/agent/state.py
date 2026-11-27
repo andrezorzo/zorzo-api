@@ -1,20 +1,11 @@
 """What the graph's steps pass to each other (LLD "6.3 Agent run")."""
 
-from typing import Annotated, TypedDict
+from typing import TypedDict
 
-from langgraph.channels.untracked_value import UntrackedValue
-
-from rag_core.events import BlockCategory, DegradedReason, GuardLayer, Outcome
+from rag_core.events import DegradedReason, Outcome
 from rag_core.ports import SearchHit
 from rag_core.services.route import RouteResult
 from rag_core.services.verification import AnswerContract, CheckedClaim
-
-
-class Block(TypedDict):
-    """Why a run was blocked: the layer and category of the `blocked` event."""
-
-    layer: GuardLayer
-    category: BlockCategory
 
 
 class AgentState(TypedDict, total=False):
@@ -30,6 +21,3 @@ class AgentState(TypedDict, total=False):
     repairs: int
     outcome: Outcome  # set when the run ends
     degraded: DegradedReason  # set when the run goes search-only
-    # Per run only (UntrackedValue): never checkpointed, so a blocked question can't reach the cache or the
-    # history (cross-task decision X3).
-    blocked: Annotated[Block, UntrackedValue]

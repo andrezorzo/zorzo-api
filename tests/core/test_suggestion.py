@@ -29,6 +29,23 @@ async def test_the_suggestion_is_in_the_runs_language() -> None:
     assert await suggestions.closest("How does the site check answers?", "pt", far()) == "pt-site"
 
 
+async def test_a_vector_the_run_already_has_is_not_embedded_again() -> None:
+    embedder = HashEmbedder()
+    suggestions = Suggestions(EXAMPLES, embedder)
+    await suggestions.warm()
+    [vector] = await embedder.embed(["Quais serviços da AWS ele usou?"])
+    asked: list[list[str]] = []
+    real = embedder.embed
+
+    async def counting(texts: list[str]) -> list[list[float]]:
+        asked.append(texts)
+        return await real(texts)
+
+    embedder.embed = counting  # type: ignore[method-assign]
+    assert await suggestions.closest("ignored", "pt", far(), vector=vector) == "pt-aws"
+    assert asked == []
+
+
 async def test_a_language_with_no_examples_has_no_suggestion() -> None:
     assert await Suggestions(EXAMPLES, HashEmbedder()).closest("q", "fr", far()) is None
 

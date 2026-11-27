@@ -17,6 +17,7 @@ from rag_core.ports import InjectionClassifier
 
 __all__ = [
     "BlockCategory",
+    "CanaryScan",
     "CanaryWatch",
     "GuardLayer",
     "check_input",
@@ -69,6 +70,10 @@ class CanaryWatch:
         """Whether the text holds the canary, whatever its casing or the separators inside it."""
         return self._canary in _squash(text)
 
+    def scan(self) -> "CanaryScan":
+        """A scan of one growing draft: each call looks only at the text added since the last."""
+        return CanaryScan(self._canary)
+
     def safe(self, draft: str) -> str:
         """The part of the draft that may go out now: all but its last letters and digits, as many as the
         canary's length minus one, since more text could complete a canary that has begun."""
@@ -80,6 +85,28 @@ class CanaryWatch:
                 if seen == held:
                     return draft[:index]
         return ""
+
+
+class CanaryScan:
+    """Finds the canary in a draft that grows: the text added since the last call, plus the last letters and
+    digits before it (the canary's length minus one), which a canary begun there could continue. A draft that
+    isn't an extension of the last one is scanned whole."""
+
+    def __init__(self, canary: str) -> None:
+        self._canary = canary
+        self._seen = ""
+        self._tail = ""  # the squashed end of what was seen
+
+    def hit(self, draft: str) -> bool:
+        if draft.startswith(self._seen):
+            window, added = self._tail, draft[len(self._seen) :]
+        else:
+            window, added = "", draft
+        squashed = window + _squash(added)
+        self._seen = draft
+        keep = len(self._canary) - 1
+        self._tail = squashed[max(0, len(squashed) - keep) :] if keep else ""
+        return self._canary in squashed
 
 
 def links_allowed(text: str, hosts: Sequence[str]) -> bool:

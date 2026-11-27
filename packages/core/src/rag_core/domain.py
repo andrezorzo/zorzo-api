@@ -94,9 +94,8 @@ class Intent(BaseModel):
     action: Literal["answer", "decline", "contact"] = "answer"
 
 
-def load_intents(name: str, kinds: Collection[str], contact: Collection[ContactOption]) -> dict[str, Intent]:
-    """The domain's intents, each kind checked against the domain's `document_kinds`, and an intent that
-    sends the contact options against the domain's `contact`."""
+def load_intents(name: str, kinds: Collection[str]) -> dict[str, Intent]:
+    """The domain's intents, each kind checked against the domain's `document_kinds`."""
     try:
         raw = _read_yaml(name, "intents.yaml")
         if not isinstance(raw, dict) or not raw:
@@ -110,11 +109,15 @@ def load_intents(name: str, kinds: Collection[str], contact: Collection[ContactO
         unknown = sorted({kind for intent in intents.values() for kind in intent.kinds} - set(kinds))
         if unknown:
             raise ValueError(f"unknown document kinds {unknown}; the domain's: {list(kinds)}")
-        if not contact and any(intent.action == "contact" for intent in intents.values()):
-            raise ValueError("an intent with action contact needs the domain's contact options")
         return intents
     except Exception as exc:
         raise DomainError(f"invalid intents in {_package(name)}/intents.yaml: {exc}") from exc
+
+
+def check_domain(domain: DomainConfig, intents: Mapping[str, Intent]) -> None:
+    """What spans the domain's files: an intent that sends the contact options needs some to send."""
+    if not domain.contact and any(intent.action == "contact" for intent in intents.values()):
+        raise DomainError(f"domain {domain.name}: an intent with action contact needs contact options")
 
 
 class Prompts(BaseModel):

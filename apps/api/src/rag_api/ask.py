@@ -29,11 +29,6 @@ log = structlog.get_logger()
 router = APIRouter()
 
 TURNSTILE_TOKEN_MAX_CHARS = 2048  # Cloudflare's maximum token length
-# The gate's refusals that are defense events: error code -> (layer, category).
-GATE_DEFENSES = {
-    ErrorCode.BOT_CHECK_FAILED: ("L0", "bot"),
-    ErrorCode.RATE_LIMITED: ("L1", "rate_limit"),
-}
 
 
 class AskRequest(BaseModel):
@@ -52,7 +47,9 @@ class QueueSink:
         self.queue.put_nowait(event)
 
 
-def _agent_context(state: Any, sink: TraceSink, corpus_version: int, deadline_at: float) -> AgentContext:
+def _agent_context(
+    state: Any, sink: TraceSink, corpus_version: int, deadline_at: float, trace_id: UUID
+) -> AgentContext:
     """The graph's services and this request's limits, from what the app wired at startup."""
     return AgentContext(
         gateway=state.gateway,
@@ -70,7 +67,8 @@ def _agent_context(state: Any, sink: TraceSink, corpus_version: int, deadline_at
         classifier=state.classifier,
         defenses=state.defenses,
         suggestions=state.suggestions,
-        canary=state.canary,
+        canary=state.canary_watch,
+        trace_id=trace_id,
         contact=state.domain.contact,
         link_hosts=state.domain.link_hosts,
     )
@@ -117,14 +115,7 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
     loop = asyncio.get_running_loop()
     deadline_at = loop.time() + state.limits.request_deadline
     trace_id: str = request.state.trace_id
-    try:
-        question = await state.gate.check(body.q, body.turnstile, asker, deadline_at)
-    except ApiError as exc:
-        # A refusal at the gate is a defense event too, written in the background: the answer doesn't wait.
-        if exc.code in GATE_DEFENSES:
-            layer, category = GATE_DEFENSES[exc.code]
-            state.defenses.record(layer, category, "block", UUID(trace_id))
-        raise
+    question = await state.gate.check(body.q, body.turnstile, asker, deadline_at, UUID(trace_id))
     if deadline_at - loop.time() <= 0:  # the gate finished on the deadline: nothing left for the answer
         log.warning("deadline_exceeded", stage="after_gate")
         raise ApiError(ErrorCode.UNAVAILABLE)
@@ -173,7 +164,7 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                             contact=state.domain.contact,
                         )
                     else:
-                        context = _agent_context(state, sink, corpus.version, deadline_at)
+                        context = _agent_context(state, sink, corpus.version, deadline_at, UUID(trace_id))
                         result = await run_agent(question, UUID(trace_id), agent=state.agent, context=context)
                 except asyncio.CancelledError:
                     # The visitor left or the server stopped: no `done`, so no `public_traces` row.

@@ -14,6 +14,7 @@ import psycopg
 import pytest
 import yaml
 from fastapi.testclient import TestClient
+from rag_core.adapters.fake_embedder import HashEmbedder
 from rag_core.adapters.fake_guard import FAKE_ATTACK_MARKER, FAKE_FAILURE_MARKER
 from structlog.testing import capture_logs
 
@@ -244,11 +245,24 @@ def test_a_language_the_domain_lacks_gets_the_default_languages_examples(
     assert done(stream)["outcome"] == "declined" and done(stream)["suggestion"].startswith("en-")
 
 
-def test_an_abstention_suggests_the_closest_example(corpus_database: str, fake: FakeOpenRouter) -> None:
+def test_an_abstention_suggests_the_closest_example(
+    corpus_database: str, fake: FakeOpenRouter, monkeypatch: pytest.MonkeyPatch
+) -> None:
     script(fake, route=routed("about_system", "How does this site check its answers against sources?"))
     limits: dict[str, object] = {"relevance_floor": 10.0}  # no passage is relevant enough
+    question = "How does this site check its answers against sources?"
+    embedded: list[str] = []
+    real = HashEmbedder.embed
+
+    async def recording(self: HashEmbedder, texts: list[str]) -> list[list[float]]:
+        embedded.extend(texts)
+        return await real(self, texts)
+
+    monkeypatch.setattr(HashEmbedder, "embed", recording)
     with TestClient(build_app(api_settings(corpus_database), limits=limits, openrouter=fake)) as client:
+        embedded.clear()  # the examples embedded at startup
         stream = ask(client)
+    assert embedded.count(question) == 1  # retrieval's vector serves the suggestion too
     assert done(stream)["outcome"] == "abstained" and done(stream)["suggestion"] == "en-site"
 
 

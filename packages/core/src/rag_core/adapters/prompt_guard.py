@@ -5,16 +5,14 @@ the tokenizer read them, and loaded offline from `GUARD_CACHE_DIR` in the image.
 Labels: 0 benign, 1 malicious.
 """
 
-import hashlib
 import os
-import threading
 from pathlib import Path
 from typing import Any
 
 import anyio
 import numpy as np
 
-from rag_core.adapters.local_reranker import ModelIntegrityError
+from rag_core.adapters import onnx_model as shared
 
 MODEL = "gravitee-io/Llama-Prompt-Guard-2-86M-onnx"
 MODEL_FILE = "model.onnx"
@@ -28,31 +26,7 @@ MODEL_FILES_SHA256 = {
 }
 MAX_TOKENS = 512  # the model's `max_position_embeddings`; a question is far shorter
 MALICIOUS = 1  # the label index of `id2label`
-LOCK_WAIT_S = 0.5
 GUARD_SLOTS = 2
-
-
-def verify_model_files(snapshot: Path) -> None:
-    """Raise unless this exact snapshot folder holds the expected files."""
-    for name, digest in MODEL_FILES_SHA256.items():
-        path = snapshot / name
-        if not path.is_file():
-            raise ModelIntegrityError(f"guard model file {name} is missing from {snapshot}")
-        with path.open("rb") as f:
-            actual = hashlib.file_digest(f, "sha256").hexdigest()  # in chunks: the ONNX file is 1.1 GB
-        if actual != digest:
-            raise ModelIntegrityError(f"guard model file {name} in {snapshot} doesn't match its pinned hash")
-
-
-def _download(cache_dir: Path) -> Path:
-    """The pinned revision's files, from the cache when present (the image loads offline)."""
-    from huggingface_hub import snapshot_download
-
-    return Path(
-        snapshot_download(
-            MODEL, revision=MODEL_REVISION, allow_patterns=list(MODEL_FILES_SHA256), cache_dir=str(cache_dir)
-        )
-    )
 
 
 def softmax_malicious(logits: Any) -> float:
@@ -62,33 +36,23 @@ def softmax_malicious(logits: Any) -> float:
     return float(exp[MALICIOUS] / exp.sum())
 
 
-class PromptGuardClassifier:
+class PromptGuardClassifier(shared.LazyModel[tuple[Any, Any]]):
+    """The model is a (tokenizer, ONNX session) pair."""
+
     def __init__(self, cache_dir: Path) -> None:
-        self.cache_dir = cache_dir
-        self._model: tuple[Any, Any] | None = None  # (tokenizer, ONNX session)
-        self._load = threading.Lock()
-        # A scoring thread the request deadline abandoned keeps running; this cap still counts it.
-        self._slots = threading.BoundedSemaphore(GUARD_SLOTS)
+        super().__init__(cache_dir, GUARD_SLOTS)
 
-    def model(self) -> tuple[Any, Any]:
-        with self._load:
-            if self._model is None:
-                snapshot = _download(self.cache_dir)
-                verify_model_files(snapshot)
-                self._model = _open(snapshot)
-            return self._model
-
-    def warm(self) -> None:
-        self.model()
+    def _build(self) -> tuple[Any, Any]:
+        snapshot = shared.download_snapshot(MODEL, MODEL_REVISION, list(MODEL_FILES_SHA256), self.cache_dir)
+        shared.verify_model_files(snapshot, MODEL_FILES_SHA256, "guard")
+        return _open(snapshot)
 
     async def score(self, text: str) -> float:
         # CPU-bound: keep it off the event loop; the request deadline ends the wait.
         return await anyio.to_thread.run_sync(self._score, text, abandon_on_cancel=True)
 
     def _score(self, text: str) -> float:
-        if not self._slots.acquire(timeout=LOCK_WAIT_S):
-            raise RuntimeError("every guard slot is busy")
-        try:
+        with self.slot():
             tokenizer, session = self.model()
             encoded = tokenizer.encode(text)
             inputs = {
@@ -96,19 +60,19 @@ class PromptGuardClassifier:
                 "attention_mask": np.asarray([encoded.attention_mask], dtype=np.int64),
             }
             logits = session.run(None, inputs)[0]
-        finally:
-            self._slots.release()
         return softmax_malicious(logits)
 
 
 def _open(snapshot: Path) -> tuple[Any, Any]:
-    """The tokenizer and the ONNX session, with onnxruntime's telemetry off (as the reranker does)."""
-    os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
-    import onnxruntime
+    """The tokenizer and the ONNX session; the CPU is shared between the scoring slots, not oversubscribed."""
     from tokenizers import Tokenizer
 
-    onnxruntime.disable_telemetry_events()
+    onnxruntime = shared.import_onnxruntime()
     tokenizer = Tokenizer.from_file(str(snapshot / "tokenizer.json"))
     tokenizer.enable_truncation(max_length=MAX_TOKENS)
-    session = onnxruntime.InferenceSession(str(snapshot / MODEL_FILE), providers=["CPUExecutionProvider"])
+    options = onnxruntime.SessionOptions()
+    options.intra_op_num_threads = max(1, (os.cpu_count() or 1) // GUARD_SLOTS)
+    session = onnxruntime.InferenceSession(
+        str(snapshot / MODEL_FILE), sess_options=options, providers=["CPUExecutionProvider"]
+    )
     return tokenizer, session

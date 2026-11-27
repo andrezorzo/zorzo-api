@@ -35,6 +35,8 @@ DegradedReason = Literal["models_unavailable", "budget_exhausted", "quota_exhaus
 # The result of a request, named as the stored outcomes are (`questions_log.outcome`); `error` (a bug) is
 # this stream's only (the stored trace keeps it as it is, LLD "4. Data").
 Outcome = Literal["answered", "abstained", "declined", "blocked", "degraded", "error"]
+# Outcomes whose stream sends no `usage`: a search-only run ends with its passages, a block with `done`.
+NO_USAGE_OUTCOMES: frozenset[Outcome] = frozenset({"degraded", "blocked"})
 
 
 class StreamEvent(BaseModel):

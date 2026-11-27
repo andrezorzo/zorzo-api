@@ -83,6 +83,18 @@ def test_the_canary_is_held_back_across_tokens() -> None:
     assert watch.found(draft)
 
 
+def test_a_growing_draft_is_scanned_from_its_new_text_only() -> None:
+    scan = CanaryWatch(CANARY).scan()
+    draft = "He built pipelines. " + CANARY.upper().replace("-", " - ")
+    hits = [scan.hit(draft[:end]) for end in range(1, len(draft) + 1)]
+    assert hits[-1] and not any(hits[:-1])  # found as soon as the last character completes it
+    # a draft that is not an extension of the last one is scanned whole
+    other = CanaryWatch(CANARY).scan()
+    assert not other.hit("zorzo canary 0123")
+    assert other.hit(f"The marker is {CANARY}.")
+    assert not other.hit("an ordinary sentence")
+
+
 def test_a_draft_shorter_than_the_canary_is_held_back_whole() -> None:
     assert CanaryWatch(CANARY).safe("Short.") == ""  # fewer characters than the canary's length minus one
 
@@ -162,7 +174,7 @@ async def test_a_classifier_that_raises_lets_the_question_through_and_is_logged(
 
 
 def test_the_answer_and_judge_prompts_hold_the_rules_about_a_real_person() -> None:
-    loaded = load_prompts("zorzo", load_intents("zorzo", ZORZO.document_kinds, ZORZO.contact))
+    loaded = load_prompts("zorzo", load_intents("zorzo", ZORZO.document_kinds))
     for prompt in (loaded.answer, loaded.judge):
         assert 'authority="3"' in prompt  # superlatives only from the highest authority
         assert "salary" in prompt and "FAQ" in prompt

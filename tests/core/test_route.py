@@ -25,8 +25,7 @@ OUTPUT = {
     "follow_up": False,
     "public_ok": True,
 }
-DOMAIN = load_domain("zorzo")
-INTENTS = load_intents("zorzo", DOMAIN.document_kinds, DOMAIN.contact)
+INTENTS = load_intents("zorzo", load_domain("zorzo").document_kinds)
 PROMPTS = load_prompts("zorzo", INTENTS)
 SCHEMA = route_schema(tuple(INTENTS))
 

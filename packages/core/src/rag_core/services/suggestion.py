@@ -21,16 +21,19 @@ class Suggestions:
         if self._vectors is None and self.examples:
             self._vectors = _unit(await self.embedder.embed([e.text for e in self.examples]))
 
-    async def closest(self, text: str, language: str, deadline_at: float) -> str | None:
+    async def closest(
+        self, text: str, language: str, deadline_at: float, vector: list[float] | None = None
+    ) -> str | None:
         """The id of the closest example in `language`, the first in the file on a tie; None when the
-        language has no example. Raises on an embedder failure or when the deadline passes."""
+        language has no example. `vector` is the text's embedding when the run already has it. Raises on an
+        embedder failure or when the deadline passes."""
         indexes = [i for i, e in enumerate(self.examples) if e.lang == language]
         if not indexes:
             return None
         async with asyncio.timeout_at(deadline_at):
             await self.warm()
             assert self._vectors is not None  # warm() set it: there are examples
-            query = _unit(await self.embedder.embed([text]))[0]
+            query = _unit([vector] if vector is not None else await self.embedder.embed([text]))[0]
         similarity = self._vectors[indexes] @ query
         return self.examples[indexes[int(np.argmax(similarity))]].id
 

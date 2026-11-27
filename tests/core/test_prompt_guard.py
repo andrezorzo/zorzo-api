@@ -12,8 +12,8 @@ from rag_api.settings import ApiSettings
 from rag_core.adapters import prompt_guard
 from rag_core.adapters.factory import ConfigError, build_classifier
 from rag_core.adapters.fake_guard import FAKE_ATTACK_MARKER, FAKE_FAILURE_MARKER, FakeClassifier
-from rag_core.adapters.local_reranker import ModelIntegrityError
-from rag_core.adapters.prompt_guard import PromptGuardClassifier, softmax_malicious, verify_model_files
+from rag_core.adapters.onnx_model import ModelIntegrityError, verify_model_files
+from rag_core.adapters.prompt_guard import PromptGuardClassifier, softmax_malicious
 
 from tests.conftest import api_settings
 
@@ -30,12 +30,12 @@ def test_a_missing_or_changed_file_is_refused(tmp_path: Path, monkeypatch: pytes
     good = b"model bytes"
     monkeypatch.setattr(prompt_guard, "MODEL_FILES_SHA256", {"model.onnx": hashlib.sha256(good).hexdigest()})
     with pytest.raises(ModelIntegrityError, match="missing"):
-        verify_model_files(tmp_path)
+        verify_model_files(tmp_path, prompt_guard.MODEL_FILES_SHA256, "guard")
     (tmp_path / "model.onnx").write_bytes(b"tampered")
     with pytest.raises(ModelIntegrityError, match="pinned hash"):
-        verify_model_files(tmp_path)
+        verify_model_files(tmp_path, prompt_guard.MODEL_FILES_SHA256, "guard")
     (tmp_path / "model.onnx").write_bytes(good)
-    verify_model_files(tmp_path)
+    verify_model_files(tmp_path, prompt_guard.MODEL_FILES_SHA256, "guard")
 
 
 def test_the_malicious_probability_is_the_softmax_of_the_two_logits() -> None:
@@ -86,3 +86,18 @@ def test_the_classifier_is_built_from_settings(database_url: str) -> None:
     object.__setattr__(production, "app_env", "production")
     with pytest.raises(ConfigError, match="GUARD_CLASSIFIER"):
         build_classifier(production)
+
+
+def test_a_model_that_failed_to_load_isnt_tried_again_at_once(tmp_path: Path) -> None:
+    class Broken(PromptGuardClassifier):
+        builds = 0
+
+        def _build(self) -> tuple[Any, Any]:
+            Broken.builds += 1
+            raise ModelIntegrityError("changed")
+
+    broken = Broken(tmp_path)
+    for _ in range(3):
+        with pytest.raises(RuntimeError):
+            broken.model()
+    assert Broken.builds == 1  # the others failed at once, with no download and no hashing

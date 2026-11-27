@@ -18,7 +18,7 @@ from langgraph.graph.state import CompiledStateGraph
 from rag_core.agent import nodes
 from rag_core.agent.context import AgentContext, answer_language
 from rag_core.agent.state import AgentState
-from rag_core.events import Done, Outcome, Usage
+from rag_core.events import NO_USAGE_OUTCOMES, Done, Outcome, Usage
 from rag_core.services.stream import emit_degraded, end_with_error
 from rag_core.units import MS_PER_S
 
@@ -117,13 +117,7 @@ async def run_agent(question: str, trace_id: UUID, *, agent: Agent, context: Age
             end_with_error(context.sink, trace_id, context.contact)
             return _result("error", state)
         outcome = context.settled  # the ending already sent stands
-    block = state.get("blocked")
-    if block is not None:  # counted before the stream ends, written in the background
-        context.defenses.record(block["layer"], block["category"], "block", trace_id)
-    if outcome not in (
-        "degraded",
-        "blocked",
-    ):  # only passages (`degraded`) or nothing (`blocked`) before `done`
+    if outcome not in NO_USAGE_OUTCOMES:
         context.sink.record(
             Usage(
                 tokens_in=context.tokens_in,
@@ -153,7 +147,10 @@ async def _suggestion(state: dict[str, Any], outcome: Outcome, context: AgentCon
         return None
     try:
         return await context.suggestions.closest(
-            route.standalone_question, answer_language(route.language, context.languages), context.deadline_at
+            route.standalone_question,
+            answer_language(route.language, context.languages),
+            context.deadline_at,
+            vector=context.vectors.get(route.standalone_question),
         )
     except Exception as exc:
         log.warning("suggestion_failed", error=type(exc).__name__)  # the type only: it may quote the text
