@@ -123,6 +123,13 @@ class RateLimitedError(ProviderError):
         super().__init__(kind, refused=True)
 
 
+class CoolingDownError(RateLimitedError):
+    """The entry is cooling down: refused without a request."""
+
+    def __init__(self) -> None:
+        super().__init__("cooling down")
+
+
 class ContextTooLongError(ProviderError):
     """The provider refused the prompt as longer than the model's context."""
 
@@ -131,52 +138,58 @@ class ContextTooLongError(ProviderError):
 
 
 @dataclass(frozen=True)
-class RateInfo:
-    """A provider's request quota for the day, from its `x-ratelimit-*` headers."""
-
-    remaining: int
-    limit: int
-
-
-@dataclass(frozen=True)
 class ChatResult:
     text: str
     tokens_in: int
     tokens_out: int
-    rate: RateInfo | None = None
+    entry_id: str = ""  # which chain entry answered (`models_config.entry_id`)
+    cost_usd: float | None = None  # what the provider reported it billed; None when it reported nothing
+    billable_counts: bool = True  # False when the counts may not be the provider's (a stream's)
 
 
 @dataclass(frozen=True)
-class ChatChunk:
-    """One data frame of a streamed answer: its text, its token counts (usually on the last frame, sometimes
-    with text), or neither (a frame from the model with no text, such as reasoning). After the answer's text
-    has started, any chunk shows the model still working; before it, only text counts (see the gateway's
-    `FAIR_SHARE`).
+class Cooldown:
+    """A chain entry the Router keeps out for now (LLD "6.6 Circuit breaker", the LiteLLM cooldown)."""
+
+    status: str  # the status that caused it ("429", "500", "408" …)
+    started_at: float  # epoch seconds
+    length_s: float
+
+
+class ModelRouter(Protocol):
+    """The model calls (ADR 0016): one chain entry per call, by its id (`models_config.entry_id`), through
+    the LiteLLM Router, which keeps the entries' cooldowns.
+
+    Failures raise `ProviderError` (or `TimeoutError`); an entry cooling down raises `RateLimitedError`
+    without a request. The caller bounds the time as well.
     """
 
-    text: str = ""
-    tokens_in: int | None = None
-    tokens_out: int | None = None
-
-
-@dataclass(frozen=True)
-class RerankResult:
-    scores: list[float]  # one per document, in the documents' order
-    rate: RateInfo | None = None
-
-
-class ModelProvider(Protocol):
-    """One OpenAI-compatible endpoint (ADR 0007); failures raise `ProviderError`; the caller bounds time."""
-
-    async def chat(
-        self, model: str, messages: list[dict[str, str]], *, max_tokens: int, schema: dict[str, Any] | None
+    async def complete(
+        self,
+        entry_id: str,
+        /,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int,
+        schema: dict[str, Any] | None,
+        timeout: float,
     ) -> ChatResult: ...
 
-    def chat_stream(
-        self, model: str, messages: list[dict[str, str]], *, max_tokens: int
-    ) -> AsyncIterator[ChatChunk]: ...
+    def stream(
+        self, entry_id: str, /, messages: list[dict[str, str]], *, max_tokens: int, timeout: float
+    ) -> AsyncIterator[str | ChatResult]:
+        """The answer's text as it comes, then its `ChatResult` (the whole text, usage, entry, cost)."""
 
-    async def rerank(self, model: str, query: str, documents: list[str]) -> RerankResult: ...
+    async def rerank(
+        self, entry_id: str, /, query: str, documents: list[str], *, timeout: float
+    ) -> list[float]:
+        """One score per document, in the documents' order."""
+
+    def strike(self, entry_id: str, /) -> None:
+        """Count a call the caller cut at the entry's own time limit as that entry's timeout."""
+
+    async def cooldowns(self) -> dict[str, Cooldown]:
+        """The entries cooling down now, by entry id."""
 
     async def close(self) -> None: ...
 
@@ -228,7 +241,7 @@ class Alerter(Protocol):
 
 
 class EventLog(Protocol):
-    """`log_events` rows for events that belong to no request (breaker transitions)."""
+    """`log_events` rows for events that belong to no request (cooldowns)."""
 
     def write(self, level: str, component: str, event: str, fields: dict[str, Any]) -> None:
         """Never blocks: the row is written in the background, and a failure is only logged."""
@@ -339,10 +352,11 @@ __all__ = [
     "Bucket",
     "Budget",
     "BudgetState",
-    "ChatChunk",
     "ChatResult",
     "ChunkRow",
     "ContextTooLongError",
+    "Cooldown",
+    "CoolingDownError",
     "CorpusStore",
     "DataPublisher",
     "DocumentRow",
@@ -350,13 +364,11 @@ __all__ = [
     "EventLog",
     "Finding",
     "HealthProbe",
-    "ModelProvider",
+    "ModelRouter",
     "ProviderError",
     "PublishedChunk",
-    "RateInfo",
     "RateLimitedError",
     "RateLimiter",
-    "RerankResult",
     "Reranker",
     "SearchHit",
     "SecretScanner",

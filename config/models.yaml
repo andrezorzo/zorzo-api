@@ -5,7 +5,6 @@ providers:
   openrouter:
     base_url: https://openrouter.ai/api/v1
     key_env: OPENROUTER_API_KEY
-    daily_requests: 1000  # free requests per UTC day after the one-time US$10 credit
 stages:
   route:
     max_tokens: 200

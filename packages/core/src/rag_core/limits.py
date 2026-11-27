@@ -35,9 +35,6 @@ class Limits(BaseModel):
     daily_budget_usd: float = Field(ge=0)
     budget_paid_cutoff: float = Field(gt=0, le=1)
     request_cost_cap_usd: float = Field(ge=0)
-    quota_warn: float = Field(gt=0, le=1)
-    breaker_failures: int = Field(ge=1)
-    breaker_window: float = Field(gt=0)
     breaker_cooldown: float = Field(gt=0)
     alert_repeat_after: float = Field(gt=0)
 

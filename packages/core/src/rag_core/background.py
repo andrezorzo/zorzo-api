@@ -1,4 +1,4 @@
-"""Background work a caller never waits on (alerts, breaker rows, settles of cancelled calls)."""
+"""Background work a caller never waits on (alerts, cooldown rows, settles of cancelled calls)."""
 
 import asyncio
 from collections.abc import Coroutine

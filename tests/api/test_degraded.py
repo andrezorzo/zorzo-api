@@ -1,5 +1,6 @@
-"""AC3 and AC4: with the budget at the cap or every `answer` entry open, questions go search-only with no
-model call, the health check says `degraded`, and André is alerted once."""
+"""With the budget at the cap, or every free `answer` entry cooling down while the paid entry can't run,
+questions go search-only with no model call, the health check says `degraded`, and André is alerted once
+(F01-T05 AC3, AC4; F01-T13 AC5)."""
 
 import asyncio
 from collections.abc import Iterator
@@ -12,7 +13,7 @@ from rag_core.services.gateway import ModelsUnavailableError, RequestSpend
 from tests.api.test_ask import QUESTION, ask
 from tests.conftest import api_settings, build_app, reset_tables, seed_budget
 
-ANSWER_MODELS = ("test/answer-a:free", "test/answer-b:free", "test/answer-paid")
+FREE_ANSWER_MODELS = ("test/answer-a:free", "test/answer-b:free")
 
 
 @pytest.fixture
@@ -27,11 +28,12 @@ def budget_at_the_cap(url: str) -> None:
     seed_budget(url, 0.10, paid_disabled=True, degraded=True)
 
 
-def open_every_answer_entry(client: TestClient) -> None:
-    """A gateway call against the stand-in in 429 mode opens each entry's breaker."""
+def cool_every_free_answer_entry(client: TestClient, url: str, behavior: str) -> None:
+    """Past the paid cutoff, a gateway call with every free `answer` entry failing puts each in cooldown."""
+    seed_budget(url, 0.08, paid_disabled=True)
     app: Any = client.app
-    for model in ANSWER_MODELS:
-        app.state.openrouter.script(model, "rate_limited")
+    for model in FREE_ANSWER_MODELS:
+        app.state.openrouter.script(model, behavior)
 
     async def call() -> None:
         loop_time = asyncio.get_running_loop().time()
@@ -64,14 +66,31 @@ def test_budget_at_the_cap_answers_search_only_with_no_model_call(
     assert_search_only(client, "budget_exhausted")
 
 
-def test_providers_down_answers_search_only_with_no_model_call(client: TestClient) -> None:
-    open_every_answer_entry(client)
+def test_providers_down_answers_search_only_with_no_model_call(
+    client: TestClient, corpus_database: str
+) -> None:
+    cool_every_free_answer_entry(client, corpus_database, "unauthorized")
     assert_search_only(client, "models_unavailable")
+
+
+def test_free_limits_reached_answer_search_only_as_quota_exhausted(
+    client: TestClient, corpus_database: str
+) -> None:
+    cool_every_free_answer_entry(client, corpus_database, "rate_limited")
+    assert_search_only(client, "quota_exhausted")
+
+
+def test_cooled_free_entries_keep_the_mode_normal_while_the_paid_entry_can_run(
+    client: TestClient, corpus_database: str
+) -> None:
+    cool_every_free_answer_entry(client, corpus_database, "rate_limited")
+    seed_budget(corpus_database, 0.0)  # the paid entry can run again
+    assert client.get("/api/healthz").json()["mode"] == "normal"
 
 
 def test_health_reports_degraded(client: TestClient, corpus_database: str) -> None:
     assert client.get("/api/healthz").json()["mode"] == "normal"
-    open_every_answer_entry(client)
+    cool_every_free_answer_entry(client, corpus_database, "unauthorized")
     assert client.get("/api/healthz").json()["mode"] == "degraded"
     budget_at_the_cap(corpus_database)
     assert client.get("/api/healthz").json() == {"status": "ok", "mode": "degraded", "db": "ok"}

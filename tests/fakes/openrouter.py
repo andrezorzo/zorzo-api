@@ -1,4 +1,5 @@
-"""A stand-in for OpenRouter's OpenAI-compatible API (AC6), as an httpx `MockTransport`.
+"""A stand-in for OpenRouter's OpenAI-compatible API, served on a local port (`serve`), since LiteLLM builds
+its own HTTP clients.
 
 Scripted per model: each model has a queue of behaviors, consumed one per request; an empty queue answers
 normally. It records every request (path, model, body), so a test can assert which chain entries were called.
@@ -6,28 +7,39 @@ normally. It records every request (path, model, body), so a test can assert whi
 - chat completions, as JSON or SSE (`stream: true`), with usage;
 - `/rerank`, scoring the documents in their given order unless `rerank_scores` says otherwise;
 - failures: "rate_limited" (429 with `Retry-After`), "error" (500), "bad_gateway" (502), "unavailable"
-  (503), "bad_request" (400), "slow_error" (500 after 0.25 s), "hang", "stall_after_first_token", "drip",
-  "keepalive_only" and "reasoning" (after one word: silence, a word every 50 ms, keep-alive comments only, or
-  reasoning frames without text), "reasoning_only" (reasoning frames and never any text),
-  "whitespace_stall" (a line break, then silence), "no_text" (a stream that ends with no text), "malformed" (a
-  200 that isn't the expected JSON), "context_too_long" (400), "break_after_first_token" (a stream that dies
-  mid-way);
-- `Reply(...)` for a given text, token counts or rate-limit headers.
+  (503), "bad_request" (400), "unauthorized" (401), "payment_required" (402), "moderated" (403, echoing
+  the input), "hang", "malformed" (a 200 that isn't the expected JSON), "error_choice" (a 200 whose choice
+  says the model failed), "context_too_long" (400), "no_text" (a stream that ends with no text),
+  "stall_after_headers" (a stream that opens and never sends a frame), "break_after_first_token" (a stream
+  that dies mid-way);
+- `Reply(...)` for a given text, token counts or reported cost.
 """
 
 import asyncio
 import json
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
+from tests.fakes.server import FakeServer
+
 DEFAULT_TEXT = "Hello from the fake model"
-DRIP_TEXT = " ".join(["word"] * 40)  # 2 s at one word every 50 ms
+GEN_ID = "gen-1"
+CREATED = 1_700_000_000
+# Fields OpenRouter sends on every streamed frame (LiteLLM reads them).
+FRAME_FIELDS = {"id": GEN_ID, "object": "chat.completion.chunk", "created": CREATED, "model": "fake"}
 # Failures answered with an error status: 500 and 502 may come after the model ran, 503 and 400 before.
-STATUS = {"error": 500, "bad_gateway": 502, "unavailable": 503, "bad_request": 400}
+STATUS = {
+    "error": 500,
+    "bad_gateway": 502,
+    "unavailable": 503,
+    "bad_request": 400,
+    "unauthorized": 401,
+    "payment_required": 402,
+}
 
 
 @dataclass(frozen=True)
@@ -35,7 +47,11 @@ class Reply:
     text: str = DEFAULT_TEXT
     tokens_in: int = 100
     tokens_out: int = 20
-    headers: dict[str, str] = field(default_factory=dict)
+    cost: float | None = None  # what OpenRouter reports it billed (`usage.cost`)
+
+    def usage(self) -> dict[str, Any]:
+        usage: dict[str, Any] = {"prompt_tokens": self.tokens_in, "completion_tokens": self.tokens_out}
+        return usage if self.cost is None else {**usage, "cost": self.cost}
 
 
 Behavior = str | Reply
@@ -50,6 +66,8 @@ class Recorded:
 
 class FakeOpenRouter:
     def __init__(self) -> None:
+        self._server: FakeServer | None = None
+        self._base = ""
         self.scripts: dict[str, deque[Behavior]] = defaultdict(deque)
         self.requests: list[Recorded] = []
         # By default the documents keep their order; a test sets another ranking.
@@ -79,11 +97,19 @@ class FakeOpenRouter:
             return httpx.Response(STATUS[behavior], json={"error": {"code": STATUS[behavior]}})
         if behavior == "hang":
             await asyncio.sleep(60)
-        if behavior == "slow_error":  # a 500 after 0.25 s
-            await asyncio.sleep(0.25)
-            return httpx.Response(500, json={"error": {"code": 500}})
+        if behavior == "moderated":  # a 403 that echoes the flagged input, as moderation answers do
+            flagged = body.get("messages", [{}])[-1].get("content", "")
+            return httpx.Response(403, json={"error": {"code": 403, "metadata": {"flagged_input": flagged}}})
         if behavior == "malformed":
             return httpx.Response(200, text="<html>")
+        if behavior == "error_choice":  # the upstream model died mid-answer: a 200 with an error choice
+            choice = {
+                "index": 0,
+                "message": {"role": "assistant", "content": "half an"},
+                "finish_reason": "error",
+            }
+            return httpx.Response(200, json={"id": GEN_ID, "object": "chat.completion", "created": CREATED,
+                                             "model": model, "choices": [choice]})  # fmt: skip
         if behavior == "context_too_long":
             message = "This endpoint's maximum context length is 8192 tokens."
             return httpx.Response(400, json={"error": {"code": 400, "message": message}})
@@ -91,15 +117,16 @@ class FakeOpenRouter:
         if path == "/rerank":
             return self._rerank(body, reply)
         if body.get("stream"):
-            return self._stream(reply, broken=behavior == "break_after_first_token", pace=behavior)
+            return self._stream(reply, behavior)
         return httpx.Response(
             200,
-            headers=reply.headers,
             json={
-                "id": "gen-1",
+                "id": GEN_ID,
+                "object": "chat.completion",
+                "created": CREATED,
                 "model": model,
                 "choices": [{"index": 0, "message": {"role": "assistant", "content": reply.text}}],
-                "usage": {"prompt_tokens": reply.tokens_in, "completion_tokens": reply.tokens_out},
+                "usage": reply.usage(),
             },
         )
 
@@ -112,60 +139,50 @@ class FakeOpenRouter:
         ]
         return httpx.Response(
             200,
-            headers=reply.headers,
             json={"model": body["model"], "results": results, "usage": {"total_tokens": 10, "cost": 0}},
         )
 
-    def _stream(self, reply: Reply, broken: bool, pace: Behavior) -> httpx.Response:
-        words = (DRIP_TEXT if pace == "drip" else reply.text).split(" ")
-
+    def _stream(self, reply: Reply, behavior: Behavior) -> httpx.Response:
         async def frames() -> AsyncIterator[bytes]:
             yield b": OPENROUTER PROCESSING\n\n"
-            if pace == "whitespace_stall":  # a line break, then nothing
-                yield _frame({"content": "\n"})
+            if behavior == "stall_after_headers":  # the 200 and its headers, then nothing
                 await asyncio.sleep(60)
                 return
-            if pace == "no_text":  # a role frame, its usage, then the end
+            if behavior == "no_text":  # a role frame, its usage, then the end
                 yield _frame({"role": "assistant"})
-                yield b'data: {"choices":[],"usage":{"prompt_tokens":800,"completion_tokens":0}}\n\n'
+                yield _data({"choices": [], "usage": {"prompt_tokens": 800, "completion_tokens": 0}})
                 yield b"data: [DONE]\n\n"
                 return
-            if pace == "reasoning_only":  # thinks for 5 s, never writes
-                for _ in range(100):
-                    await asyncio.sleep(0.05)
-                    thought = {"choices": [{"index": 0, "delta": {"reasoning": "..."}}]}
-                    yield f"data: {json.dumps(thought)}\n\n".encode()
-                return
-            for n, word in enumerate(words):
-                text = word if n == 0 else " " + word
-                frame = {"choices": [{"index": 0, "delta": {"content": text}}]}
-                yield f"data: {json.dumps(frame)}\n\n".encode()
-                if broken:
+            for n, word in enumerate(reply.text.split(" ")):
+                yield _frame({"content": word if n == 0 else " " + word})
+                if behavior == "break_after_first_token":
                     raise httpx.ReadError("connection reset")
-                if pace == "stall_after_first_token":
-                    await asyncio.sleep(60)
-                if pace == "keepalive_only":  # the aggregator's comments, the model silent
-                    for _ in range(100):
-                        await asyncio.sleep(0.05)
-                        yield b": OPENROUTER PROCESSING\n\n"
-                if pace == "reasoning":  # the model thinks: frames with no text
-                    for _ in range(100):
-                        await asyncio.sleep(0.05)
-                        thought = {"choices": [{"index": 0, "delta": {"reasoning": "..."}}]}
-                        yield f"data: {json.dumps(thought)}\n\n".encode()
-                if pace == "drip":  # one word every 50 ms
-                    await asyncio.sleep(0.05)
-            usage = {"prompt_tokens": reply.tokens_in, "completion_tokens": reply.tokens_out}
-            yield f"data: {json.dumps({'choices': [], 'usage': usage})}\n\n".encode()
+            yield _data({"choices": [], "usage": reply.usage()})
             yield b"data: [DONE]\n\n"
 
-        return httpx.Response(
-            200, headers={"content-type": "text/event-stream", **reply.headers}, content=frames()
-        )
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=frames())
 
-    def transport(self) -> httpx.MockTransport:
-        return httpx.MockTransport(self.handle)
+    def serve(self) -> str:
+        """Start serving (once) and return the base URL a provider config uses (`…/api/v1`). Stopped by
+        `stop_all`, which the tests' autouse fixture calls."""
+        if self._server is None:
+            self._server = FakeServer(self.handle)
+            self._base = self._server.__enter__()
+            _RUNNING.append(self._server)
+        return f"{self._base}/api/v1"
+
+
+_RUNNING: list[FakeServer] = []
+
+
+def stop_all() -> None:
+    while _RUNNING:
+        _RUNNING.pop().__exit__(None, None, None)
+
+
+def _data(payload: dict[str, Any]) -> bytes:
+    return f"data: {json.dumps({**FRAME_FIELDS, **payload})}\n\n".encode()
 
 
 def _frame(delta: dict[str, str]) -> bytes:
-    return f"data: {json.dumps({'choices': [{'index': 0, 'delta': delta}]})}\n\n".encode()
+    return _data({"choices": [{"index": 0, "delta": delta}]})

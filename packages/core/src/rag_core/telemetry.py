@@ -33,6 +33,11 @@ def configure_logging(app_env: str, level: str = "INFO") -> None:
     )
     # Library loggers (uvicorn, sqlalchemy, psycopg) follow the same level.
     logging.getLogger().setLevel(level)
-    # Except httpx's: at `info` it logs every request URL, and Telegram's URL holds the bot token.
+    # Except the HTTP clients': at `info` httpx logs every request URL, and Telegram's URL holds the bot
+    # token.
     for name in ("httpx", "httpcore"):
         logging.getLogger(name).setLevel(max(logging.WARNING, logging.getLevelNamesMapping()[level]))
+    # LiteLLM logs every call, and its errors with tracebacks that can quote the request or the provider's
+    # answer: only its critical lines pass. The gateway logs each model failure by kind.
+    for name in ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy"):
+        logging.getLogger(name).setLevel(logging.CRITICAL)

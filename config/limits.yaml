@@ -23,8 +23,5 @@ timeout_judge: 5
 daily_budget_usd: 0.10  # paid spend per UTC day
 budget_paid_cutoff: 0.8  # share of the day's budget at which paid entries stop
 request_cost_cap_usd: 0.01
-quota_warn: 0.8  # share of a provider's free daily requests at which the saving steps start
-breaker_failures: 5
-breaker_window: 60  # seconds
-breaker_cooldown: 60  # seconds
+breaker_cooldown: 60  # seconds a free entry cools down when the provider sends no Retry-After (LiteLLM)
 alert_repeat_after: 43200  # seconds (12 h)

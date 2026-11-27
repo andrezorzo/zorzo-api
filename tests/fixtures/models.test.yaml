@@ -1,9 +1,10 @@
-# Models config for the tests: every entry points at the fake OpenRouter server (tests/fakes/openrouter.py).
+# Models config for the tests: every entry points at the fake OpenRouter server (tests/fakes/openrouter.py); the
+# tests replace the base URL with the local server's.
 providers:
   openrouter:
     base_url: https://openrouter.test/api/v1
     key_env: OPENROUTER_API_KEY
-    daily_requests: 10
+    kind: openrouter
 stages:
   route:
     max_tokens: 100

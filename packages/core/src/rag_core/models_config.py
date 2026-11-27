@@ -7,7 +7,7 @@ an invalid file stops the app.
 import hashlib
 import json
 from pathlib import Path
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -42,14 +42,35 @@ class Entry(BaseModel):
 class Stage(BaseModel):
     model_config = _STRICT
     max_tokens: int = Field(gt=0)  # output cap of every entry; the budget estimate uses it
-    chain: list[Entry]  # tried in order
+    chain: list[Entry]  # tried in order: the free entries on the Router, then the paid one (ADR 0016)
+
+    @property
+    def free(self) -> list[Entry]:
+        return [e for e in self.chain if not e.paid]
+
+    @property
+    def paid(self) -> Entry | None:
+        return next((e for e in self.chain if e.paid), None)
+
+
+ProviderKind = Literal["openrouter", "openai"]
 
 
 class Provider(BaseModel):
+    """An endpoint of the chains: `openrouter`, whose reported cost is read, or any other OpenAI-compatible
+    one (`openai`: Groq, NVIDIA, Google, Ollama)."""
+
     model_config = _STRICT
     base_url: str = Field(pattern=r"^https?://[^\s]+$")
     key_env: str | None = None  # absent for a keyless provider (Ollama)
-    daily_requests: int | None = Field(default=None, gt=0)  # free requests per UTC day; absent: no limit
+    kind: ProviderKind = "openai"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _openrouter_by_default(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "kind" not in data and "openrouter.ai" in str(data.get("base_url", "")):
+            return {**data, "kind": "openrouter"}
+        return data
 
 
 class Stages(BaseModel):
@@ -78,7 +99,17 @@ class ModelsConfig(BaseModel):
             for entry in stage.chain:
                 if entry.provider not in self.providers:
                     raise ValueError(f"stage {name} uses unknown provider {entry.provider}")
+            paid = [i for i, e in enumerate(stage.chain) if e.paid]
+            if name == "rerank" and paid:
+                raise ValueError("stage rerank can't have a paid entry")
+            if len(paid) > 1 or (paid and paid[0] != len(stage.chain) - 1):
+                raise ValueError(f"stage {name}: one paid entry at most, last in the chain")
         return self
+
+
+def entry_id(stage: StageName, entry: Entry) -> str:
+    """The entry's name on the Router and in the logs: `<stage>:<provider>/<model>`."""
+    return f"{stage}:{entry.provider}/{entry.model}"
 
 
 def load_models(path: Path) -> ModelsConfig:

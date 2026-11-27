@@ -1,7 +1,7 @@
 """Remote rerank level (ADR 0009): the gateway's `rerank` stage, in front of the local cross-encoder.
 
-Any failure (an exhausted chain, a quota past the warning) raises, and the retrieval service falls to the
-local level.
+Any failure (every free entry failed or cooling down, no time left) raises, and the retrieval service falls
+to the local level.
 """
 
 from rag_core.ports import SearchHit
