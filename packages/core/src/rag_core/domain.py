@@ -8,11 +8,10 @@ from collections.abc import Collection, Mapping
 from importlib.resources import files
 from pathlib import Path
 from string import Template
-from types import MappingProxyType
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DomainError(RuntimeError):
@@ -24,15 +23,10 @@ class DomainConfig(BaseModel):
 
     name: str
     # ISO 639-1 code → the Postgres text search configuration of that language; the first is the default.
-    languages: Mapping[str, str] = Field(min_length=1)
+    languages: dict[str, str] = Field(min_length=1)
     document_kinds: tuple[str, ...] = Field(min_length=1)  # the `kind`s a corpus document may have
     # Exact strings the PII pass lets through, e.g. the owner's public email (LLD "6.1 Corpus version").
     pii_allowlist: tuple[str, ...] = ()
-
-    @field_validator("languages")
-    @classmethod
-    def _read_only(cls, languages: Mapping[str, str]) -> Mapping[str, str]:
-        return MappingProxyType(dict(languages))  # the model is frozen; so is this mapping
 
 
 class Example(BaseModel):

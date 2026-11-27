@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 import structlog
 from pgvector import Vector
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import ProgrammingError
 
 from rag_core.adapters.factory import ConfigError
 from rag_core.adapters.postgres import Database
@@ -76,7 +76,7 @@ async def check_text_search(db: Database, configs: Collection[str]) -> None:
             try:
                 async with conn.begin_nested():
                     await conn.execute(text("SELECT CAST(:name AS regconfig)"), {"name": name})
-            except DBAPIError:
+            except ProgrammingError:  # an unknown name; a lost connection still raises as itself
                 missing.append(name)
     if missing:
         raise TextSearchConfigError(f"Postgres has no text search configuration {missing}")

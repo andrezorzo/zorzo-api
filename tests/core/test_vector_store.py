@@ -137,5 +137,6 @@ async def test_configurations_are_checked_as_the_queries_resolve_them(
     await check_text_search(
         vs.db, ["English", "pg_catalog.portuguese"]
     )  # what `CAST(… AS regconfig)` accepts
-    with pytest.raises(TextSearchConfigError, match="klingon"):
-        await check_text_search(vs.db, ["english", "klingon"])
+    # Bad names on both sides of a good one: a failed cast doesn't spoil the checks after it.
+    with pytest.raises(TextSearchConfigError, match=r"\['aaa_klingon', 'zzz_klingon'\]"):
+        await check_text_search(vs.db, ["zzz_klingon", "english", "aaa_klingon"])
