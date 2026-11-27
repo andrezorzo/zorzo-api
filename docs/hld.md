@@ -1,6 +1,6 @@
 # HLD — zorzo.dev.br
 
-2026-11-26 · André de Castro Zorzo · Status: draft · LLD: [lld.md](lld.md) · Brief: [product-brief.md](product-brief.md)
+2026-11-27 · André de Castro Zorzo · Status: draft · LLD: [lld.md](lld.md) · Brief: [product-brief.md](product-brief.md)
 
 ## 1. Context and goals
 
@@ -357,7 +357,8 @@ Main entities and where they live:
   trend charts.
 - **Full traces** (LangSmith): masked, under the provider's 14-day retention.
 
-Rules that shape the design: no visitor personal data is stored anywhere (LGPD/GDPR); every model call's
+Rules that shape the design: no visitor personal data is stored anywhere (LGPD/GDPR), within what
+scrubbing can find (section "Security and privacy"); every model call's
 cost is counted before the next one is allowed (budget cap); Django owns the schema, the API has no
 migrations, and the checkpointer keeps its own schema; the nightly backup covers Postgres only, because
 the corpus and the brain data can be rebuilt from git.
@@ -374,8 +375,12 @@ the corpus and the brain data can be rebuilt from git.
 - **Prompt injection:** layered defenses: input normalization, a classifier, retrieved text always treated
   as data, read-only tools, the model never writes SQL, and an output guard with a canary. None of them
   depends on the code being secret (goal 6). Details in the LLD.
-- **Privacy:** no visitor personal data stored; questions scrubbed; public traces redacted. The corpus
-  holds only owner-reviewed documents, and ingest scans for secrets and personal data.
+- **Privacy:** no visitor personal data stored; questions scrubbed and public traces redacted of contact
+  identifiers (emails, phone numbers), document and card numbers, and secrets. A name the visitor writes
+  in a question is not detected (that would take a language model of its own and would also strike the
+  names the site is about): such a question is hidden from public pages and deleted with its retention
+  (details in the LLD, section "Security"). The corpus holds only owner-reviewed documents, and ingest
+  scans for secrets and personal data.
 - **Privileged access:** the Django admin and the owner's tools are reachable only through an SSH tunnel,
   never through the edge.
 - **Least privilege:** S3 is private, read only by CloudFront. The VPS writes to S3 with a credential

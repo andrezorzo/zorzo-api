@@ -75,7 +75,7 @@ means adding `domains/<other>/`, not changing `core`.
 | Local rerank | fastembed (ONNX) with `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` registered as a custom model (`onnx/model_quint8_avx2.onnx`), baked into the API image and loaded offline; every model file is checked against a pinned SHA-256, so a changed model is refused | ADR 0009; small (130 MB) and multilingual on CPU; fastembed has no built-in copy of it |
 | Validation and settings | Pydantic v2 + pydantic-settings | Tool arguments, answer contract, config files, fail-fast settings |
 | Extraction and chunking | LangChain document loaders (Markdown in the MVP; PDF loaders pluggable per domain) + `MarkdownHeaderTextSplitter` / `RecursiveCharacterTextSplitter` | The loader interface makes the PDF library a configuration choice; Docling is too heavy for the VPS. The résumé enters as owner-reviewed Markdown converted once from the PDF |
-| Tracing | langsmith SDK + a custom LangChain CallbackHandler | The handler feeds SSE events and the public trace from the same step events |
+| Tracing | langsmith SDK (`Client` and `RunTree`), fed by the TraceSink fan-out | One fan-out of step events feeds the SSE stream, the stored trace and LangSmith; the SDK's background queue posts the runs. LangChain's ambient tracing (`LANGSMITH_TRACING`) is forced off: it would send the graph state unredacted, and misses the LiteLLM calls and the search-only path |
 | Evals | DeepEval + plain Python metrics | Decisions log, 2026-11-18 |
 | Logs | structlog | Events with fields, `bind(trace_id=…)`, JSON in production, readable locally |
 | Secret scan | gitleaks + a PII pass: phones by `phonenumbers` (Google's libphonenumber, BR and US plans, pinned), emails by our own extraction, CPF and card numbers by check digits | Ingest gate (HLD flow 6.3); real numbering plans keep year ranges and ports from counting as phones |
@@ -146,7 +146,8 @@ connection; the domain is chosen by `DOMAIN` and loaded by the apps, never by `c
 | Embedder | `embed` | Texts | Vectors + model tag | Always the pinned tag |
 | Reranker | `rerank` (async) | Query, candidates, k | Ordered candidates + level used | A level may raise; the retrieval service falls to the next level, then to the fused order (ADR 0009) |
 | BotCheck | `verify` | Token | Pass or fail | Fails closed when the provider errors |
-| TraceSink | `record` | Step event | — | Feeds the SSE stream, the public trace and LangSmith; LangSmith is asynchronous and never blocks |
+| TraceSink | `record` | Step event | — | One fan-out per request feeds the SSE stream, the trace recorder and, only with `LANGSMITH_API_KEY`, LangSmith; never blocks: LangSmith runs go on the SDK's in-memory queue, which drops a run when full; a failing extra sink is logged and skipped |
+| TraceStore | `write` | A finished request's trace: the public trace, its spans and the questions-log row | — | One transaction (section 3 "Transactions"); a store that fails raises "unavailable" |
 | Alerter | `send` | Alert kind, message | — | Delivers one message; the alerts service decides when to send (section 6.10) |
 | EventLog | `write` | Level, component, event, fields | — | One `log_events` row, written in the background; never blocks the caller |
 | DataPublisher | `publish` | Brain and corpus data for a version | Manifest | S3 adapter writes `data/<hash>/` and invalidates only the manifest; local adapter writes a folder the local Caddy serves |
@@ -182,6 +183,15 @@ domain pieces, not ports (section 6.5).
 - **Admin:** the Django admin listens on a local port, reachable only through an SSH tunnel; its views are
   read-only, except the "remove from public view" action on traces, which sets `removed_at` and writes a
   `trace_removals` row.
+- **Trace redaction:** everything the stored trace and LangSmith get passes one redactor first: the scrubbed
+  question, and every string of the stored events (claims, the gap sentence, whatever a later event
+  carries). It removes `Cc` and `Cf` characters (text hidden from a reader), replaces emails, phone numbers,
+  CPFs and card numbers with `[email]`, `[phone]`, `[cpf]` and `[card]` (the detectors of the ingest PII
+  pass, section 6.1; entries of the domain's `pii_allowlist` pass), and replaces with `[secret]` the exact
+  value of every secret the app holds and anything shaped like a key (known key prefixes, a JWT, a private
+  key header, an unbroken run of 32 or more letters, digits, `_`, `-`, `+` and `=` mixing letters and
+  digits). No prompt text reaches a step event, so the domain's instructions never reach a trace. The
+  visitor's own stream is not redacted.
 - **Secrets:** read once at startup from settings; never logged, never in a trace. The canary lives in the
   environment. With `APP_ENV=production` the API refuses to start on Turnstile's test secrets or on the
   published local `SALT_SEED` (`infra/.env.example`), with which anyone could reverse the hashed IPs.
@@ -205,8 +215,14 @@ domain pieces, not ports (section 6.5).
 
 - **Corpus activation:** one transaction turns the candidate `active` and the previous active `retired`.
 - **Budget reservation:** a single statement.
-- **End of a request:** the public trace, its spans, the questions-log row and the final cost are written in
-  one transaction after the stream ends, never during it.
+- **End of a request:** the public trace, its spans, the questions-log row and the final cost (the request's
+  cost on the trace row; the day's spend is settled per call, section 6.2) are written in one transaction
+  after `done`, never while events are still being sent. The stream closes after the write, so the trace
+  `done` names exists once the stream ends. The write is shielded: a visitor who leaves after `done` doesn't
+  cut it. A request that never reached `done` (the visitor left, so the run was cancelled) and a request the
+  gate refused leave no trace. A failed write is logged at `error` with the trace id; the visitor already
+  has the answer. A row that names the trace (an answer cache entry with its `trace_id`) is written in this
+  transaction, after the trace row, so its foreign key always holds.
 - **Migrations:** Django runs each in a transaction (Postgres DDL is transactional). Migrations stay
   backward compatible with the previous image: add first, remove in a later deploy (HLD flow 6.4).
 
@@ -238,15 +254,17 @@ domain pieces, not ports (section 6.5).
 - Structured JSON on stdout through structlog, collected by Docker and journald. Every line carries
   `trace_id`, level and an event name.
 - Edge and infrastructure events from the closed catalog (fallback, cooldown start and end, rate limit,
-  deploy, ingest, snapshot failure) also go to `log_events`: per-request ones through the TraceSink, the
-  others (cooldowns) through the EventLog port.
+  deploy, ingest, snapshot failure) also go to `log_events`, through the EventLog port: a rate limit
+  (with the empty buckets' kinds and no trace id, since a refused request has no trace), the cooldowns and
+  the rest. A fallback is not a row: it is recorded in its step's span (`trace_spans.fallback_reason`) and
+  `model` event.
 - The `httpx` and `httpcore` loggers run at `warning`: at `info` they log every request URL, and Telegram's
   URL holds the bot token. LiteLLM's loggers run at `critical`: its error lines carry tracebacks that can
   quote the request or the provider's answer; the gateway logs each model failure by kind.
 - Levels: `info` for one summary line per request; `warning` for fallback, cooldown started, retry; `error` for
   bugs (recursion limit, "context too long", parse failure after the retry).
-- Never logged: secrets, raw IP, the question before scrubbing, Turnstile tokens, full prompts (those exist
-  only in LangSmith, masked).
+- Never logged: secrets, raw IP, the question before scrubbing, Turnstile tokens. Full prompts are never
+  stored, logged or sent.
 
 ### Configuration
 
@@ -281,8 +299,9 @@ domain pieces, not ports (section 6.5).
   API; an example question in a language the domain doesn't declare stops the ingest. A chunk's `tsv`
   keeps the configuration of its ingest, so changing a language's configuration needs a new corpus
   version.
-- **Shutdown:** the gateway drains its background work (reservation releases, alerts, event rows) within
-  `SHUTDOWN_DRAIN`, then cancels what is left and logs it, so a stuck write never holds the process.
+- **Shutdown:** the gateway drains its background work (reservation releases, alerts, event rows), the API
+  its pending trace writes, and the LangSmith client its queue, each within `SHUTDOWN_DRAIN`; what is left
+  is cancelled (or, in LangSmith's queue, dropped) and logged, so a stuck write never holds the process.
 
 ## 4. Data
 
@@ -329,10 +348,10 @@ Columns, types, constraints and indexes live in the migrations. What is still pl
 | `documents` | existing | Metadata from the document front matter; `kind` and `lang` are among the domain's |
 | `chunks` | existing | `tsv` is built by ingest with the text search configuration the domain maps to the document's language, over heading path and content |
 | `answer_cache` | existing | Looked up by embedding similarity (ADR 0014) |
-| `public_traces` | existing | outcome: `answered`, `abstained`, `declined`, `blocked`, `degraded`, `cached`; `public_ok` defaults to false |
-| `trace_spans` | existing | One row per step; feeds the latency and fallback charts |
+| `public_traces` | existing | outcome: `answered`, `abstained`, `declined`, `blocked`, `degraded`, `cached`, `error`; `cached` when `done.cached` is true, otherwise `done.outcome`; `public_ok` defaults to false; `expires_at` is the write time plus `RETENTION_PUBLIC_TRACES`; `cost_usd` and `latency_ms` are the request's; `payload` is the stored trace below |
+| `trace_spans` | existing | One row per step that ended (its `stage` end), with the tokens and cost of its model calls, the model that answered last and its fallback reason (why the last earlier entry of the stage's chain didn't answer: `cooling_down`, `rate_limited`, `timeout`, `failed`, `budget` or `request_cap`; null when the first entry tried answered); feeds the latency and fallback charts |
 | `trace_removals` | existing | Private record of the owner's manual removals; never shown in public |
-| `questions_log` | existing | For eval curation; outlives its trace (`trace_id` set null) |
+| `questions_log` | existing | For eval curation; outlives its trace (`trace_id` set null); outcome as its trace's |
 | `defense_events` | existing | |
 | `log_events` | existing | Closed event catalog |
 | `rate_buckets` | existing | |
@@ -342,6 +361,14 @@ Columns, types, constraints and indexes live in the migrations. What is still pl
 | `external_snapshots` | existing | |
 | `alert_states` | existing | No `site_down` row: UptimeRobot sends it by email (section 6.10) |
 | `entities`, `facts` | to detail | Phase 2, career graph |
+
+**Stored trace** (`public_traces.payload`, planned; read by the trace page, F02): `{question, events,
+cut, done}`. `question` is the scrubbed question; `events` holds, in stream order and redacted (section 3
+"Security"), every stream event except `stage`, `model`, `token`, `usage` and `done`, each as `{kind, …its
+payload}`; `cut` names the steps that started and never ended (a deadline or a failure inside them); `done`
+is `done`'s payload without `trace_id` and `outcome` (which have their columns), redacted, so every optional
+field it carries (`suggestion`, `cached`, `contact`, `notice`) is kept as sent. Steps, models, tokens and
+cost are in `trace_spans`, not in the payload.
 
 Data rules that the schema doesn't show live in section 6 (states, retention) and section 3 (concurrency).
 
@@ -395,8 +422,9 @@ Ordering rules (each one a contract test):
 - A cached answer sends `stage`, the cached `claim` events, `usage` (cost 0) and `done {cached: true}`, with no
   `token`.
 
-v1 freezes at launch. Until then, the task that first sends an event may narrow its payload (enums, new
-optional fields), since no client depends on it yet; after launch a breaking change means `/api/v2/`.
+v1 freezes at launch. Until then, the task that first sends an event may narrow its payload (enums), and a
+task before launch may add optional fields to an event, since no client depends on it yet; after launch a
+breaking change means `/api/v2/`.
 
 ### Published data
 
@@ -846,7 +874,7 @@ endpoints and per-environment switches.
 | `DEGRADED_MAX_PASSAGES` | 6 | Passages shown in search-only mode | `limits.yaml` |
 | `ANSWER_WORDS_DEFAULT` / `ANSWER_WORDS_MAX` | 150 / 400 | Answer length (section 6.3) | `limits.yaml` |
 | `RETENTION_QUESTIONS` | 90 days | Retention | `limits.yaml` |
-| `RETENTION_PUBLIC_TRACES` | 30 days | Retention (spans included) | `limits.yaml` |
+| `RETENTION_PUBLIC_TRACES` | 30 days | A trace's `expires_at`, stamped when it is written; retention deletes past it (spans included) | `limits.yaml` |
 | `RETENTION_LOGS` | 14 days | Retention | `limits.yaml` |
 | `RETENTION_RETIRED_VERSIONS` | 30 days | Retired and rejected versions | `limits.yaml` |
 | `BACKUP_RETENTION` | 14 days | Backup bucket lifecycle | Terraform |
@@ -882,7 +910,8 @@ endpoints and per-environment switches.
 | `ORT_DISABLE_TELEMETRY` | api | `1`: onnxruntime sends no usage telemetry to Microsoft (also set in code) | image |
 | `DATA_DIR` | ingest | Folder the local DataPublisher writes | env file |
 | `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `NVIDIA_API_KEY`, `GOOGLE_AI_API_KEY` | api, evals | Model providers | secret |
-| `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, `LANGSMITH_TRACING` | api, dashboard | Tracing and stats pull | secret / env file |
+| `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT` | api, dashboard | Tracing and stats pull; without the key the API sends nothing to LangSmith | secret / env file |
+| `LANGSMITH_ENDPOINT` | api | LangSmith's API URL; unset is LangSmith's own; the tests point it at a fake | env file |
 | `TURNSTILE_SECRET` | api | Bot check (the public site key is in the front) | secret |
 | `ORIGIN_SECRET` | caddy | CloudFront origin header | secret |
 | `CANARY`, `SALT_SEED` | api | Prompt-leak canary; seed of the daily IP salt | secret |
@@ -911,7 +940,9 @@ What replaces each production service is in the HLD ("Deployment and environment
   pass, always fail), which the tests also use. The always-pass test secret accepts any token, not only the
   dummy one the test site keys produce.
 - **DataPublisher:** the local adapter writes the brain data to a folder the local Caddy serves.
-- **Alerter and tracing:** the alerter only logs; LangSmith is on only when a key is present.
+- **Alerter and tracing:** the alerter only logs; LangSmith is on only when a key is present. The tests
+  point `LANGSMITH_ENDPOINT` at a fake ingest endpoint (`tests/fakes/`), which records what it receives or
+  hangs.
 - **Tests:** a separate test database per session, with the Django migrations applied by a fixture; the fake
   provider server (`tests/fakes/`, a small ASGI app on `127.0.0.1`, since LiteLLM builds its own HTTP
   clients) answers scripted responses, 429s, hangs, malformed

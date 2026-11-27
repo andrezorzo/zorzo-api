@@ -1,6 +1,6 @@
 # 10: Trace recording
 
-**Status:** to do
+**Status:** in progress
 
 **What to build:** Every reply leaves a stored record of how it was produced, ready for the trace pages of F02: steps, models, sources, claims, time and cost.
 
@@ -12,3 +12,5 @@
 - [ ] **AC2** · At the end of a request the public trace, its spans, the questions-log row and the final cost are written in one transaction, never during the stream (LLD "Transactions").
 - [ ] **AC3** · The stored trace is redacted: no visitor personal data, secrets or hidden instructions.
 - [ ] **AC4** · The `trace_id` in `done` points to a trace that exists once the stream ends.
+- [ ] **AC5** · A step whose answer came after an earlier chain entry didn't answer records the reason in its `model` event and its span.
+- [ ] **AC6** · A rate-limited request leaves a `rate_limited` row in `log_events`.
