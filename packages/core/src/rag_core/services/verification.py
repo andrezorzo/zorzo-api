@@ -5,6 +5,7 @@ chunk ids. A claim citing no passage, or one outside the request's passages, is 
 vote; the judge labels the rest against their cited passages only.
 """
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -18,6 +19,8 @@ Verdict = Literal["supported", "partial", "unsupported"]
 CheckedVerdict = Literal[Verdict, "gap"]  # `gap`: the sentence naming what the passages don't cover
 
 _STRICT = ConfigDict(extra="forbid", frozen=True)
+# Where the answer's JSON object starts: a brace opening a key, so a brace in prose before it doesn't count.
+_JSON_START = re.compile(r'\{\s*"')
 
 
 class AnswerClaim(BaseModel):
@@ -71,11 +74,11 @@ def read_answer(text: str) -> AnswerContract | None:
 
 def draft_text(partial: str) -> str:
     """The claims' text so far, read from the answer's JSON as it grows; never JSON or passage numbers."""
-    start = partial.find("{")  # past a Markdown fence or a sentence before the JSON
-    if start < 0:
+    start = _JSON_START.search(partial)  # past a Markdown fence or a sentence before the JSON
+    if start is None:
         return ""
     try:
-        parsed: Any = parse_partial_json(partial[start:])
+        parsed: Any = parse_partial_json(partial[start.start() :])
     except ValueError:
         return ""
     claims = parsed.get("claims") if isinstance(parsed, dict) else None

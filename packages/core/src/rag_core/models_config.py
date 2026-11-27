@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Literal, Self
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from rag_core.limits import Limits
 
@@ -69,14 +69,12 @@ class Provider(BaseModel):
     key_env: str | None = None  # absent for a keyless provider (Ollama)
     kind: ProviderKind = "openai"
 
-    @field_validator("base_url", mode="before")
-    @classmethod
-    def _read_variables(cls, value: Any) -> Any:
-        return _VARIABLE.sub(_variable, value) if isinstance(value, str) else value
-
     @model_validator(mode="before")
     @classmethod
-    def _openrouter_by_default(cls, data: Any) -> Any:
+    def _resolve_url_then_kind(cls, data: Any) -> Any:
+        """Reads `${VAR}`s in the base URL, then defaults the kind from the resolved URL."""
+        if isinstance(data, dict) and isinstance(data.get("base_url"), str):
+            data = {**data, "base_url": _VARIABLE.sub(_variable, data["base_url"])}
         if isinstance(data, dict) and "kind" not in data and "openrouter.ai" in str(data.get("base_url", "")):
             return {**data, "kind": "openrouter"}
         return data

@@ -1,9 +1,10 @@
 """Rule values from `config/limits.yaml` (LLD "Values and configuration"); an invalid file stops the app."""
 
 from pathlib import Path
+from typing import Self
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class Limits(BaseModel):
@@ -46,6 +47,12 @@ class Limits(BaseModel):
     # Off until they are calibrated on the eval set at M3: abstain only on no passage, always assess.
     relevance_floor: float | None = None
     assess_skip_score: float | None = None
+
+    @model_validator(mode="after")
+    def _reserve_leaves_time_before_the_answer(self) -> Self:
+        if self.answer_reserve >= self.request_deadline:
+            raise ValueError("answer_reserve must be shorter than request_deadline")
+        return self
 
 
 def load_limits(path: Path) -> Limits:

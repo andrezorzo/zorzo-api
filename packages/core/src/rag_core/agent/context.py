@@ -68,7 +68,11 @@ class AgentContext:
         default); None when the chain can't answer."""
         try:
             completion = await self.gateway.complete(
-                stage, messages, schema=schema, deadline_at=deadline_at or self.deadline_at, spend=self.spend
+                stage,
+                messages,
+                schema=schema,
+                deadline_at=deadline_at if deadline_at is not None else self.deadline_at,
+                spend=self.spend,
             )
         except ModelsUnavailableError:
             return None

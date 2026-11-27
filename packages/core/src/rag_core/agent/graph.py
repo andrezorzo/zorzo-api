@@ -97,31 +97,22 @@ async def run_agent(question: str, trace_id: UUID, *, agent: Agent, context: Age
         log.error("recursion_limit")  # a bug: the graph looped past its backstop
         outcome = "abstained"
     except TimeoutError:
-        if not deadline.expired():  # a step's own timeout escaped it: a bug, not the request's deadline
+        if deadline.expired():
+            log.warning("deadline_exceeded", stage="agent")
+            settled = _on_deadline(context)
+        else:  # a step's own timeout escaped it: a bug, not the request's deadline
             log.exception("agent_failed")
+            settled = context.settled
+        if settled is None:
             end_with_error(context.sink, trace_id)
             return RunResult("error", _public_ok(state))
-        log.warning("deadline_exceeded", stage="agent")
-        if context.settled is not None:  # a step already sent the ending: keep it
-            outcome = context.settled
-        elif context.drafted:
-            outcome = "abstained"  # a draft is never published unverified
-        elif context.found:
-            emit_degraded(
-                context.sink,
-                context.found,
-                context.corpus_version,
-                "deadline",
-                context.limits.degraded_max_passages,
-            )
-            outcome = "degraded"
-        else:  # nothing found in time: "no matching sources" would be untrue
-            end_with_error(context.sink, trace_id)
-            return RunResult("error", _public_ok(state))
+        outcome = settled
     except Exception:
         log.exception("agent_failed")
-        end_with_error(context.sink, trace_id)
-        return RunResult("error", _public_ok(state))
+        if context.settled is None:
+            end_with_error(context.sink, trace_id)
+            return RunResult("error", _public_ok(state))
+        outcome = context.settled  # the ending already sent stands
     if outcome != "degraded":  # `degraded` may be followed only by its passages and `done`
         context.sink.record(
             Usage(
@@ -133,6 +124,22 @@ async def run_agent(question: str, trace_id: UUID, *, agent: Agent, context: Age
         )
     context.sink.record(Done(trace_id=trace_id, outcome=outcome, cached=False, suggestion=None))
     return RunResult(outcome, _public_ok(state))
+
+
+def _on_deadline(context: AgentContext) -> Outcome | None:
+    """How a run the deadline cut ends: the ending a step already sent; an abstention after a draft (never
+    published unverified); the passages found, search-only; or None, an error, when nothing was found in
+    time ("no matching sources" would be untrue)."""
+    if context.settled is not None:
+        return context.settled
+    if context.drafted:
+        return "abstained"
+    if not context.found:
+        return None
+    emit_degraded(
+        context.sink, context.found, context.corpus_version, "deadline", context.limits.degraded_max_passages
+    )
+    return "degraded"
 
 
 def _elapsed(context: AgentContext) -> float:

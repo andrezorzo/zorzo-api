@@ -213,7 +213,7 @@ async def repair_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any
         if c.verdict != "gap"
     )
     answer_prompt = _answer_messages(state, ctx)[0]["content"]
-    user = f"{state['query']}\n\n<checked_claims>\n{checked}\n</checked_claims>"
+    user = f"{as_data(state['query'])}\n\n<checked_claims>\n{checked}\n</checked_claims>"
     prompt = messages(ctx.prompts.repair, user, answer_prompt=answer_prompt)
     with stage(ctx.sink, "repair"):
         answer = cast(AnswerContract | None, await ctx.call("repair", "answer", prompt, AnswerContract))
