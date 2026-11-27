@@ -84,12 +84,10 @@ def _decoded(text: str, allow_unfinished: bool) -> Iterator[tuple[Any, bool]]:
 
 
 def read_answer(text: str) -> AnswerContract | None:
-    """The answer from its whole text (JSON mode, fenced JSON, or JSON after a sentence); None when it
-    doesn't validate. It tries the starts `draft_text` tries, so the draft and the answer agree."""
-    for parsed, _ in _decoded(text, allow_unfinished=False):
-        if (answer := _contract(parsed)) is not None:
-            return answer
-    return None
+    """The answer from its whole text (JSON mode, fenced JSON, or JSON after a sentence): the last object
+    that validates, the rule `draft_text` follows; None when none does."""
+    answers = [_contract(parsed) for parsed, _ in _decoded(text, allow_unfinished=False)]
+    return next((a for a in reversed(answers) if a is not None), None)
 
 
 def _contract(parsed: Any) -> AnswerContract | None:
@@ -102,18 +100,24 @@ def _contract(parsed: Any) -> AnswerContract | None:
 def draft_text(streamed: str) -> str:
     """The claims' text so far, read from the answer's JSON as it grows; never JSON or passage numbers.
 
-    The answer is the last object holding a `claims` list (a whole one must validate), so a format example
-    or an unreadable object before it is passed over. A known limit: an example still streaming before the
-    answer starts shows as the draft until the answer arrives; the checked claims replace the draft anyway.
+    The rule is `read_answer`'s: the last whole object that validates; while none has, the last unfinished
+    object holding a `claims` list. A format example or an unreadable object is passed over. A known limit:
+    an example still streaming before the answer starts shows as the draft until the answer arrives; the
+    checked claims replace the draft anyway.
     """
-    draft = ""
+    whole: list[Any] = []
+    unfinished: list[Any] = []
     for parsed, complete in _decoded(streamed, allow_unfinished=True):
         claims = parsed.get("claims") if isinstance(parsed, dict) else None
-        if not isinstance(claims, list) or (complete and _contract(parsed) is None):
-            continue  # not the answer: a claim inside it, an example, a malformed object
-        texts = [c["text"] for c in claims if isinstance(c, dict) and isinstance(c.get("text"), str)]
-        draft = " ".join(t for t in texts if t)
-    return draft
+        if complete and _contract(parsed) is not None:
+            whole.append(claims)
+        elif not complete and isinstance(claims, list):
+            unfinished.append(claims)
+    found = whole or unfinished
+    if not found:
+        return ""
+    texts = [c["text"] for c in found[-1] if isinstance(c, dict) and isinstance(c.get("text"), str)]
+    return " ".join(t for t in texts if t)
 
 
 def cite(answer: AnswerContract, passages: Sequence[SearchHit]) -> list[CitedClaim]:

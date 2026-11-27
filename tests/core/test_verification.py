@@ -74,3 +74,12 @@ def test_once_the_answer_streams_an_example_before_it_is_passed_over(example: st
 def test_claims_before_the_language_still_stream() -> None:
     reordered = '{"claims": [{"text": "He used Lambda.", "sources": [1]}], "answer_lang": "en"'
     assert draft_text(reordered[: reordered.index("Lambda") + len("Lambda")]) == "He used Lambda"
+
+
+def test_the_draft_and_the_answer_take_the_same_of_two_objects() -> None:
+    example = '{"answer_lang": "en", "claims": [], "gap": null, "abstained": true}'
+    text = f"If nothing matches: {example}\nAnswer: {ANSWER}"
+    answer = read_answer(text)
+    assert answer is not None and answer.claims[0].text == draft_text(text) == TEXT
+    truncated_repeat = ANSWER + '\n{"answer_lang": "en", "claims": [{"text": "He wrote more'
+    assert draft_text(truncated_repeat) == TEXT  # a whole answer wins over an unfinished one
