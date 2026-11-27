@@ -9,7 +9,9 @@ import langsmith
 import structlog
 from fastapi import FastAPI
 from rag_core.adapters.alerts import LogAlerter, TelegramAlerter
+from rag_core.adapters.defense_log import PostgresDefenseLog
 from rag_core.adapters.factory import (
+    build_classifier,
     build_embedder,
     build_gateway,
     build_rerankers,
@@ -25,13 +27,15 @@ from rag_core.adapters.trace_store import PostgresTraceStore
 from rag_core.adapters.turnstile import TurnstileBotCheck
 from rag_core.agent.graph import build_graph
 from rag_core.background import BackgroundTasks
-from rag_core.domain import load_domain, load_intents, load_prompts
+from rag_core.domain import load_domain, load_examples, load_intents, load_prompts
 from rag_core.limits import Limits, load_limits
 from rag_core.models_config import config_version, load_models
 from rag_core.ports import Alerter
 from rag_core.services.gate import Gate
 from rag_core.services.gateway import SHUTDOWN_DRAIN_S, ModelGateway
+from rag_core.services.guard import with_canary
 from rag_core.services.redact import Redactor
+from rag_core.services.suggestion import Suggestions
 from rag_core.telemetry import configure_logging
 
 from rag_api import ask, errors, health
@@ -39,6 +43,8 @@ from rag_api.body_limit import BodyLimit
 from rag_api.settings import ApiSettings
 
 log = structlog.get_logger()
+
+DEFENSE_DRAIN_S = 5  # at shutdown, how long the pending `defense_events` rows are waited for
 
 
 async def _warm_rerankers(app: FastAPI) -> None:
@@ -64,17 +70,26 @@ async def _close_traces(app: FastAPI) -> None:
 
 async def _shut_down(app: FastAPI) -> None:
     """The independent closes, at once: the bot check's client, the gateway's background work (budget
-    settles, alerts) and the traces. Each failure is logged, never stops the rest; the whole takes about
+    settles, alerts), the pending defense rows and the traces. Each failure is logged, never stops the rest; the whole takes about
     `SHUTDOWN_DRAIN_S`, within Docker's 10 s."""
     closing = {
         "bot_check": app.state.gate.bot_check.close(),
         "gateway": app.state.gateway.close(),
+        "defenses": app.state.defenses.drain(DEFENSE_DRAIN_S),
         "traces": _close_traces(app),
     }
     results = await asyncio.gather(*closing.values(), return_exceptions=True)
     for name, result in zip(closing, results, strict=True):
         if isinstance(result, BaseException):
             log.error("shutdown_failed", part=name, error=type(result).__name__)
+
+
+async def _warm_suggestions(app: FastAPI) -> None:
+    """Embed the example questions at startup; not fatal, `closest` embeds them on first use."""
+    try:
+        await app.state.suggestions.warm()
+    except Exception as exc:
+        log.warning("suggestions_warmup_failed", error=type(exc).__name__)
 
 
 def _alerter(settings: ApiSettings) -> Alerter:
@@ -111,16 +126,29 @@ def create_app(settings: ApiSettings) -> FastAPI:
                 db, domain.languages.values()
             )  # a language Postgres can't search stops it
             await _warm_rerankers(app)
+            # Unlike the rerank levels, the classifier has no next level: a guard silently off is worse than
+            # a failed deploy, so a file that is missing or doesn't match its hash stops the API.
+            await anyio.to_thread.run_sync(app.state.classifier.warm)
+            await _warm_suggestions(app)
             yield
 
     app = FastAPI(title="rag-api", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.domain = domain
-    app.state.intents = load_intents(settings.domain, domain.document_kinds)
-    app.state.prompts = load_prompts(settings.domain, app.state.intents)
+    app.state.intents = load_intents(settings.domain, domain.document_kinds, domain.contact)
+    # The canary goes into the prompts once they are loaded and hashed (cross-task decision X5).
+    app.state.prompts = with_canary(
+        load_prompts(settings.domain, app.state.intents), settings.canary.get_secret_value()
+    )
+    app.state.canary = settings.canary.get_secret_value()
+    # TODO(T10 rebase): hand `app.state.canary` to the shared redactor, so a stored trace never holds it.
     app.state.agent = build_graph()
     app.state.db = db
     app.state.limits = limits
     app.state.embedder = build_embedder(settings)
+    app.state.classifier = build_classifier(settings)
+    app.state.defenses = PostgresDefenseLog(db)
+    # A bad examples.yaml stops the API too.
+    app.state.suggestions = Suggestions(load_examples(settings.domain, domain.languages), app.state.embedder)
     app.state.gateway, app.state.model_config_version = _gateway(settings, limits, db)
     # Degraded questions use the local levels only, so they make no model call.
     app.state.local_rerankers = build_rerankers(settings)

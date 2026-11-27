@@ -51,6 +51,10 @@ async def test_the_recursion_backstop_abstains_and_logs() -> None:
         corpus_version=1,
         deadline_at=asyncio.get_running_loop().time() + 10,
         spend=RequestSpend(LIMITS.request_cost_cap_usd),
+        classifier=cast(Any, None),
+        defenses=cast(Any, None),
+        suggestions=cast(Any, None),
+        canary="canary",
     )
     with capture_logs() as logs:
         result = await run_agent("q", uuid4(), agent=looping(), context=context)

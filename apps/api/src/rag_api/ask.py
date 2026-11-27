@@ -29,6 +29,11 @@ log = structlog.get_logger()
 router = APIRouter()
 
 TURNSTILE_TOKEN_MAX_CHARS = 2048  # Cloudflare's maximum token length
+# The gate's refusals that are defense events: error code -> (layer, category).
+GATE_DEFENSES = {
+    ErrorCode.BOT_CHECK_FAILED: ("L0", "bot"),
+    ErrorCode.RATE_LIMITED: ("L1", "rate_limit"),
+}
 
 
 class AskRequest(BaseModel):
@@ -62,6 +67,12 @@ def _agent_context(state: Any, sink: TraceSink, corpus_version: int, deadline_at
         corpus_version=corpus_version,
         deadline_at=deadline_at,
         spend=RequestSpend(state.limits.request_cost_cap_usd),
+        classifier=state.classifier,
+        defenses=state.defenses,
+        suggestions=state.suggestions,
+        canary=state.canary,
+        contact=state.domain.contact,
+        link_hosts=state.domain.link_hosts,
     )
 
 
@@ -105,7 +116,15 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
     # One deadline for the whole request: the gate, the corpus check and the stream share it.
     loop = asyncio.get_running_loop()
     deadline_at = loop.time() + state.limits.request_deadline
-    question = await state.gate.check(body.q, body.turnstile, asker, deadline_at)
+    trace_id: str = request.state.trace_id
+    try:
+        question = await state.gate.check(body.q, body.turnstile, asker, deadline_at)
+    except ApiError as exc:
+        # A refusal at the gate is a defense event too, written in the background: the answer doesn't wait.
+        if exc.code in GATE_DEFENSES:
+            layer, category = GATE_DEFENSES[exc.code]
+            state.defenses.record(layer, category, "block", UUID(trace_id))
+        raise
     if deadline_at - loop.time() <= 0:  # the gate finished on the deadline: nothing left for the answer
         log.warning("deadline_exceeded", stage="after_gate")
         raise ApiError(ErrorCode.UNAVAILABLE)
@@ -126,7 +145,6 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
         log.warning("deadline_exceeded", stage="mode")
         raise ApiError(ErrorCode.UNAVAILABLE)
     corpus = await corpus_service.servable(state.vector_store, state.embedder.tag, left)
-    trace_id: str = request.state.trace_id
     stream = QueueSink()
     recorder = TraceRecorder(started_at)
     # In order: the visitor's stream, the stored trace, LangSmith (a no-op without a key), the tests' extras.
@@ -152,6 +170,7 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                             limits=state.limits,
                             reason=reason,
                             deadline_at=deadline_at,
+                            contact=state.domain.contact,
                         )
                     else:
                         context = _agent_context(state, sink, corpus.version, deadline_at)
@@ -163,7 +182,9 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                 except Exception:
                     # Whatever escaped the service, the visitor's stream still ends with `done`.
                     log.exception("stream_failed")
-                    end_with_error(sink, UUID(trace_id))  # every sink, so a stored trace ends too
+                    end_with_error(
+                        sink, UUID(trace_id), state.domain.contact
+                    )  # every sink, so a stored trace ends too
             finally:
                 # However the run ended (a visitor who left included), LangSmith's root run is ended. A
                 # task of the app's own, so a visitor who leaves doesn't cancel it and shutdown drains it;

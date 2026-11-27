@@ -8,12 +8,21 @@ from dataclasses import dataclass, field
 from pydantic import BaseModel
 
 from rag_core.domain import Intent, Prompts
-from rag_core.events import DegradedReason, Model, Outcome, StageName
+from rag_core.events import ContactOption, DegradedReason, Model, Outcome, StageName
 from rag_core.limits import Limits
 from rag_core.models_config import StageName as ModelStage
-from rag_core.ports import Embedder, Reranker, SearchHit, TraceSink, VectorStore
+from rag_core.ports import (
+    DefenseLog,
+    Embedder,
+    InjectionClassifier,
+    Reranker,
+    SearchHit,
+    TraceSink,
+    VectorStore,
+)
 from rag_core.services.gateway import Completion, ModelGateway, ModelsUnavailableError, RequestSpend
 from rag_core.services.route import RouteResult, route_schema
+from rag_core.services.suggestion import Suggestions
 
 
 def answer_language(language: str | None, languages: Sequence[str]) -> str:
@@ -36,6 +45,12 @@ class AgentContext:
     corpus_version: int
     deadline_at: float  # loop time
     spend: RequestSpend
+    classifier: InjectionClassifier  # guard layer L2
+    defenses: DefenseLog  # where a block is counted
+    suggestions: Suggestions
+    canary: str  # the marker in every system prompt: seeing it in an answer is a leak (`L5`)
+    contact: Sequence[ContactOption] = ()  # the domain's contact options, sent on every `done`
+    link_hosts: Sequence[str] = ()  # the hosts a claim may link to; with none, no link is allowed
     tokens_in: int = 0
     tokens_out: int = 0
     cost_usd: float = 0.0

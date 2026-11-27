@@ -221,7 +221,7 @@ class ModelGateway:
 
     async def stream(
         self, stage: StageName, messages: list[dict[str, str]], *, deadline_at: float, spend: RequestSpend
-    ) -> AsyncIterator[str | Completion]:
+    ) -> AsyncGenerator[str | Completion]:
         """Yields the answer's text as it comes, then its `Completion`.
 
         The answer starts with the model's first real text (leading whitespace is held back until then). A

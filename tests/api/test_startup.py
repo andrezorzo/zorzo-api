@@ -10,12 +10,12 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 from rag_api.main import create_app
-from rag_api.settings import PUBLISHED_LOCAL_DB_PASSWORD, PUBLISHED_LOCAL_SEED
+from rag_api.settings import PUBLISHED_LOCAL_CANARY, PUBLISHED_LOCAL_DB_PASSWORD, PUBLISHED_LOCAL_SEED
 from rag_core.adapters.factory import ConfigError
 from rag_core.domain import DomainError
 from rag_core.models_config import config_version, load_models
 
-from tests.conftest import DomainFactory, api_settings
+from tests.conftest import TEST_CANARY, DomainFactory, api_settings
 from tests.fakes.turnstile import PASS_SECRET
 
 
@@ -31,6 +31,8 @@ def _start(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
             "APP_ENV": "local",
             "TURNSTILE_SECRET": PASS_SECRET,
             "SALT_SEED": "test-seed-" * 4,
+            "CANARY": TEST_CANARY,
+            "GUARD_CLASSIFIER": "fake",
             **env,
         },
         capture_output=True,
@@ -143,6 +145,8 @@ PRODUCTION: dict[str, Any] = {
     "models_file": ROOT / "config/models.yaml",
     "embedder": "ollama",
     "reranker": "local",
+    "guard_classifier": "prompt_guard",
+    "canary": "a-production-canary-that-is-long-enough-0123",
 }
 
 
@@ -197,3 +201,38 @@ def test_the_guarded_seed_is_the_published_example() -> None:
     # Every seed AGENTS.md gives is the guarded one; a `<placeholder>` is not a seed.
     seeds = re.findall(r"SALT_SEED=([^\s`|<]+)", (root / "apps/api/AGENTS.md").read_text())
     assert seeds and set(seeds) == {PUBLISHED_LOCAL_SEED}
+
+
+def test_the_canary_is_required_and_real_in_production(database_url: str) -> None:
+    result = _start({"DOMAIN": "zorzo", "DATABASE_URL": database_url, "CANARY": ""})
+    assert result.returncode != 0 and "canary" in result.stderr.lower()
+    for bad in ("short-canary", "a canary with spaces that is quite long enough ok"):
+        with pytest.raises(ValidationError, match=r"(?i)canary"):
+            api_settings(database_url, canary=bad)
+    with pytest.raises(ValidationError, match=r"(?i)canary"):
+        api_settings(database_url, **{**PRODUCTION, "canary": PUBLISHED_LOCAL_CANARY})
+    assert api_settings(database_url, **PRODUCTION).canary.get_secret_value().startswith("a-production")
+
+
+def test_the_guarded_canary_is_the_published_example() -> None:
+    root = Path(__file__).resolve().parents[2]
+    assert f"CANARY={PUBLISHED_LOCAL_CANARY}\n" in (root / "infra/.env.example").read_text()
+    canaries = re.findall(r"CANARY=([^\s`|<]+)", (root / "apps/api/AGENTS.md").read_text())
+    assert canaries and set(canaries) == {PUBLISHED_LOCAL_CANARY}
+
+
+def test_the_fake_classifier_is_refused_outside_local(database_url: str) -> None:
+    with pytest.raises(ConfigError, match="GUARD_CLASSIFIER"):
+        create_app(api_settings(database_url, **{**PRODUCTION, "guard_classifier": "fake"}))
+
+
+def test_stops_on_a_bad_examples_file(database_url: str, make_domain: DomainFactory) -> None:
+    name = make_domain("badexamples", {"examples.yaml": "- {id: x, lang: xx, text: Hi}\n"}, from_sample=True)
+    result = _start({"DATABASE_URL": database_url, "DOMAIN": name, "PYTHONPATH": str(make_domain.folder)})
+    assert result.returncode != 0
+    assert "examples" in result.stderr
+
+
+def test_the_api_embeds_the_domains_examples_at_startup(database_url: str) -> None:
+    app = create_app(api_settings(database_url))
+    assert [e.id for e in app.state.suggestions.examples][:2] == ["en-experience", "en-aws"]

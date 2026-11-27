@@ -1,4 +1,4 @@
-"""The bounded graph (ADR 0006, LLD "6.3 Agent run"): route → retrieve → rerank → assess → optional
+"""The bounded graph (ADR 0006, LLD "6.3 Agent run"): guard → route → retrieve → rerank → assess → optional
 reformulate → answer → verify → optional repair, with abstain, decline and search-only exits.
 
 `run_agent` emits the whole stream after the gate, ending with `done`; it never raises.
@@ -16,7 +16,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from rag_core.agent import nodes
-from rag_core.agent.context import AgentContext
+from rag_core.agent.context import AgentContext, answer_language
 from rag_core.agent.state import AgentState
 from rag_core.events import Done, Outcome, Usage
 from rag_core.services.stream import emit_degraded, end_with_error
@@ -61,6 +61,7 @@ _after_verify = _to("repair")
 
 def build_graph() -> Agent:
     graph = StateGraph(AgentState, context_schema=AgentContext)
+    graph.add_node("guard", nodes.guard_step)
     graph.add_node("route", nodes.route_step)
     graph.add_node("retrieve", nodes.retrieve_step)
     graph.add_node("assess", nodes.assess_step)
@@ -69,7 +70,8 @@ def build_graph() -> Agent:
     graph.add_node("verify", nodes.verify_step)
     graph.add_node("repair", nodes.repair_step)
     graph.add_node("search_only", nodes.search_only_step)
-    graph.add_edge(START, "route")
+    graph.add_edge(START, "guard")
+    graph.add_conditional_edges("guard", _to("route"), ["route", "search_only", END])
     graph.add_conditional_edges("route", _to("retrieve"), ["retrieve", "search_only", END])
     graph.add_conditional_edges("retrieve", _after_retrieve, ["assess", "answer", "search_only", END])
     graph.add_conditional_edges("assess", _after_assess, ["reformulate", "answer", "search_only", END])
@@ -106,16 +108,22 @@ async def run_agent(question: str, trace_id: UUID, *, agent: Agent, context: Age
             log.exception("agent_failed")
             settled = context.settled
         if settled is None:
-            end_with_error(context.sink, trace_id)
+            end_with_error(context.sink, trace_id, context.contact)
             return _result("error", state)
         outcome = settled
     except Exception:
         log.exception("agent_failed")
         if context.settled is None:
-            end_with_error(context.sink, trace_id)
+            end_with_error(context.sink, trace_id, context.contact)
             return _result("error", state)
         outcome = context.settled  # the ending already sent stands
-    if outcome != "degraded":  # `degraded` may be followed only by its passages and `done`
+    block = state.get("blocked")
+    if block is not None:  # counted before the stream ends, written in the background
+        context.defenses.record(block["layer"], block["category"], "block", trace_id)
+    if outcome not in (
+        "degraded",
+        "blocked",
+    ):  # only passages (`degraded`) or nothing (`blocked`) before `done`
         context.sink.record(
             Usage(
                 tokens_in=context.tokens_in,
@@ -124,8 +132,32 @@ async def run_agent(question: str, trace_id: UUID, *, agent: Agent, context: Age
                 latency_ms=round(_elapsed(context) * MS_PER_S),
             )
         )
-    context.sink.record(Done(trace_id=trace_id, outcome=outcome, cached=False, suggestion=None))
+    suggestion = await _suggestion(state, outcome, context)
+    context.sink.record(
+        Done(
+            trace_id=trace_id,
+            outcome=outcome,
+            cached=False,
+            suggestion=suggestion,
+            contact=list(context.contact),
+        )
+    )
     return _result(outcome, state)
+
+
+async def _suggestion(state: dict[str, Any], outcome: Outcome, context: AgentContext) -> str | None:
+    """The closest example question, for an abstention or a decline; None when there is none to give. It
+    never fails the run: an embedder that is down leaves the stream without a suggestion."""
+    route = state.get("route")
+    if outcome not in ("abstained", "declined") or route is None:
+        return None
+    try:
+        return await context.suggestions.closest(
+            route.standalone_question, answer_language(route.language, context.languages), context.deadline_at
+        )
+    except Exception as exc:
+        log.warning("suggestion_failed", error=type(exc).__name__)  # the type only: it may quote the text
+        return None
 
 
 def _on_deadline(context: AgentContext) -> Outcome | None:
