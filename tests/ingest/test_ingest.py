@@ -19,7 +19,7 @@ import pytest
 import yaml
 from rag_core.ports import EMBEDDING_DIM
 
-from tests.conftest import ROOT, copy_domain, create_migrated_database, drop_database, run_ingest
+from tests.conftest import ROOT, DomainFactory, create_migrated_database, drop_database, run_ingest
 
 FIXTURE_CORPUS = ROOT / "tests" / "fixtures" / "corpus"
 EXAMPLES = ROOT / "domains" / "zorzo" / "src" / "domain_zorzo" / "examples.yaml"
@@ -305,14 +305,16 @@ def test_sigterm_rejects_the_candidate(db: str, source: Path, tmp_path: Path) ->
     assert rows(db, "SELECT status FROM corpus_versions") == [("rejected",)]
 
 
-def test_refuses_a_text_search_configuration_postgres_lacks(db: str, tmp_path: Path) -> None:
+def test_refuses_a_text_search_configuration_postgres_lacks(
+    db: str, tmp_path: Path, make_domain: DomainFactory
+) -> None:
     # F01-T14 AC3: checked before the run writes anything.
-    domains = copy_domain(
-        tmp_path / "domains",
+    name = make_domain(
         "klingon",
-        "name: klingon\nlanguages: {en: english, es: klingon}\ndocument_kinds: [manual, faq]\n",
+        {"domain.yaml": "name: klingon\nlanguages: {en: english, es: klingon}\ndocument_kinds: [manual]\n"},
+        from_sample=True,
     )
-    result = run_ingest(db, tmp_path / "data", domain="klingon", domains_dir=domains)
+    result = run_ingest(db, tmp_path / "data", domain=name, domains_dir=make_domain.folder)
     assert result.returncode == 1
     assert "klingon" in result.stderr
     assert rows(db, "SELECT version FROM corpus_versions") == []

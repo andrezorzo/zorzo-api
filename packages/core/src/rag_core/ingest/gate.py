@@ -225,12 +225,15 @@ def personal_data(text: str, allowlist: Iterable[str] = ()) -> list[str]:
 
 def _undeclared(meta: DocumentMeta, domain: DomainConfig) -> list[str]:
     """Front matter values the domain doesn't declare, named by field with the domain's own list."""
-    rules = []
-    if meta.kind not in domain.document_kinds:
-        rules.append(f"invalid front matter (kind); the domain's kinds: {', '.join(domain.document_kinds)}")
-    if meta.lang not in domain.languages:
-        rules.append(f"invalid front matter (lang); the domain's languages: {', '.join(domain.languages)}")
-    return rules
+    declared = (
+        ("kind", meta.kind, "kinds", domain.document_kinds),
+        ("lang", meta.lang, "languages", domain.languages),
+    )
+    return [
+        f"invalid front matter ({field}); the domain's {plural}: {', '.join(values)}"
+        for field, value, plural, values in declared
+        if value not in values
+    ]
 
 
 async def check(

@@ -5,11 +5,12 @@ The migrations run once per test session into a template database; each test dat
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import psycopg
@@ -116,12 +117,55 @@ def run_ingest(
     )
 
 
-def copy_domain(folder: Path, name: str, domain_yaml: str) -> Path:
-    """A copy of the `sample` test domain as `domain_<name>` in `folder`, with its own `domain.yaml`; returns
-    the folder, to put on the path."""
-    shutil.copytree(FIXTURE_DOMAINS / "domain_sample", folder / f"domain_{name}")
-    (folder / f"domain_{name}" / "domain.yaml").write_text(domain_yaml)
-    return folder
+class DomainFactory:
+    """Builds throwaway `domain_<name>` packages in `folder`, which is on the import path for the test (and
+    can be passed as `PYTHONPATH` to a subprocess); each package's import is dropped after the test."""
+
+    def __init__(self, folder: Path, request: pytest.FixtureRequest) -> None:
+        self.folder = folder
+        self._request = request
+
+    def __call__(
+        self, name: str, texts: Mapping[str, str] | None = None, *, from_sample: bool = False
+    ) -> str:
+        """An empty package, or a copy of the `sample` test domain, with the given files (`__` in a key
+        stands for `/`, e.g. `prompts__route.md`); returns the domain name."""
+        package = self.folder / f"domain_{name}"  # one package per name: imports are cached by name
+        if from_sample:
+            shutil.copytree(FIXTURE_DOMAINS / "domain_sample", package)
+        else:
+            package.mkdir()
+            (package / "__init__.py").write_text("")
+        for relative, text in (texts or {}).items():
+            path = package / relative.replace("__", "/")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        self._request.addfinalizer(lambda: sys.modules.pop(f"domain_{name}", None))
+        return name
+
+
+@pytest.fixture
+def make_domain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> DomainFactory:
+    folder = tmp_path / "domains"
+    folder.mkdir()
+    monkeypatch.syspath_prepend(str(folder))
+    return DomainFactory(folder, request)
+
+
+CORE = ROOT / "packages/core/src/rag_core"
+
+
+def named_in_core(names: set[str]) -> dict[str, list[str]]:
+    """The given names written as a quoted string in a core source file, by file."""
+    found: dict[str, list[str]] = {}
+    for path in CORE.rglob("*.py"):
+        text = path.read_text()
+        hits = sorted(n for n in names if re.search(rf"[\"']{re.escape(n)}[\"']", text))
+        if hits:
+            found[str(path.relative_to(CORE))] = hits
+    return found
 
 
 def ingest_fixture_corpus(url: str, data_dir: Path) -> None:

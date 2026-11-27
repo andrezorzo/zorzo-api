@@ -122,7 +122,6 @@ class AnswerCache(models.Model):
 
     class Meta:
         db_table = "answer_cache"
-        # `lang` is one of the domain's languages, which the writer has already checked (LLD "4. Data").
         indexes = [
             HnswIndex(
                 name="answer_cache_embedding_hnsw", fields=["embedding"], opclasses=["vector_cosine_ops"]
@@ -253,7 +252,6 @@ class EvalResult(models.Model):
 
     class Meta:
         db_table = "eval_results"
-        # `lang` is one of the domain's languages, taken from the dataset (LLD "4. Data").
         constraints = [
             models.CheckConstraint(
                 condition=_in("layer", ("retrieval", "generation", "end_to_end")),

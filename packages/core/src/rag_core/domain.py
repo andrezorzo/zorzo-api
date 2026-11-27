@@ -11,7 +11,7 @@ from string import Template
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DomainError(RuntimeError):
@@ -27,11 +27,6 @@ class DomainConfig(BaseModel):
     document_kinds: tuple[str, ...] = Field(min_length=1)  # the `kind`s a corpus document may have
     # Exact strings the PII pass lets through, e.g. the owner's public email (LLD "6.1 Corpus version").
     pii_allowlist: tuple[str, ...] = ()
-
-    @property
-    def language_codes(self) -> tuple[str, ...]:
-        """The languages in file order; the first is the default."""
-        return tuple(self.languages)
 
 
 class Example(BaseModel):
@@ -92,16 +87,6 @@ class Intent(BaseModel):
     kinds: tuple[str, ...] = ()  # document kinds its retrieval reads; empty means every kind
     action: Literal["answer", "decline"] = "answer"
 
-    @field_validator("kinds")
-    @classmethod
-    def _known_kinds(cls, kinds: tuple[str, ...], info: ValidationInfo) -> tuple[str, ...]:
-        # A misspelled kind would match no document, and the intent would abstain on every question.
-        known = (info.context or {}).get("kinds")
-        unknown = sorted(set(kinds) - set(known)) if known is not None else []
-        if unknown:
-            raise ValueError(f"unknown document kinds {unknown}; the domain's: {list(known or ())}")
-        return kinds
-
 
 def load_intents(name: str, kinds: Collection[str]) -> dict[str, Intent]:
     """The domain's intents, each kind checked against the domain's `document_kinds`."""
@@ -113,9 +98,12 @@ def load_intents(name: str, kinds: Collection[str]) -> dict[str, Intent]:
         odd = [key for key in raw if not isinstance(key, str)]
         if odd:
             raise ValueError(f"intent names must be strings (quote them): {odd}")
-        return {
-            key: Intent.model_validate(value or {}, context={"kinds": kinds}) for key, value in raw.items()
-        }
+        intents = {key: Intent.model_validate(value or {}) for key, value in raw.items()}
+        # A misspelled kind would match no document, and the intent would abstain on every question.
+        unknown = sorted({kind for intent in intents.values() for kind in intent.kinds} - set(kinds))
+        if unknown:
+            raise ValueError(f"unknown document kinds {unknown}; the domain's: {list(kinds)}")
+        return intents
     except Exception as exc:
         raise DomainError(f"invalid intents in {_package(name)}/intents.yaml: {exc}") from exc
 

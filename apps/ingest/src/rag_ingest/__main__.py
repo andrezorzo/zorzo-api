@@ -22,7 +22,7 @@ from pydantic import ValidationError
 from rag_core.adapters.factory import ConfigError, build_embedder
 from rag_core.adapters.gitleaks import GitleaksScanner
 from rag_core.adapters.local_publisher import LocalDataPublisher
-from rag_core.adapters.pgvector_store import PgCorpusStore, TextSearchConfigError, check_text_search
+from rag_core.adapters.pgvector_store import PgCorpusStore, check_text_search
 from rag_core.adapters.postgres import Database
 from rag_core.domain import DomainConfig, DomainError, Example, corpus_dir, load_domain, load_examples
 from rag_core.ingest.pipeline import (
@@ -109,7 +109,7 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
         # eval run, then --activate-version; locally, --activate does it in one run.
         log.exception("publish_failed", version=exc.version)
         return 1
-    except (ConfigError, TextSearchConfigError):
+    except ConfigError:
         raise  # reported by main()
     except Exception:
         log.exception("ingest_failed")
@@ -174,7 +174,7 @@ def main() -> None:
         sys.exit(asyncio.run(_run(args, settings, config)))
     except KeyboardInterrupt:  # Ctrl-C: the cleanup ran and `ingest_interrupted` was logged
         sys.exit(EXIT_SIGINT)
-    except (ConfigError, TextSearchConfigError) as exc:  # e.g. EMBEDDER=fake outside APP_ENV=local
+    except ConfigError as exc:  # e.g. EMBEDDER=fake outside APP_ENV=local
         print(f"rag-ingest: refusing to run: {exc}", file=sys.stderr)
         sys.exit(1)
 

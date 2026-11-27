@@ -2,43 +2,18 @@
 domain package, not the core."""
 
 import re
-import sys
-from collections.abc import Callable
 from importlib.resources import files
-from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 from rag_core.domain import DomainError, Intent, load_domain, load_intents, load_prompts
 from rag_core.services.route import route_schema
 
-CORE = Path(__file__).resolve().parents[2] / "packages/core/src/rag_core"
+from tests.conftest import DomainFactory, named_in_core
+
 ROUTED = {"standalone_question": "q", "language": "en", "follow_up": False, "public_ok": True}
 ZORZO_KINDS = load_domain("zorzo").document_kinds
 STAGES = ("route", "assess", "reformulate", "answer", "judge", "repair")
-
-MakeDomain = Callable[..., str]
-
-
-@pytest.fixture
-def make_domain(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
-) -> MakeDomain:
-    """A throwaway `domain_<name>` package with the given files (relative path → text)."""
-    monkeypatch.syspath_prepend(str(tmp_path))
-
-    def make(name: str, **texts: str) -> str:
-        package = tmp_path / f"domain_{name}"  # one package per name: imports are cached by name
-        package.mkdir()
-        (package / "__init__.py").write_text("")
-        for relative, text in texts.items():
-            path = package / relative.replace("__", "/")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text)
-        request.addfinalizer(lambda: sys.modules.pop(f"domain_{name}", None))  # imported from this tmp_path
-        return name
-
-    return make
 
 
 def prompt_files(route: str) -> dict[str, str]:
@@ -62,16 +37,11 @@ def test_route_accepts_only_the_domains_intents() -> None:
 
 
 def test_the_core_names_no_domain_intent() -> None:
-    names = load_intents("zorzo", ZORZO_KINDS)
-    for path in CORE.rglob("*.py"):
-        text = path.read_text()
-        assert not [n for n in names if re.search(rf"[\"']{re.escape(n)}[\"']", text)], path
+    assert named_in_core(set(load_intents("zorzo", ZORZO_KINDS))) == {}
 
 
-def test_an_intent_reads_the_domains_own_kinds(make_domain: MakeDomain) -> None:
-    name = make_domain(
-        "billing", **{"intents.yaml": "invoices: {kinds: [invoice], description: Invoices.}\n"}
-    )
+def test_an_intent_reads_the_domains_own_kinds(make_domain: DomainFactory) -> None:
+    name = make_domain("billing", {"intents.yaml": "invoices: {kinds: [invoice], description: Invoices.}\n"})
     assert load_intents(name, ("invoice",))["invoices"].kinds == ("invoice",)
 
 
@@ -86,14 +56,14 @@ def test_an_intent_reads_the_domains_own_kinds(make_domain: MakeDomain) -> None:
     ],
     ids=["misspelled", "keyword", "undescribed"],
 )
-def test_bad_intents_stop_the_app(make_domain: MakeDomain, name: str, yaml_text: str, error: str) -> None:
-    make_domain(name, **{"intents.yaml": yaml_text})
+def test_bad_intents_stop_the_app(make_domain: DomainFactory, name: str, yaml_text: str, error: str) -> None:
+    make_domain(name, {"intents.yaml": yaml_text})
     with pytest.raises(DomainError, match=error):
         load_intents(name, ("faq",))
 
 
-def test_the_route_prompt_lists_the_domains_intents(make_domain: MakeDomain) -> None:
-    name = make_domain("listed", **prompt_files("Classify.\n$intents\nThe question is $question.\n"))
+def test_the_route_prompt_lists_the_domains_intents(make_domain: DomainFactory) -> None:
+    name = make_domain("listed", prompt_files("Classify.\n$intents\nThe question is $question.\n"))
     intents = {
         "invoices": Intent(description="Questions about invoices."),
         "other": Intent(description="Anything else."),
@@ -105,8 +75,8 @@ def test_the_route_prompt_lists_the_domains_intents(make_domain: MakeDomain) -> 
     )
 
 
-def test_a_route_prompt_without_the_intents_slot_stops_the_app(make_domain: MakeDomain) -> None:
-    name = make_domain("unslotted", **prompt_files("Classify into: a, b.\n"))
+def test_a_route_prompt_without_the_intents_slot_stops_the_app(make_domain: DomainFactory) -> None:
+    name = make_domain("unslotted", prompt_files("Classify into: a, b.\n"))
     with pytest.raises(DomainError, match="intents"):
         load_prompts(name, {"a": Intent(description="A.")})
 

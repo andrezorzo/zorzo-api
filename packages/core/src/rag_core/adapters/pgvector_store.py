@@ -3,22 +3,20 @@
 Vectors travel as pgvector's text form (`[1,2,3]`) with explicit casts, so no driver adapter is needed.
 """
 
-from collections.abc import AsyncIterator, Collection, Mapping, Sequence
+from collections.abc import AsyncIterator, Collection, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 
 import structlog
 from pgvector import Vector
 from sqlalchemy import text
 
+from rag_core.adapters.factory import ConfigError
 from rag_core.adapters.postgres import Database
 from rag_core.ports import ActiveCorpus, ChunkRow, DocumentRow, PublishedChunk, SearchHit
 
 log = structlog.get_logger()
 
 INGEST_LOCK_KEY = 0x7A6F727A6F  # one ingest run at a time (LLD "Concurrency and idempotency")
-
-# One OR-ed query per text search configuration; the names are bound parameters, never SQL text.
-QUERY_IN_CONFIG = "replace(plainto_tsquery(CAST(:config_{n} AS regconfig), :text)::text, '&', '|')::tsquery"
 
 HYBRID_SEARCH = """
 WITH vec AS (
@@ -32,7 +30,7 @@ WITH vec AS (
 ), query AS (
     -- Any term of the question matches (OR), ranked by how many and how close; the question's language
     -- isn't known here, so every configuration of the domain is searched.
-    SELECT {query} AS q
+    SELECT {QUERY} AS q
 ), fts AS (
     SELECT c.id, row_number() OVER (ORDER BY ts_rank_cd(c.tsv, query.q) DESC, c.id) AS rank
     FROM chunks c JOIN documents d ON d.id = c.document_id, query
@@ -53,7 +51,18 @@ ORDER BY f.score DESC, c.id
 """
 
 
-class TextSearchConfigError(RuntimeError):
+def _or_query(configs: Iterable[str]) -> tuple[str, dict[str, str]]:
+    """The question's terms OR-ed in every configuration, as SQL with one bound parameter per configuration
+    (never a name in the SQL text), and those parameters."""
+    params = {f"config_{n}": config for n, config in enumerate(dict.fromkeys(configs))}
+    sql = "\n        || ".join(
+        f"replace(plainto_tsquery(CAST(:{name} AS regconfig), :text)::text, '&', '|')::tsquery"
+        for name in params
+    )
+    return sql, params
+
+
+class TextSearchConfigError(ConfigError):
     """A text search configuration the domain names is missing from Postgres."""
 
 
@@ -88,10 +97,8 @@ class PgVectorStore:
         self.db = db
         self.rrf_k = rrf_k
         self.min_similarity = min_similarity
-        configs = list(dict.fromkeys(text_search.values()))
-        self._configs = {f"config_{n}": config for n, config in enumerate(configs)}
-        query = "\n        || ".join(QUERY_IN_CONFIG.format(n=n) for n in range(len(configs)))
-        self._search = text(HYBRID_SEARCH.format(query=query))
+        query, self._configs = _or_query(text_search.values())
+        self._search = text(HYBRID_SEARCH.replace("{QUERY}", query))
 
     async def active_corpus(self) -> ActiveCorpus | None:
         async with self.db.engine.connect() as conn:
@@ -130,7 +137,7 @@ class PgCorpusStore:
     def __init__(self, db: Database, text_search: Mapping[str, str]) -> None:
         """`text_search`: the domain's languages, each with its Postgres text search configuration."""
         self.db = db
-        self.text_search = dict(text_search)
+        self.text_search = text_search
 
     @asynccontextmanager
     async def lock(self) -> AsyncIterator[bool]:

@@ -15,7 +15,7 @@ from rag_core.adapters.factory import ConfigError
 from rag_core.domain import DomainError
 from rag_core.models_config import config_version, load_models
 
-from tests.conftest import api_settings, copy_domain
+from tests.conftest import DomainFactory, api_settings
 from tests.fakes.turnstile import PASS_SECRET
 
 
@@ -42,7 +42,7 @@ def _start(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
 def test_loads_the_domain_chosen_by_domain(database_url: str) -> None:
     app = create_app(api_settings(database_url))
     assert app.state.domain.name == "zorzo"
-    assert app.state.domain.language_codes == ("en", "pt")
+    assert tuple(app.state.domain.languages) == ("en", "pt")
 
 
 def test_refuses_a_missing_domain(database_url: str) -> None:
@@ -76,14 +76,16 @@ def test_stops_on_an_invalid_domain_config(database_url: str, tmp_path: Path) ->
     assert "invalid domain config" in result.stderr
 
 
-def test_stops_on_a_text_search_configuration_postgres_lacks(database_url: str, tmp_path: Path) -> None:
+def test_stops_on_a_text_search_configuration_postgres_lacks(
+    database_url: str, make_domain: DomainFactory
+) -> None:
     # F01-T14 AC3: the full-text search of that language would fail on every question.
-    domains = copy_domain(
-        tmp_path,
+    name = make_domain(
         "klingon",
-        "name: klingon\nlanguages: {en: english, es: klingon}\ndocument_kinds: [manual]\n",
+        {"domain.yaml": "name: klingon\nlanguages: {en: english, es: klingon}\ndocument_kinds: [manual]\n"},
+        from_sample=True,
     )
-    result = _start({"DATABASE_URL": database_url, "DOMAIN": "klingon", "PYTHONPATH": str(domains)})
+    result = _start({"DATABASE_URL": database_url, "DOMAIN": name, "PYTHONPATH": str(make_domain.folder)})
     assert result.returncode != 0
     assert "klingon" in result.stderr
 
