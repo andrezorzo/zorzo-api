@@ -23,6 +23,7 @@ from rag_core.services.verification import (
     CheckedClaim,
     Verdicts,
     apply_verdicts,
+    as_data,
     cite,
     coherent,
     draft_text,
@@ -108,9 +109,7 @@ async def retrieve_step(state: AgentState, runtime: AgentRuntime) -> dict[str, A
 
 async def assess_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any]:
     ctx = runtime.context
-    prompt = messages(
-        ctx.prompts.assess, state["query"], question=state["query"], passages=passages_text(state["passages"])
-    )
+    prompt = messages(ctx.prompts.assess, state["query"], passages=passages_text(state["passages"]))
     with stage(ctx.sink, "assess"):
         result = await ctx.call("assess", "route", prompt, AssessResult, ctx.before_answer)
     if result is None:
@@ -121,7 +120,7 @@ async def assess_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any
 
 async def reformulate_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any]:
     ctx = runtime.context
-    prompt = messages(ctx.prompts.reformulate, state["query"], question=state["query"])
+    prompt = messages(ctx.prompts.reformulate, state["query"])
     with stage(ctx.sink, "reformulate"):
         result = await ctx.call("reformulate", "route", prompt, ReformulateResult, ctx.before_answer)
     if result is None:
@@ -187,7 +186,7 @@ async def verify_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any
         cited = cite(answer, state["passages"])
         verdicts: Verdicts | None = None
         if any(c.passages for c in cited):  # claims without a valid citation get no vote
-            prompt = messages(ctx.prompts.judge, state["query"], claims=judge_input(cited))
+            prompt = messages(ctx.prompts.judge, judge_input(cited))
             verdicts = cast(Verdicts | None, await ctx.call("verify", "judge", prompt, Verdicts))
             if verdicts is None:
                 return {"outcome": "abstained"}  # verification is never skipped
@@ -208,9 +207,14 @@ def _send_claims(claims: Sequence[CheckedClaim], ctx: AgentContext) -> None:
 
 async def repair_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any]:
     ctx = runtime.context
-    verdicts = "\n".join(f"- {c.text} ({c.verdict})" for c in state["claims"] if c.verdict != "gap")
+    checked = "\n".join(
+        f'<claim verdict="{c.verdict}">{as_data(c.text)}</claim>'
+        for c in state["claims"]
+        if c.verdict != "gap"
+    )
     answer_prompt = _answer_messages(state, ctx)[0]["content"]
-    prompt = messages(ctx.prompts.repair, state["query"], answer_prompt=answer_prompt, verdicts=verdicts)
+    user = f"{state['query']}\n\n<checked_claims>\n{checked}\n</checked_claims>"
+    prompt = messages(ctx.prompts.repair, user, answer_prompt=answer_prompt)
     with stage(ctx.sink, "repair"):
         answer = cast(AnswerContract | None, await ctx.call("repair", "answer", prompt, AnswerContract))
     if answer is None:

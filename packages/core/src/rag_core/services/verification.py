@@ -96,14 +96,21 @@ def cite(answer: AnswerContract, passages: Sequence[SearchHit]) -> list[CitedCla
 
 
 def judge_input(claims: Sequence[CitedClaim]) -> str:
-    """The judge's claims, numbered, each with only its cited passages (claims without any are left out)."""
+    """The judge's claims, numbered, each with only its cited passages (claims without any are left out).
+
+    A claim is model text the visitor may have steered, so it can't close its own element."""
     blocks = []
     for i, claim in enumerate(claims):
         if not claim.passages:
             continue
         passages = "\n".join(f"<passage>{hit.content}</passage>" for hit in claim.passages)
-        blocks.append(f"Claim {i}: {claim.text}\nCited passages:\n{passages}")
+        blocks.append(f'<claim i="{i}">{as_data(claim.text)}</claim>\nCited passages:\n{passages}')
     return "\n\n".join(blocks)
+
+
+def as_data(text: str) -> str:
+    """Text placed inside a prompt element, unable to open or close one."""
+    return text.replace("<", "&lt;").replace(">", "&gt;")
 
 
 def apply_verdicts(
