@@ -12,7 +12,7 @@ from django.db.models import Q
 from django.db.models.functions import Now
 from pgvector.django import HnswIndex, VectorField
 
-OUTCOMES = ("answered", "abstained", "declined", "blocked", "degraded", "cached")
+OUTCOMES = ("answered", "abstained", "declined", "blocked", "degraded", "cached", "error")
 # Every candidate embedding model has 1024 dimensions (LLD "Open questions"), so a model change is a
 # re-ingest, not a migration.
 EMBEDDING_DIM = 1024
