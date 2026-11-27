@@ -146,12 +146,75 @@ def test_a_configured_secret_written_as_html_entities_is_found() -> None:
         "https://zorzo.dev.br/blog/building-a-rag-pipeline-in-2026-part-2",
         "see https://zorzo.dev.br/blog/building-a-rag-pipeline-in-2026-part-2, then",
         "building-a-rag-pipeline-in-2026-part-2-with-citations",  # a slug on its own
-        "550e8400-e29b-41d4-a716-446655440000",  # a canonical UUID
-        "trace 550E8400-E29B-41D4-A716-446655440000 ended",
     ],
 )
-def test_a_url_slug_or_uuid_is_not_a_key(text: str) -> None:
+def test_a_url_or_slug_is_not_a_key(text: str) -> None:
     assert REDACTOR.text(text) == text
+
+
+def test_a_uuid_format_key_is_redacted() -> None:
+    # Nothing configures it, and a UUID is as good a key as any other: only words and URLs are spared.
+    assert REDACTOR.text("trace 550e8400-e29b-41d4-a716-446655440000 ended") == "trace [secret] ended"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://hooks.example.com/services/T0123/B4567/a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+        "https://api.example.com/v1/items?id=7&api_key=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4&lang=en",
+    ],
+)
+def test_a_key_in_a_url_path_or_query_is_found(url: str) -> None:
+    redacted = REDACTOR.text(f"call {url} now")
+    assert "a1b2c3d4e5f6" not in redacted and redacted.startswith("call https://") and "[secret]" in redacted
+
+
+@pytest.mark.parametrize(
+    ("secret", "text"),
+    [
+        (
+            "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw",
+            "bot 123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw ok",
+        ),
+        ("S3cret!11987654321", "pass S3cret!11987654321 ok"),
+        ("mypass-sk-abcdefgh12", "pass mypass-sk-abcdefgh12 ok"),
+        ("Zx9!joao@mail.com", "pass Zx9!joao@mail.com ok"),
+        ("Senha²º!forte", "pass Senha²º!forte ok"),  # NFKC reads it as `Senha2o!forte`
+    ],
+)
+def test_a_configured_secret_is_replaced_whole_even_when_it_holds_other_matches(
+    secret: str, text: str
+) -> None:
+    redacted = Redactor(secrets=[secret]).text(text)
+    assert redacted == text.replace(secret, "[secret]")
+
+
+def test_the_telegram_bot_token_is_found_without_being_configured() -> None:
+    assert REDACTOR.text("bot 123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw ok") == "bot [secret] ok"
+
+
+def test_an_allowlisted_address_with_a_compatibility_character_passes() -> None:
+    redactor = Redactor(allowlist=["contatoº@zorzo.dev.br"])
+    assert redactor.text("write to contatoº@zorzo.dev.br or joao@gmail.com") == (
+        "write to contatoo@zorzo.dev.br or [email]"  # the canonical (NFKC) form
+    )
+
+
+def test_an_allowlisted_address_is_cut_where_a_secret_lies_in_it() -> None:
+    redactor = Redactor(allowlist=["contatoº@zorzo.dev.br"], secrets=["zorzo"])
+    assert redactor.text("contatoº@zorzo.dev.br") == "contatoo@[secret].dev.br"
+
+
+def test_a_long_secret_is_found_in_any_case() -> None:
+    canary = "Canary-0123456789-abcdefghijKLMNOPQR"  # 32 characters or more
+    assert Redactor(secrets=[canary]).text(f"say {canary.upper()} and {canary.lower()}") == (
+        "say [secret] and [secret]"
+    )
+    assert Redactor(secrets=["Short-Secret"]).text("short-secret") == "short-secret"  # case matters below it
+
+
+def test_entities_are_decoded_in_the_stored_text() -> None:
+    assert REDACTOR.text("Tom &amp; Jerry") == "Tom & Jerry"
 
 
 def test_a_short_secret_inside_a_longer_token_leaves_none_of_it() -> None:
@@ -165,4 +228,5 @@ def test_a_short_numeric_secret_inside_a_phone_number_leaves_none_of_it() -> Non
 
 
 def test_fullwidth_characters_do_not_hide_an_email() -> None:
-    assert REDACTOR.text("joao.silva\uff20gmail.com")  # a fullwidth at sign == "[email]"
+    fullwidth_at_sign = "\uff20"
+    assert REDACTOR.text(f"joao.silva{fullwidth_at_sign}gmail.com") == "[email]"

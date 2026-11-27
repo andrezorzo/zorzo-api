@@ -53,8 +53,8 @@ CARD = re.compile(r"\b(?:\d[ -]?){12,18}\d\b")
 
 # What `scrub` puts in the place of a match.
 EMAIL_MARK, PHONE_MARK, CPF_MARK, CARD_MARK = "[email]", "[phone]", "[cpf]", "[card]"
-# What can hide a match from the plain text: an entity, a wrapped line, markup, zero-width characters.
-HIDING_FORMS = re.compile(r"[&<\n\r*_`\\\u200b-\u200d\u2060\ufeff]")
+# Between the characters of a phone as written: spaces, a wrapped line, emphasis and code marks, a tag.
+PHONE_GLUE = r"(?:[\s*_`\\]|<[^<>\n]{0,200}>)*"
 
 
 def _cpf_valid(value: str) -> bool:
@@ -227,32 +227,29 @@ def personal_data(text: str, allowlist: Iterable[str] | Allowed = ()) -> list[st
     return rules
 
 
-def scrub(text: str, ok: Allowed) -> str:
-    """The text with every email, phone, CPF and card number the rules of `personal_data` find replaced by
-    its placeholder; allowlisted ones stay.
+def spans(text: str, ok: Allowed) -> list[tuple[int, int, str]]:
+    """Where the text holds an email, phone, CPF or card number the rules of `personal_data` find, as
+    `(start, end, placeholder)`; allowlisted ones are left out. Nothing is rewritten: the caller merges these
+    with other detectors' spans (`rag_core.services.redact`).
 
-    A match hidden from the plain text (an HTML entity, a line wrapped inside a phone) is replaced in the
-    text as the page renders it, which then replaces the original, so nothing the detectors find survives.
-    Only a text with a form that can hide a match gets that second look.
+    The text should already be as a page renders it (entities decoded, hidden characters gone).
     """
-    cleaned = _scrub_plain(text.replace("\r\n", "\n"), ok)
-    if HIDING_FORMS.search(cleaned) and personal_data(cleaned, ok):
-        cleaned = _scrub_plain(_prepare_for_phones(html.unescape(cleaned)), ok)
-    return cleaned
+    found = [
+        (m.start(), m.end(), EMAIL_MARK)
+        for m in EMAIL_CHAIN.finditer(text)
+        if any(_same_spaces(e) not in ok.strings for e in _emails(m.group()))
+    ]
+    found += [(m.start(), m.end(), CPF_MARK) for m in CPF.finditer(text) if _cpf_valid(m.group())]
+    found += [(m.start(), m.end(), CARD_MARK) for m in CARD.finditer(text) if _luhn(m.group())]
+    for raw in _unlisted_phones(text, ok):
+        located = [(m.start(), m.end(), PHONE_MARK) for m in _phone_in_text(raw).finditer(text)]
+        # The matcher read the phone in the text as it prepares it (markup gone, a wrapped line joined). One
+        # it can't find again as written is hidden too well to cut out: the whole text goes, failing closed.
+        found += located or [(0, len(text), PHONE_MARK)]
+    return found
 
 
-def _scrub_plain(text: str, ok: Allowed) -> str:
-    text = EMAIL_CHAIN.sub(lambda m: _email_mark(m.group(), ok), text)
-    text = CPF.sub(lambda m: CPF_MARK if _cpf_valid(m.group()) else m.group(), text)
-    text = CARD.sub(lambda m: CARD_MARK if _luhn(m.group()) else m.group(), text)
-    # Longest first, so a phone isn't half replaced through a shorter one inside it.
-    for raw in sorted(_unlisted_phones(text, ok), key=len, reverse=True):
-        text = text.replace(raw, PHONE_MARK)
-    return text
-
-
-def _email_mark(chain: str, ok: Allowed) -> str:
-    """The placeholder for a chain of `@`s that holds an address the allowlist doesn't cover; else itself."""
-    if any(_same_spaces(e) not in ok.strings for e in _emails(chain)):
-        return EMAIL_MARK
-    return chain
+def _phone_in_text(raw: str) -> re.Pattern[str]:
+    """The phone as the matcher read it, found again in the text as written: its characters with whitespace,
+    markup and tags allowed between them."""
+    return re.compile(PHONE_GLUE.join(re.escape(c) for c in raw if not c.isspace()))

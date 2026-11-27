@@ -109,10 +109,12 @@ class RunSink:
         last = root  # the latest step's run, where the passages found belong
         claims: list[str] = []
         outcome = "error"  # a request that never reached `done`
-        ended_at = self._events[-1][0] if self._events else datetime.now(UTC)
+        ended_at = datetime.now(UTC)  # a request that never reached `done` ends when the sink finishes
         for at, event in self._events:
             if isinstance(event, Stage):
                 if event.status == "start":
+                    if event.name in open_steps:  # started again with no end in between: the first was cut
+                        self._cut(open_steps[event.name], at)
                     last = open_steps[event.name] = root.create_child(
                         name=event.name, run_type="chain", inputs={}, start_time=at
                     )
@@ -131,8 +133,7 @@ class RunSink:
                 outcome = event.stored_outcome
                 ended_at = at
         for step in open_steps.values():  # a step cut by the deadline or a failure never sent its end
-            step.end(error="cut: the step never ended", end_time=ended_at)
-            step.patch()
+            self._cut(step, ended_at)
         root.end(
             outputs=self._redactor.walk({"outcome": outcome, "claims": claims}),
             metadata=self._redactor.walk(
@@ -146,6 +147,10 @@ class RunSink:
             end_time=ended_at,
         )
         root.patch()
+
+    def _cut(self, step: RunTree, at: datetime) -> None:
+        step.end(error="cut: the step never ended", end_time=at)
+        step.patch()
 
     def _model(self, parent: RunTree, event: Model, at: datetime) -> None:
         run = parent.create_child(

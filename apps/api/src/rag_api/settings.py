@@ -1,12 +1,13 @@
 """API settings, validated at startup (LLD "Configuration")."""
 
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from rag_core.settings import AppSettings
 
 PUBLISHED_LOCAL_SEED = "local-salt-seed-change-me-0123456789"  # infra/.env.example, apps/api/AGENTS.md
+PUBLISHED_LOCAL_DB_PASSWORD = "zorzo"  # POSTGRES_PASSWORD in infra/.env.example
 
 
 class ApiSettings(AppSettings):
@@ -79,11 +80,16 @@ class ApiSettings(AppSettings):
             self.telegram_chat_id,
             self.langsmith_api_key,
         ]
-        values = [s.get_secret_value() for s in secrets if s is not None]
-        password = urlsplit(
-            self.database_url
-        ).password  # percent-encoded in the URL, as the database knows it
-        return [*values, *([password, unquote(password)] if password else [])]
+        return [*(s.get_secret_value() for s in secrets if s is not None), *self._database_passwords()]
+
+    def _database_passwords(self) -> list[str]:
+        """The database password as `DATABASE_URL` writes it (percent-encoded) and as the database knows it,
+        from the user info and from a `?password=` in the query."""
+        parts = urlsplit(self.database_url)
+        written = [parts.password] if parts.password else []
+        written += [pair.partition("=")[2] for pair in parts.query.split("&") if pair.startswith("password=")]
+        known = [unquote(w) for w in written] + parse_qs(parts.query).get("password", [])
+        return [p for p in dict.fromkeys([*written, *known]) if p]
 
     @model_validator(mode="after")
     def _real_secrets_in_production(self) -> "ApiSettings":
@@ -95,6 +101,11 @@ class ApiSettings(AppSettings):
         # The published local seed would let anyone with the repository reverse the hashed IPs.
         if self.salt_seed.get_secret_value().strip() == PUBLISHED_LOCAL_SEED:
             raise ValueError("SALT_SEED is the published local example; production needs its own secret")
+        # The compose file's database password, published in the repository, is no password in production.
+        if PUBLISHED_LOCAL_DB_PASSWORD in self._database_passwords():
+            raise ValueError(
+                "DATABASE_URL has the published local database password; production needs its own"
+            )
         if not (self.telegram_bot_token and self.telegram_chat_id):
             raise ValueError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required in production (alerts)")
         return self
