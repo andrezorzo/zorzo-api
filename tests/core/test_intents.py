@@ -63,20 +63,31 @@ def test_bad_intents_stop_the_app(make_domain: DomainFactory, name: str, yaml_te
 
 
 def test_the_route_prompt_lists_the_domains_intents(make_domain: DomainFactory) -> None:
-    name = make_domain("listed", prompt_files("Classify.\n$intents\nThe question is $question.\n"))
+    name = make_domain("listed", prompt_files("Classify.\n$intents\nReturn JSON.\n"))
     intents = {
         "invoices": Intent(description="Questions about invoices."),
         "other": Intent(description="Anything else."),
     }
     route = load_prompts(name, intents).route
     assert route == (
-        "Classify.\n- `invoices`: Questions about invoices.\n- `other`: Anything else.\n"
-        "The question is $question.\n"  # the nodes' own slots are left for them
+        "Classify.\n- `invoices`: Questions about invoices.\n- `other`: Anything else.\nReturn JSON.\n"
     )
 
 
-def test_a_route_prompt_without_the_intents_slot_stops_the_app(make_domain: DomainFactory) -> None:
-    name = make_domain("unslotted", prompt_files("Classify into: a, b.\n"))
+@pytest.mark.parametrize(
+    ("name", "route"),
+    [
+        ("unslotted", "Classify into: a, b.\n"),  # the intents would never reach the model
+        (
+            "overslotted",
+            "Classify.\n$intents\nThe question is $question.\n",
+        ),  # sent as `$question`, literally
+    ],
+)
+def test_a_route_prompt_without_exactly_the_intents_slot_stops_the_app(
+    make_domain: DomainFactory, name: str, route: str
+) -> None:
+    make_domain(name, prompt_files(route))
     with pytest.raises(DomainError, match="intents"):
         load_prompts(name, {"a": Intent(description="A.")})
 

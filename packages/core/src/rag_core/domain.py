@@ -8,10 +8,11 @@ from collections.abc import Collection, Mapping
 from importlib.resources import files
 from pathlib import Path
 from string import Template
+from types import MappingProxyType
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class DomainError(RuntimeError):
@@ -23,10 +24,15 @@ class DomainConfig(BaseModel):
 
     name: str
     # ISO 639-1 code → the Postgres text search configuration of that language; the first is the default.
-    languages: dict[str, str] = Field(min_length=1)
+    languages: Mapping[str, str] = Field(min_length=1)
     document_kinds: tuple[str, ...] = Field(min_length=1)  # the `kind`s a corpus document may have
     # Exact strings the PII pass lets through, e.g. the owner's public email (LLD "6.1 Corpus version").
     pii_allowlist: tuple[str, ...] = ()
+
+    @field_validator("languages")
+    @classmethod
+    def _read_only(cls, languages: Mapping[str, str]) -> Mapping[str, str]:
+        return MappingProxyType(dict(languages))  # the model is frozen; so is this mapping
 
 
 class Example(BaseModel):
@@ -127,13 +133,14 @@ def _intent_list(intents: Mapping[str, Intent]) -> str:
 
 def load_prompts(name: str, intents: Mapping[str, Intent]) -> Prompts:
     """The prompt templates, with the `route` prompt's `$intents` filled from `intents.yaml` once, so the
-    prompt never names an intent; the other `$slot`s are left for the nodes."""
+    prompt never names an intent. `route.md` has no other slot: it is sent as rendered here. The other
+    prompts keep their `$slot`s for the nodes."""
     try:
         folder = files(_package(name)).joinpath("prompts")
         texts = {field: folder.joinpath(f"{field}.md").read_text() for field in Prompts.model_fields}
         route = Template(texts["route"])
-        if "intents" not in route.get_identifiers():
-            raise ValueError("route.md has no $intents slot for the domain's intents")
+        if route.get_identifiers() != ["intents"]:
+            raise ValueError(f"route.md must have exactly one slot, $intents (has {route.get_identifiers()})")
         texts["route"] = route.safe_substitute(intents=_intent_list(intents))
         return Prompts(**texts)
     except Exception as exc:

@@ -67,14 +67,15 @@ class TextSearchConfigError(ConfigError):
 
 
 async def check_text_search(db: Database, configs: Collection[str]) -> None:
-    """Raises `TextSearchConfigError` naming each configuration Postgres doesn't have (`pg_ts_config`)."""
+    """Raises `TextSearchConfigError` naming each configuration Postgres doesn't have. `to_regconfig` resolves
+    a name as the queries' `CAST(… AS regconfig)` does (case folding, schema, `search_path`)."""
     async with db.engine.connect() as conn:
-        present = set(
+        missing = sorted(
             await conn.scalars(
-                text("SELECT cfgname FROM pg_ts_config WHERE cfgname = ANY(:names)"), {"names": list(configs)}
+                text("SELECT name FROM unnest(CAST(:names AS text[])) name WHERE to_regconfig(name) IS NULL"),
+                {"names": sorted(set(configs))},
             )
         )
-    missing = sorted(set(configs) - present)
     if missing:
         raise TextSearchConfigError(f"Postgres has no text search configuration {missing}")
 

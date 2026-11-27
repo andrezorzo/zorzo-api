@@ -5,7 +5,13 @@ from collections.abc import AsyncIterator
 
 import psycopg
 import pytest
-from rag_core.adapters.pgvector_store import PgCorpusStore, PgVectorStore, to_vector
+from rag_core.adapters.pgvector_store import (
+    PgCorpusStore,
+    PgVectorStore,
+    TextSearchConfigError,
+    check_text_search,
+    to_vector,
+)
 from rag_core.adapters.postgres import Database
 from rag_core.domain import load_domain
 from rag_core.ports import EMBEDDING_DIM, ChunkRow, DocumentRow
@@ -122,3 +128,14 @@ async def test_full_text_uses_the_domains_configurations(store: tuple[PgVectorSt
     # the chunk was indexed with `spanish`, and the query is searched in it.
     assert [h.title for h in await other.search(unit((0, 1)), "árbol", k=20, version=version)] == ["Guía"]
     assert await zorzo.search(unit((0, 1)), "árbol", k=20, version=version) == []
+
+
+async def test_configurations_are_checked_as_the_queries_resolve_them(
+    store: tuple[PgVectorStore, str],
+) -> None:
+    vs, _ = store
+    await check_text_search(
+        vs.db, ["English", "pg_catalog.portuguese"]
+    )  # what `CAST(… AS regconfig)` accepts
+    with pytest.raises(TextSearchConfigError, match="klingon"):
+        await check_text_search(vs.db, ["english", "klingon"])
