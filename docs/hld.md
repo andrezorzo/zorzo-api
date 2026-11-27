@@ -79,7 +79,7 @@ Features that weigh most on the design:
 
 | Priority | Attribute | Criterion |
 | --- | --- | --- |
-| 1 | Groundedness | Faithfulness ≥ 0.90 on the public eval set; every answer cites its sources; questions outside the corpus get "not in my sources" (abstention-rate target on the unanswerable set: TBD after the first baseline) |
+| 1 | Groundedness | Faithfulness ≥ 0.90 on the public eval set; every answer cites its sources; questions outside the corpus get "not in my sources" (abstention rate ≥ 0.90 on the unanswerable set, PRD F01) |
 | 2 | Cost control | Recurring cost < US$10/month; daily model spend never exceeds the daily cap (when the cap is reached, the next request is already served in degraded mode) |
 | 3 | Security | Zero canary or system-prompt leaks on the adversarial eval set; scripted traffic can't push spend past the cap |
 | 4 | Resilience | With the main provider failing (429, timeout), the visitor still gets an answer from another provider, or search results with a notice |
@@ -493,7 +493,6 @@ CloudFront; LangSmith is optional. What local doesn't reproduce:
 
 ## 12. Open questions
 
-- [ ] Abstention-rate target on the unanswerable set: set after the first baseline (M3).
 - [ ] Uptime target: TBD.
 - [ ] Does SSE pass through CloudFront event by event? Test with a fake slow stream at M1.
 - [ ] Does the CloudFront Free flat-rate plan include WebSocket (SSE fallback)?
