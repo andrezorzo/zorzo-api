@@ -4,26 +4,41 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('data', '0004_domain_kinds_and_languages'),
+        ("data", "0004_domain_kinds_and_languages"),
     ]
 
     operations = [
         migrations.RemoveConstraint(
-            model_name='publictrace',
-            name='public_traces_outcome_check',
+            model_name="publictrace",
+            name="public_traces_outcome_check",
         ),
         migrations.RemoveConstraint(
-            model_name='questionlog',
-            name='questions_log_outcome_check',
+            model_name="questionlog",
+            name="questions_log_outcome_check",
         ),
         migrations.AddConstraint(
-            model_name='publictrace',
-            constraint=models.CheckConstraint(condition=models.Q(('outcome__in', ('answered', 'abstained', 'declined', 'blocked', 'degraded', 'cached', 'error'))), name='public_traces_outcome_check'),
+            model_name="publictrace",
+            constraint=models.CheckConstraint(
+                condition=models.Q(
+                    (
+                        "outcome__in",
+                        ("answered", "abstained", "declined", "blocked", "degraded", "cached", "error"),
+                    )
+                ),
+                name="public_traces_outcome_check",
+            ),
         ),
         migrations.AddConstraint(
-            model_name='questionlog',
-            constraint=models.CheckConstraint(condition=models.Q(('outcome__in', ('answered', 'abstained', 'declined', 'blocked', 'degraded', 'cached', 'error'))), name='questions_log_outcome_check'),
+            model_name="questionlog",
+            constraint=models.CheckConstraint(
+                condition=models.Q(
+                    (
+                        "outcome__in",
+                        ("answered", "abstained", "declined", "blocked", "degraded", "cached", "error"),
+                    )
+                ),
+                name="questions_log_outcome_check",
+            ),
         ),
     ]
