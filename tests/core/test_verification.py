@@ -1,5 +1,5 @@
-"""F01-T06 AC3, AC4: reading the answer's JSON (whole and as it streams) and keeping model text inside the
-prompt elements it is placed in."""
+"""F01-T06 AC3, AC4: reading the answer's JSON, whole and as it streams (only the answer's object becomes the
+draft), and claims reaching the judge as JSON strings."""
 
 import json
 
@@ -55,8 +55,22 @@ def test_a_steered_claim_reaches_the_judge_as_one_json_string() -> None:
     assert data == {"claims": [{"i": 0, "claim": steered, "cited_passages": ["On AWS he has used Lambda."]}]}
 
 
-def test_an_example_object_never_streams_as_the_draft() -> None:
-    example = 'Format: {"claims": [{"text": "<claim text>", "sources": [1]}]}\n```json\n'
-    streamed = example + ANSWER
-    drafts = {draft_text(streamed[:n]) for n in range(len(streamed) + 1)}
+@pytest.mark.parametrize(
+    "example",
+    [
+        '{"claims": [{"text": "<claim text>", "sources": [1]}]}',  # an example without the other keys
+        # answer.md's own format line: not JSON (`<passage numbers>`), with every key
+        '{"answer_lang": "<code>", "claims": [{"text": "<one sentence>", "sources": [<passage numbers>]}], '
+        '"gap": null, "abstained": false}',
+    ],
+)
+def test_once_the_answer_streams_an_example_before_it_is_passed_over(example: str) -> None:
+    streamed = f"Format: {example}\n```json\n{ANSWER}"
+    answer_start = streamed.index('{"answer_lang": "en"')
+    drafts = {draft_text(streamed[:n]) for n in range(answer_start + 1, len(streamed) + 1)}
     assert all(TEXT.startswith(d) for d in drafts)  # only ever a prefix of the real claim
+
+
+def test_claims_before_the_language_still_stream() -> None:
+    reordered = '{"claims": [{"text": "He used Lambda.", "sources": [1]}], "answer_lang": "en"'
+    assert draft_text(reordered[: reordered.index("Lambda") + len("Lambda")]) == "He used Lambda"

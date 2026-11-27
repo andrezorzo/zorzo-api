@@ -24,8 +24,6 @@ _STRICT = ConfigDict(extra="forbid", frozen=True)
 # Where the answer's JSON may start: any brace opening a key, tried in order (a fence or a sentence before it,
 # or an example object, is passed over until one parses as the answer).
 _JSON_START = re.compile(r'\{\s*"')
-# The contract's first key: an unfinished object counts as the answer only once it holds it.
-ANSWER_KEY = "answer_lang"
 _DECODER = json.JSONDecoder(strict=False)  # a raw newline inside a string is read, as the draft reads it
 
 
@@ -102,17 +100,20 @@ def _contract(parsed: Any) -> AnswerContract | None:
 
 
 def draft_text(streamed: str) -> str:
-    """The claims' text so far, read from the answer's JSON as it grows; never JSON or passage numbers."""
+    """The claims' text so far, read from the answer's JSON as it grows; never JSON or passage numbers.
+
+    The answer is the last object holding a `claims` list (a whole one must validate), so a format example
+    or an unreadable object before it is passed over. A known limit: an example still streaming before the
+    answer starts shows as the draft until the answer arrives; the checked claims replace the draft anyway.
+    """
+    draft = ""
     for parsed, complete in _decoded(streamed, allow_unfinished=True):
-        if not isinstance(parsed, dict) or (
-            _contract(parsed) is None if complete else ANSWER_KEY not in parsed
-        ):
-            continue  # an object that isn't the answer (an example, a claim inside it)
-        claims = parsed.get("claims")
-        if isinstance(claims, list):
-            texts = [c["text"] for c in claims if isinstance(c, dict) and isinstance(c.get("text"), str)]
-            return " ".join(t for t in texts if t)
-    return ""
+        claims = parsed.get("claims") if isinstance(parsed, dict) else None
+        if not isinstance(claims, list) or (complete and _contract(parsed) is None):
+            continue  # not the answer: a claim inside it, an example, a malformed object
+        texts = [c["text"] for c in claims if isinstance(c, dict) and isinstance(c.get("text"), str)]
+        draft = " ".join(t for t in texts if t)
+    return draft
 
 
 def cite(answer: AnswerContract, passages: Sequence[SearchHit]) -> list[CitedClaim]:
