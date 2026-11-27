@@ -67,7 +67,7 @@ means adding `domains/<other>/`, not changing `core`.
 | SSE | sse-starlette | Heartbeat, client disconnect and SSE framing built in |
 | Agent | LangGraph (pinned to an exact version, 1.2.21) + langchain-core, LangChain 1.0+ | HLD constraint; 1.0 is the LTS line; bounded graph (ADR 0006); services reach the nodes through LangGraph's `Runtime` context; only `rag_core.agent` imports `langgraph` |
 | Model clients | LiteLLM SDK `Router`, one model group per chain entry (the paid one too), pinned to an exact version | A maintained library for the calls, timeouts and cooldowns; no proxy server (ADR 0016) |
-| Conversation state | langgraph-checkpoint-postgres | State in Postgres, not process memory (ADR 0001) |
+| Conversation state | langgraph-checkpoint-postgres `AsyncPostgresSaver` (pinned to an exact version) over a psycopg pool opened by the Postgres adapter, with LangGraph's serializer limited to plain types | State in Postgres, not process memory (ADR 0001); only the conversation is stored (section 6.3); a stored value never names a class to rebuild |
 | Database access (API, ingest) | psycopg 3 + SQLAlchemy Core with schema reflection, no ORM | Django owns the schema; no second copy of the columns |
 | Dashboard | Django 5.2 LTS | HLD constraint; LTS keeps security fixes to April 2028 with one jump to the next LTS. Move to 6.2 LTS (April 2027) for native CSP and template partials |
 | Dashboard charts | TBD | Candidates: Chart.js, Apache ECharts, uPlot, Observable Plot, server-rendered SVG |
@@ -342,7 +342,10 @@ Conventions:
 - Deletion is physical, done by the retention job (section 6.11); no soft delete.
 - Django models in the `data` app own the schema. The API and ingest reflect it at startup (SQLAlchemy Core)
   and write SQL against it.
-- The LangGraph checkpointer owns its tables in the `langgraph` schema, outside Django.
+- The LangGraph checkpointer owns its tables in the `langgraph` schema, outside Django: at startup, before
+  serving, the API creates the schema if it is missing and runs the library's own versioned migrations
+  (`setup()`), so the tables are those of the pinned library version. They are neither reflected nor in the
+  Django migrations.
 - Vector and chunk tables are ours, in the Django migrations (ADR 0013).
 - Values a domain defines (document kinds, languages) have no `CHECK`: the database can't know the domain,
   so the writer validates them against it (the ingest for `documents`; the cache and eval writers take
@@ -438,7 +441,7 @@ Payloads: `contracts/sse-v1.schema.json`.
 | `blocked` | Blocked state: the layer and the reason (`category`), shown in the interface language; replaces a draft already shown |
 | `degraded` | Search-only banner |
 | `error` | Bugs only |
-| `done` | `outcome` names the result (`answered`, `abstained`, `declined`, `blocked`, `degraded`, `error`, the stored outcomes' names; `cached` is a separate flag); link to the public trace; on an abstention or decline, `suggestion` is the id of the closest example question (section 6.3); `contact` holds the domain's contact options (section 6.5) |
+| `done` | `outcome` names the result (`answered`, `abstained`, `declined`, `blocked`, `degraded`, `error`, the stored outcomes' names; `cached` is a separate flag); link to the public trace; on an abstention or decline, `suggestion` is the id of the closest example question (section 6.3); `contact` holds the domain's contact options (section 6.5); `notice` names an edge question the front explains in a fixed line (`no_context`, `other_language`, section 6.3), or null |
 | `ping` | None: an SSE comment `: ping`, every `PING_INTERVAL` while nothing else is sent, keeps CloudFront's origin timeout from firing |
 | `graph` | **To detail** (Phase 2) |
 
@@ -576,16 +579,36 @@ States of the day's budget row; the day is UTC, so every visitor sees the same "
   For zorzo, `career_fact` (salary, availability, visa, time zone) reads only `faq`, `off_topic` declines,
   and `contact` sends the contact options. The `route` prompt gets the intent list and descriptions from
   `intents.yaml` (section 3 "Configuration"), so neither the core nor the prompt names an intent.
+  Its user message is JSON: the question and the conversation's history (below).
+- **Conversation:** the graph runs with the LangGraph Postgres checkpointer, its thread keyed by the request's
+  `session`, and stores only the conversation; the steps' own values live for one run and are never stored.
+  The conversation holds the last `HISTORY_TURNS` turns, each the standalone question and the text of its
+  published claims (`supported` and `partial`); the standalone questions of older turns as a summary of at
+  most `HISTORY_SUMMARY_TOKENS`, the oldest dropped first, built with no model call; and the time of the
+  last turn. Only `route` reads it, within `HISTORY_MAX_TOKENS`: over that, the summary goes first, then the
+  oldest turn, then the last turn's claims from the end; its question always stays. The standalone question
+  carries the context to the later steps. A conversation whose last turn is older than `SESSION_TTL` is read
+  as empty, so it starts over even when a client keeps the session id. A turn is remembered once `route`
+  answers (its question) and when its claims are published (their text), both through the shared redactor
+  of the stored trace; a follow-up with no history, a question `route` didn't answer, a question that is
+  search-only from the start and a blocked question (the guard ends the run before `route`) are not
+  remembered. A run cut by the deadline keeps what it had written; two runs of one session at once keep the
+  last one's write.
 - **Edge questions:** a follow-up with no history is an abstention with a fixed message asking what the
-  visitor means; a question in a language the domain doesn't declare is answered in the domain's first
-  language (zorzo: English), with one line naming the languages the site answers in.
+  visitor means (`done.notice: no_context`), with no retrieval and no answer call; a question in a language
+  the domain doesn't declare is answered in the domain's first language (zorzo: English), with one line
+  naming the languages the site answers in (`done.notice: other_language`). The front writes both texts
+  (section 8); when both apply, the notice is `no_context`.
 - **Suggestion:** on an abstention or decline, `done.suggestion` is the id of the domain's example question,
   in the run's answer language, closest to the standalone question (the normalized question when `route`
   didn't answer) by cosine similarity of their Embedder vectors: a local model, no model gateway call. The
   examples are embedded once at startup, and again on first use if that failed; when an embedding fails or
   the request's deadline has passed, `suggestion` is null. A block, an answer and search-only carry none.
 - **Length:** answers aim at `ANSWER_WORDS_DEFAULT` words, and up to `ANSWER_WORDS_MAX` when the visitor asks
-  for more detail; beyond that the answer suggests opening the sources.
+  for more detail. The `answer` prompt gets both numbers (`$words_default`, `$words_max`, required slots,
+  like `$language` and `$passages`: a prompt without one stops the API), and the model reads a request for
+  detail from the standalone question, which keeps it; nothing cuts a verified answer afterwards. The `answer` stage's `max_tokens` leaves room for
+  `ANSWER_WORDS_MAX` words in either language plus the contract's JSON.
 - **Limits per request:** the graph's fixed path bounds its model calls: `route`, `assess`, `reformulate`
   (at most `MAX_REFORMULATE`), `answer` (plus the gateway's one schema retry, section 6.4), the judge,
   `repair` (at most `MAX_REPAIR`) and a second judge. The tool step (section 6.5) has its own bounds:
@@ -646,8 +669,8 @@ States of the day's budget row; the day is UTC, so every visitor sees the same "
   removed), then the `gap` sentence as a last `claim` with no sources and verdict `gap`. After a repair only
   the repaired answer's claims are sent.
 - **Untrusted text in a prompt** (guard layer `L3`): the instructions (system message) hold only the
-  domain's prompt, the canary line and the corpus passages; the question, and the claims the judge and the
-  repair read, go in the user message, the claims as JSON strings, so model or visitor text can't pose as
+  domain's prompt, the canary line and the corpus passages; the question, the conversation `route` reads, and the claims the
+  judge and the repair read, go in the user message, the claims as JSON strings, so model or visitor text can't pose as
   structure or instructions. Each passage goes inside a `<passage n title authority>` tag: the title is
   escaped as an attribute, and any `<passage` or `</passage` in the text is broken (a space after the `<`),
   so a passage can't close its tag or open another. The prompts say the tagged text is data.
@@ -801,7 +824,7 @@ The nightly retention task deletes:
 - `answer_cache` after `CACHE_TTL`;
 - `rate_buckets` rows not refilled for more than a day (their day or salt has passed);
 - `retired` and `rejected` versions, with their documents and chunks, after `RETENTION_RETIRED_VERSIONS`;
-- LangGraph threads idle longer than `SESSION_TTL`.
+- LangGraph threads idle longer than `SESSION_TTL`, by the time of their latest checkpoint.
 
 Daily salts need no deletion: they are derived from the date (section 3 "Security").
 
@@ -826,8 +849,10 @@ Behavior only; rendering and the 3D brain are in `zorzo-site`'s LLD.
   (query box disabled, with a notice). While offline it checks again every `HEALTH_POLL_INTERVAL` and when
   the tab regains focus, and returns to `online` by itself.
 - **Session:** a UUID created on the first question and kept in `sessionStorage`, so it lasts while the tab is
-  open and survives a reload. A "new conversation" button creates a new UUID; after `SESSION_TTL` idle, the
-  next question creates a new UUID and shows a "new conversation" notice.
+  open and survives a reload. A "new conversation" button creates a new UUID and clears the answer panel;
+  after `SESSION_TTL` idle, counted from the last question sent (kept in `sessionStorage` too), the next
+  question creates a new UUID and shows a "new conversation" notice. The API reads a conversation idle that
+  long as empty anyway (section 6.3).
 - **Free-tier notice:** the answers run mostly on the free tiers of the providers in `config/models.yaml`,
   whose terms may let them train on what they receive, with the capped paid entry when those run out. A line
   under the question box, shown before any question, says the questions may be used to train models and asks
@@ -854,6 +879,8 @@ Behavior only; rendering and the 3D brain are in `zorzo-site`'s LLD.
   | `degraded` | Banner plus up to `DEGRADED_MAX_PASSAGES` passages, each with its source's title and link; with none, "no matching sources for this question", the example questions and the contact options |
   | `done {outcome: abstained}` | The draft is replaced by "not in my sources", with the passages found and the contact link |
   | `done {outcome: declined}` | The decline message |
+  | `done {notice: no_context}` | Instead of "not in my sources": "I don't have earlier context in this conversation — what are you asking about?", with the example questions |
+  | `done {notice: other_language}` | One line above the answer saying the site answers in English and Portuguese |
   | `done` with `suggestion` | The suggested example question, which asks it when clicked, like an example question on the first screen |
   | `done {outcome: answered}` with no `claim` | The `contact` intent's reply: one line inviting the visitor to reach André, then the options of `done.contact` |
   | `done` after an answer, abstention, decline or search-only reply | The contact options of `done.contact`, in their order (LinkedIn, GitHub, email); with the field missing or empty, the link to the page's contact section |
@@ -909,8 +936,8 @@ endpoints and per-environment switches.
 | `CHUNK_TOKENS` / `CHUNK_OVERLAP` | ~400 / 15% | Chunking (an eval variable) | `limits.yaml` |
 | `RELEVANCE_FLOOR` | Off until M3 (calibrated on the eval set) | Abstain threshold | `limits.yaml` (optional) |
 | `ASSESS_SKIP_SCORE` | Off until M3 (calibrated on the eval set) | Skip `assess` | `limits.yaml` (optional) |
-| `HISTORY_TURNS` / `HISTORY_SUMMARY_TOKENS` / `HISTORY_MAX_TOKENS` | 2 / 250 / 800 | Conversation state | `limits.yaml` |
-| `SESSION_TTL` | 30 min | Checkpointer threads; front idle reset (section 8) | `limits.yaml`, front config |
+| `HISTORY_TURNS` / `HISTORY_SUMMARY_TOKENS` / `HISTORY_MAX_TOKENS` | 2 / 250 / 800 | Conversation that `route` reads (section 6.3) | `limits.yaml` |
+| `SESSION_TTL` | 30 min | Conversation read as empty past it (section 6.3); checkpointer threads (section 6.11); front idle reset (section 8) | `limits.yaml`, front config |
 | `RATE_IP_BURST` per `RATE_IP_WINDOW` | 10 per 10 min | Rate limit | `limits.yaml` |
 | `RATE_IP_DAILY` | 40 | Rate limit | `limits.yaml` |
 | `RATE_SESSION_BURST` / `RATE_SESSION_DAILY` | 10 per 10 min / 40 | Rate limit | `limits.yaml` |
