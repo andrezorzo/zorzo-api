@@ -1,6 +1,6 @@
 # LLD — zorzo.dev.br (zorzo-api)
 
-2026-11-26 · André de Castro Zorzo · Status: draft · HLD: [hld.md](hld.md)
+2026-11-27 · André de Castro Zorzo · Status: draft · HLD: [hld.md](hld.md)
 
 Scope: the `zorzo-api` repository. The front (`zorzo-site`) keeps its own LLD for rendering and the 3D brain;
 section 8 here covers only how the front behaves against the API, plus the dashboard pages.
@@ -64,7 +64,7 @@ means adding `domains/<other>/`, not changing `core`.
 | Runtime and packaging | Python 3.13, uv workspace | One lockfile; `core` shared by API, ingest and evals without copies (ADR 0012) |
 | API | FastAPI | HLD constraint |
 | SSE | sse-starlette | Heartbeat, client disconnect and SSE framing built in |
-| Agent | LangGraph + langchain-core, LangChain 1.0+ | HLD constraint; 1.0 is the LTS line; bounded graph (ADR 0006) |
+| Agent | LangGraph (pinned to an exact version, 1.2.21) + langchain-core, LangChain 1.0+ | HLD constraint; 1.0 is the LTS line; bounded graph (ADR 0006); services reach the nodes through LangGraph's `Runtime` context; only `rag_core.agent` imports `langgraph` |
 | Model clients | LiteLLM SDK `Router`, one model group per chain entry (the paid one too), pinned to an exact version | A maintained library for the calls, timeouts and cooldowns; no proxy server (ADR 0016) |
 | Conversation state | langgraph-checkpoint-postgres | State in Postgres, not process memory (ADR 0001) |
 | Database access (API, ingest) | psycopg 3 + SQLAlchemy Core with schema reflection, no ORM | Django owns the schema; no second copy of the columns |
@@ -257,7 +257,8 @@ domain pieces, not ports (section 6.5).
   prompts, recorded with every answer; formatting and comments don't change it, so they don't invalidate the
   answer cache. The models file is `MODELS_FILE`, by default `config/models.yaml`, or `config/models.local.yaml`
   with `APP_ENV=local`.
-- **Models config:** `providers` (each with `base_url`, optional `key_env` and `kind`: `openrouter`, whose
+- **Models config:** `providers` (each with `base_url`, where `${VAR}` is read from the environment at load, so
+  the local profile's Ollama is `${OLLAMA_URL}/v1`; optional `key_env` and `kind`: `openrouter`, whose
   reported cost is read, or `openai` for any other OpenAI-compatible endpoint) and `stages`, exactly `route`, `rerank`, `answer` and `judge`, each with
   `max_tokens` and an ordered `chain` of `{provider, model}` entries; a paid entry has `paid: true` and
   `price` (`input_per_mtok`, `output_per_mtok`, US$ per million tokens). Only `rerank` may have an empty
@@ -362,12 +363,12 @@ Payloads: `contracts/sse-v1.schema.json`.
 | `tool` | Tool label |
 | `model` | Model label |
 | `token` | Draft answer text |
-| `claim` | Verified sentences replace the draft; removed claims shown as removed |
+| `claim` | Verified sentences replace the draft; removed claims shown as removed; a claim with verdict `gap` and no sources is the sentence naming the part of the question the sources don't cover |
 | `usage` | Cost and latency counter |
 | `blocked` | Blocked state |
 | `degraded` | Search-only banner |
 | `error` | Bugs only |
-| `done` | Link to the public trace; on an abstention or decline, `suggestion` is the id of the closest example question (section 6.3) |
+| `done` | `outcome` names the result (`answered`, `abstained`, `declined`, `blocked`, `degraded`, `error`, the stored outcomes' names; `cached` is a separate flag); link to the public trace; on an abstention or decline, `suggestion` is the id of the closest example question (section 6.3) |
 | `ping` | None: an SSE comment `: ping`, every `PING_INTERVAL` while nothing else is sent, keeps CloudFront's origin timeout from firing |
 | `graph` | **To detail** (Phase 2) |
 
@@ -487,31 +488,45 @@ States of the day's budget row; the day is UTC, so every visitor sees the same "
 ### 6.3 Agent run
 
 - **Routing:** `route` classifies the intent (`career_fact`, `about_andre`, `about_system`, `projects_live`,
-  `contact`, `off_topic`) with structured output and rewrites a follow-up into a standalone question. The
-  same output carries `public_ok`: whether the question may appear on public pages, judged by content
+  `contact`, `off_topic`) with structured output and rewrites a follow-up into a standalone question. Its
+  output is `intent`, `standalone_question`, `language` (ISO 639-1), `follow_up` (the question refers to
+  earlier turns) and `public_ok`: `public_ok` is: whether the question may appear on public pages, judged by content
   category (offensive, harassment, sexual content, attacks on other people, personal data), not by
   sentiment. It adds no model call and never changes the answer, only what public pages show (section 8). In the
-  MVP `career_fact` goes through RAG; `off_topic` → decline; `contact` → `contact_options`.
+  MVP `career_fact` (salary, availability, visa, time zone) goes through RAG over the FAQ only (retrieval
+  filtered to `kind = faq`; with no FAQ passage the run abstains without an answer call); `off_topic` →
+  decline, with no answer call; `contact` → `contact_options`; the other intents go through RAG.
 - **Edge questions:** a follow-up with no history is an abstention with a fixed message asking what the
   visitor means; a question in a language other than English or Portuguese is answered in English, with one
   line saying the site answers in both. The suggestion on an abstention or decline is the domain's example
   question closest to the question by local embedding similarity (no model call).
 - **Length:** answers aim at `ANSWER_WORDS_DEFAULT` words, and up to `ANSWER_WORDS_MAX` when the visitor asks
   for more detail; beyond that the answer suggests opening the sources.
-- **Limits per request:** `MAX_LOOP_MODEL_CALLS` model calls beyond `route`, `MAX_TOOL_CALLS` tool calls,
-  `MAX_REFORMULATE` rewrites, `MAX_REPAIR` repairs, `REQUEST_DEADLINE` of wall clock, and `RECURSION_LIMIT` as
-  the LangGraph backstop. Reaching the backstop is a bug: abstain, flag the run, alert.
+- **Limits per request:** the graph's fixed path bounds its model calls: `route`, `assess`, `reformulate`
+  (at most `MAX_REFORMULATE`), `answer` (plus the gateway's one schema retry, section 6.4), the judge,
+  `repair` (at most `MAX_REPAIR`) and a second judge. The tool step (section 6.5) has its own bounds:
+  `MAX_LOOP_MODEL_CALLS` model calls and `MAX_TOOL_CALLS` tool calls. `REQUEST_DEADLINE` of wall clock, and
+  `RECURSION_LIMIT` as the LangGraph backstop. Reaching the backstop is a bug: the run abstains and logs
+  `recursion_limit` at `error`; there is no alert kind for it (section 6.10).
 - **Deadlines propagate:** each call gets `min(own timeout, time left − reserve)` and runs under
   `asyncio.timeout`, so it is really cancelled. Before `answer`, the reserve is `ANSWER_RESERVE`; if less time
   is left, the run goes to search-only. After `answer`, the judge gets `min(TIMEOUT_JUDGE, time left)`; if
   verification can't finish, unverified claims are not published and the answer becomes an abstention with
   sources. Verification is never skipped (ADR 0006).
+- **Failures by moment:** `route`, `assess` or `reformulate` failing on every entry, or `answer` failing
+  before its first token, sends the run to search-only (`degraded {reason: models_unavailable}`), with the
+  passages already found or a retrieval of the raw question; too little time before `answer` is
+  `degraded {reason: deadline}`. `answer` failing after its first token, or the judge failing or running
+  out of time, ends in an abstention after the draft: a draft is never published unverified.
 - **Retries:** one retry with jitter, only on timeout, 5xx or 429, and only if the remaining time covers it.
   After that a tool result becomes `{"status": "unavailable"}` and the answer says which source was missing.
 - **Repeats:** a tool call whose key was already seen returns the memoized result; a second repeat forces
   `answer` or `abstain`. A step that adds no new chunk ids ends the loop.
-- **Evidence:** below `RELEVANCE_FLOOR` (best fused score) the run abstains without calling `assess`; above
-  `ASSESS_SKIP_SCORE` it skips `assess`. Both are calibrated on the eval set at M3.
+- **Evidence:** no passage at all → abstain without calling `assess`. Below `RELEVANCE_FLOOR` (best fused
+  score) the run abstains without calling `assess`; above `ASSESS_SKIP_SCORE` it skips `assess`. Both are
+  calibrated on the eval set at M3 and off until then (always `assess`). `assess` saying the evidence is
+  insufficient leads to one `reformulate`, a new retrieve and rerank with its query, and `answer`, with no
+  second `assess`; the answer may still abstain.
 - **Advisor** (the cheap model consults a stronger one only at a decision it cannot settle: borderline
   evidence after `reformulate`, `verify` failing before `repair`, low `route` confidence): off in the MVP behind a flag; turned on only if the M3 comparison justifies it.
 - **Context window:** each call is assembled from fixed slots sized for the smallest window in the chain
@@ -528,12 +543,21 @@ States of the day's budget row; the day is UTC, so every visitor sees the same "
 ### 6.4 Answer contract and verification
 
 - **Contract:** the answer node returns JSON with `answer_lang`, `claims[]` (each with `text` and
-  `sources[]`) and `abstained`. The parser accepts JSON mode, fenced JSON or a strict line format; a parse
-  failure gets one retry, then the next model in the chain.
+  `sources[]`), `gap` (one sentence naming the part of the question the passages don't cover, or null) and
+  `abstained`. `sources` are passage numbers (1 to the number of passages in the prompt), which the service
+  maps to chunk ids. The answer streams as JSON: the draft (`token`) is only the new characters of the
+  claims' text, read from the growing JSON (langchain-core `parse_partial_json`), never JSON or passage
+  numbers. JSON mode and fenced JSON are read. A draft that doesn't validate is asked once more through
+  the schema-bound call (the gateway gives a schema miss one more try on the same entry, then the next
+  entry); no more tokens are sent.
 - **Per claim:** a cited id outside this request's retrieval set removes the claim. The judge labels each
   claim `supported`, `partial` or `unsupported` against its cited chunks only (one batched call).
-  `unsupported` is removed; `partial` stays, softened, only if the judge marks the supported part. If nothing
-  coherent is left: repair once, then abstain.
+  `unsupported` is removed; `partial` stays, softened, only if the judge marks the supported part (its text
+  replaces the claim's). If no claim is `supported` or `partial`: repair once (the answer stage again, with
+  the passages and the verdicts), verify again, then abstain.
+- **What is sent:** the published answer's claims, each with its verdict (`unsupported` ones too, shown as
+  removed), then the `gap` sentence as a last `claim` with no sources and verdict `gap`. After a repair only
+  the repaired answer's claims are sent.
 - **Abstention:** "not in my sources", plus related sources and the contact link.
 - **About a real person:** third person always (first-person sources are rewritten); no salary, personal
   life, inferred opinions or comparisons; superlatives only when quoted verbatim from an `authority: 3`
@@ -720,8 +744,10 @@ Behavior only; rendering and the 3D brain are in `zorzo-site`'s LLD.
   | Stream dropped before `done` | "Connection lost, ask again" (no resume) |
   | `blocked` | The defense layer and the reason in plain words, a link to `/dash/defenses`, and "this was a mistake?" linking to the contact options |
   | `token` | Draft text, marked "checking against sources" |
-  | `claim` | The checked claim replaces the draft; a claim with verdict `unsupported` is shown struck through as "removed: not supported by the sources" |
+  | `claim` | The checked claim replaces the draft, with numbered citations that open the passage, its source's title and link; a claim with verdict `unsupported` is shown struck through as "removed: not supported by the sources"; a `gap` claim is a plain note |
   | `degraded` | Banner plus up to `DEGRADED_MAX_PASSAGES` passages, each with its source's title and link; with none, "no matching sources for this question", the example questions and the contact options |
+  | `done {outcome: abstained}` | The draft is replaced by "not in my sources", with the passages found and the contact link |
+  | `done {outcome: declined}` | The decline message |
   | `done` with `suggestion` | The suggested example question and the contact options |
   | `error` | Generic message with the trace link |
 
@@ -763,7 +789,7 @@ endpoints and per-environment switches.
 | `TIMEOUT_ROUTE` / `TIMEOUT_RERANK` / `TIMEOUT_ANSWER` / `TIMEOUT_JUDGE` | 3 s / 2.5 s / 12 s / 5 s | Model gateway per stage; the remote rerank of 20 candidates took 1.0 to 2.0 s when measured on 2026-11-25 | `limits.yaml` |
 | `TIMEOUT_SEARCH_CORPUS` / `TIMEOUT_GITHUB_ACTIVITY` | 1.5 s / 2 s | Tools | `limits.yaml` |
 | `TIMEOUT_TURNSTILE` | 3 s | Bot check (`siteverify`); Cloudflare sets no value | `limits.yaml` |
-| `MAX_LOOP_MODEL_CALLS` | 2 | Agent run | `limits.yaml` |
+| `MAX_LOOP_MODEL_CALLS` | 2 | Tool step of the agent run (section 6.5) | `limits.yaml` |
 | `MAX_TOOL_CALLS` | 3 | Agent run | `limits.yaml` |
 | `MAX_REFORMULATE` / `MAX_REPAIR` | 1 / 1 | Agent run | `limits.yaml` |
 | `RECURSION_LIMIT` | 12 | LangGraph backstop | `limits.yaml` |
@@ -773,8 +799,8 @@ endpoints and per-environment switches.
 | `SEARCH_MIN_SIMILARITY` | 0.5 (cosine; calibrated at M3 with `RELEVANCE_FLOOR`) | Vector hits below it aren't matches, so a question with nothing similar gets no passages | `limits.yaml` |
 | `CONTEXT_MAX_TOKENS` | 2,500 | Chunks in a prompt | `limits.yaml` |
 | `CHUNK_TOKENS` / `CHUNK_OVERLAP` | ~400 / 15% | Chunking (an eval variable) | `limits.yaml` |
-| `RELEVANCE_FLOOR` | TBD | Abstain threshold (calibrated at M3) | `limits.yaml` |
-| `ASSESS_SKIP_SCORE` | TBD | Skip `assess` (calibrated at M3) | `limits.yaml` |
+| `RELEVANCE_FLOOR` | Off until M3 (calibrated on the eval set) | Abstain threshold | `limits.yaml` (optional) |
+| `ASSESS_SKIP_SCORE` | Off until M3 (calibrated on the eval set) | Skip `assess` | `limits.yaml` (optional) |
 | `HISTORY_TURNS` / `HISTORY_SUMMARY_TOKENS` / `HISTORY_MAX_TOKENS` | 2 / 250 / 800 | Conversation state | `limits.yaml` |
 | `SESSION_TTL` | 30 min | Checkpointer threads; front idle reset (section 8) | `limits.yaml`, front config |
 | `RATE_IP_BURST` per `RATE_IP_WINDOW` | 10 per 10 min | Rate limit | `limits.yaml` |
@@ -820,7 +846,7 @@ endpoints and per-environment switches.
 | `DOMAIN` | api, ingest, evals | Which `domains/<name>` to load | env file |
 | `DATABASE_URL` | api, dashboard, ingest, evals | Postgres connection | secret |
 | `POSTGRES_PASSWORD` | postgres (compose) | Database password; compose refuses to start without it, so no default reaches production | secret |
-| `OLLAMA_URL`, `EMBED_MODEL_TAG` | api, ingest | Embedding endpoint and pinned tag | env file |
+| `OLLAMA_URL`, `EMBED_MODEL_TAG` | api, ingest | Ollama endpoint (embeddings, and the local profile's chat models) and the pinned embedding tag | env file |
 | `EMBEDDER`, `RERANKER` | api, ingest | `ollama` / `local`, or `fake` (deterministic, accepted only with `APP_ENV=local`) | env file |
 | `LIMITS_FILE` | api, ingest | Path of `limits.yaml` | env file |
 | `MODELS_FILE` | api | Path of the models config; default per `APP_ENV` (section 3 "Configuration") | env file |
@@ -888,8 +914,6 @@ Architecture decisions (0001–0011) are indexed in the HLD.
   2026-11-25; the response carries no rate-limit headers.
 - [ ] Charts library for the dashboard.
 - [ ] Eval harness: dataset format, metrics per layer, noise-band rule: to detail.
-- [ ] Local profile address of Ollama: `models.local.yaml` uses `localhost`, while compose services use
-  `ollama:11434`; to settle in F01-T06.
 - [ ] A model that always answers empty or always misses the schema never cools its entry: revisit with the
   eval matrix at M3.
 - [ ] A provider answering with `Retry-After: 0` makes LiteLLM skip the failure count, so such an entry never
