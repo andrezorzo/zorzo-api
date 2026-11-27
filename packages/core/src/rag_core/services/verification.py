@@ -24,14 +24,9 @@ _STRICT = ConfigDict(extra="forbid", frozen=True)
 # Where the answer's JSON may start: any brace opening a key, tried in order (a fence or a sentence before it,
 # or an example object, is passed over until one parses as the answer).
 _JSON_START = re.compile(r'\{\s*"')
+# The contract's first key: an unfinished object counts as the answer only once it holds it.
+ANSWER_KEY = "answer_lang"
 _DECODER = json.JSONDecoder(strict=False)  # a raw newline inside a string is read, as the draft reads it
-# Our prompt elements, however spaced or written (the full-width and small less-than signs, invisible
-# characters around the slash); model or visitor text inside one must not open or close any of them.
-LESS_THAN_SIGNS = "<\uff1c\ufe64"
-_GAP = r"[\s\u00ad\u200b-\u200f\u2060-\u2064\ufeff]*"  # whitespace and the invisible format characters
-_DELIMITER = re.compile(
-    rf"[{LESS_THAN_SIGNS}]{_GAP}(/?){_GAP}(claim|checked_claims|passage)\b", re.IGNORECASE
-)
 
 
 class AnswerClaim(BaseModel):
@@ -109,9 +104,11 @@ def _contract(parsed: Any) -> AnswerContract | None:
 def draft_text(streamed: str) -> str:
     """The claims' text so far, read from the answer's JSON as it grows; never JSON or passage numbers."""
     for parsed, complete in _decoded(streamed, allow_unfinished=True):
-        if complete and _contract(parsed) is None:  # a whole object that isn't the answer (an example)
-            continue
-        claims = parsed.get("claims") if isinstance(parsed, dict) else None
+        if not isinstance(parsed, dict) or (
+            _contract(parsed) is None if complete else ANSWER_KEY not in parsed
+        ):
+            continue  # an object that isn't the answer (an example, a claim inside it)
+        claims = parsed.get("claims")
         if isinstance(claims, list):
             texts = [c["text"] for c in claims if isinstance(c, dict) and isinstance(c.get("text"), str)]
             return " ".join(t for t in texts if t)
@@ -129,22 +126,15 @@ def cite(answer: AnswerContract, passages: Sequence[SearchHit]) -> list[CitedCla
 
 
 def judge_input(claims: Sequence[CitedClaim]) -> str:
-    """The judge's claims, numbered, each with only its cited passages (claims without any are left out).
-
-    A claim is model text the visitor may have steered, so it can't close its own element."""
-    blocks = []
-    for i, claim in enumerate(claims):
-        if not claim.passages:
-            continue
-        passages = "\n".join(f"<passage>{hit.content}</passage>" for hit in claim.passages)
-        blocks.append(f'<claim i="{i}">{as_data(claim.text)}</claim>\nCited passages:\n{passages}')
-    return "\n\n".join(blocks)
-
-
-def as_data(text: str) -> str:
-    """Text placed inside a prompt element, unable to open or close one of ours (other text is untouched,
-    so `List<T>` stays as written)."""
-    return _DELIMITER.sub(r"&lt;\1\2", text)
+    """The judge's claims as JSON, numbered, each with only its cited passages (claims without any are left
+    out). A claim is model text the visitor may have steered; inside a JSON string it can't pose as
+    structure or instructions."""
+    rows = [
+        {"i": i, "claim": claim.text, "cited_passages": [hit.content for hit in claim.passages]}
+        for i, claim in enumerate(claims)
+        if claim.passages
+    ]
+    return json.dumps({"claims": rows}, ensure_ascii=False)
 
 
 def apply_verdicts(

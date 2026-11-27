@@ -4,6 +4,7 @@ A step returns the state it changes. It never raises for a model failure: it set
 before the draft) or `outcome` (the run ends), and the graph's edges read them.
 """
 
+import json
 from collections.abc import Sequence
 from typing import Any, cast
 
@@ -23,7 +24,6 @@ from rag_core.services.verification import (
     CheckedClaim,
     Verdicts,
     apply_verdicts,
-    as_data,
     cite,
     coherent,
     draft_text,
@@ -208,13 +208,10 @@ def _send_claims(claims: Sequence[CheckedClaim], ctx: AgentContext) -> None:
 
 async def repair_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any]:
     ctx = runtime.context
-    checked = "\n".join(
-        f'<claim verdict="{c.verdict}">{as_data(c.text)}</claim>'
-        for c in state["claims"]
-        if c.verdict != "gap"
-    )
+    # The question and the claims are text the visitor may have steered: as JSON strings they stay data.
+    checked = [{"claim": c.text, "verdict": c.verdict} for c in state["claims"] if c.verdict != "gap"]
+    user = json.dumps({"question": state["query"], "checked_claims": checked}, ensure_ascii=False)
     answer_prompt = _answer_messages(state, ctx)[0]["content"]
-    user = f"{as_data(state['query'])}\n\n<checked_claims>\n{checked}\n</checked_claims>"
     prompt = messages(ctx.prompts.repair, user, answer_prompt=answer_prompt)
     with stage(ctx.sink, "repair"):
         answer = cast(AnswerContract | None, await ctx.call("repair", "answer", prompt, AnswerContract))
