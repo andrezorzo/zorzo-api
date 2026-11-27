@@ -1,6 +1,6 @@
 # 08: Guard, decline and block
 
-**Status:** to do
+**Status:** in progress
 
 **What to build:** Off-topic and out-of-bounds requests are declined politely with a suggested question, attacks are blocked with the layer and reason shown, and contact links follow every reply.
 
@@ -13,3 +13,4 @@
 - [ ] **AC3** · On an abstention or decline, `done.suggestion` is the id of the closest example question by local embedding similarity, with no model call.
 - [ ] **AC4** · The `contact` intent returns the contact options from the domain config (LinkedIn, GitHub, email) without a model answer.
 - [ ] **AC5** · The page shows the block message with layer and reason, the suggested question, and the contact links after every answer, abstention, decline and degraded reply.
+- [ ] **AC6** · A gate refusal for the bot check or the rate limit writes a `defense_events` row (layer `L0` `bot` or `L1` `rate_limit`), with the request's trace id and no question text.

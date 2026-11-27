@@ -73,6 +73,7 @@ means adding `domains/<other>/`, not changing `core`.
 | Dashboard charts | TBD | Candidates: Chart.js, Apache ECharts, uPlot, Observable Plot, server-rendered SVG |
 | Embeddings | langchain-ollama `OllamaEmbeddings`; pinned tag starts at `bge-m3:567m`, 1024 dimensions | ADR 0008; 1024 fits every candidate model (section 12), so changing model is a re-ingest, not a migration |
 | Local rerank | fastembed (ONNX) with `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` registered as a custom model (`onnx/model_quint8_avx2.onnx`), baked into the API image and loaded offline; every model file is checked against a pinned SHA-256, so a changed model is refused | ADR 0009; small (130 MB) and multilingual on CPU; fastembed has no built-in copy of it |
+| Injection classifier (guard layer L2) | Llama Prompt Guard 2 86M (mDeBERTa, labels benign and malicious) in the ONNX export `gravitee-io/Llama-Prompt-Guard-2-86M-onnx` (`model.onnx`), run with onnxruntime and `tokenizers`; every file is checked against a pinned revision and SHA-256, baked into the API image and loaded offline | Multilingual, Portuguese included, and local on CPU, so a block costs no model call (HLD flow "Ask a question"); onnxruntime and `tokenizers` are already in the image for rerank. The quantized file (`model.quant.onnx`) lost a sixth of its recall in the exporter's own test, so it replaces the full one only if the full one doesn't fit the VPS's memory. Discarded: LLM Guard (archived in 2026), NeMo Guardrails and Guardrails AI (they wrap the model call, which belongs to the gateway, ADR 0016), an LLM classifier (a model call before every question). Llama 4 Community License: credited "Built with Llama" |
 | Validation and settings | Pydantic v2 + pydantic-settings | Tool arguments, answer contract, config files, fail-fast settings |
 | Extraction and chunking | LangChain document loaders (Markdown in the MVP; PDF loaders pluggable per domain) + `MarkdownHeaderTextSplitter` / `RecursiveCharacterTextSplitter` | The loader interface makes the PDF library a configuration choice; Docling is too heavy for the VPS. The résumé enters as owner-reviewed Markdown converted once from the PDF |
 | Tracing | langsmith SDK (`Client` and `RunTree`), fed by the TraceSink fan-out | One fan-out of step events feeds the SSE stream, the stored trace and LangSmith; the SDK's background queue posts the runs. LangChain's ambient tracing (`LANGSMITH_TRACING`) is forced off: it would send the graph state unredacted, and misses the LiteLLM calls and the search-only path |
@@ -146,6 +147,8 @@ connection; the domain is chosen by `DOMAIN` and loaded by the apps, never by `c
 | Embedder | `embed` | Texts | Vectors + model tag | Always the pinned tag |
 | Reranker | `rerank` (async) | Query, candidates, k | Ordered candidates + level used | A level may raise; the retrieval service falls to the next level, then to the fused order (ADR 0009) |
 | BotCheck | `verify` | Token | Pass or fail | Fails closed when the provider errors |
+| InjectionClassifier | `score` (async) | Text | Probability that the text is an attack, 0 to 1 | Runs on CPU in a thread, with no network call; may raise (section 3 "Security", guard layers) |
+| DefenseLog | `record` | Layer, category, action, trace id | — | One `defense_events` row, written in the background; never blocks the caller; never receives the question |
 | TraceSink | `record` | Step event | — | One fan-out per request feeds the SSE stream, the trace recorder and, only with `LANGSMITH_API_KEY`, LangSmith; never blocks: LangSmith runs go on the SDK's in-memory queue, which drops a run when full; a failing extra sink is logged and skipped |
 | TraceStore | `write` | A finished request's trace: the public trace, its spans and the questions-log row | — | One transaction (section 3 "Transactions"); a store that fails raises "unavailable" |
 | Alerter | `send` | Alert kind, message | — | Delivers one message; the alerts service decides when to send (section 6.10) |
@@ -179,6 +182,29 @@ domain pieces, not ports (section 6.5).
   spaces first; whitespace runs collapsed; trimmed; length capped at `MAX_QUESTION_CHARS` code points; body capped at
   `MAX_BODY_BYTES` in Caddy and again in the API, which counts the bytes as they arrive (a chunked body too)
   and answers `422 invalid_input`.
+- **Guard layers** (HLD "Security and privacy", prompt injection). Each layer has an id that the stream,
+  `defense_events` and `/dash/defenses` use:
+
+  | Layer | Where | What it does | On a hit |
+  | --- | --- | --- | --- |
+  | `L0` Edge | WAF, Caddy, gate | Origin secret, WAF rules, bot check, body cap, CORS (above) | HTTP error before the stream |
+  | `L1` Input | Gate | Input normalization and length cap (above), rate limit (section 6.7) | HTTP error before the stream |
+  | `L2` Classifier | `guard`, the graph's first step | The InjectionClassifier scores the normalized question; a score at `GUARD_THRESHOLD` or above is an attack | Block, before any model call |
+  | `L3` Untrusted content | Prompt assembly | Section 6.4 "Untrusted text in a prompt" | None: marking only |
+  | `L4` Capability | Agent | No tools in F01; tools are read-only, with enum arguments and a per-request cap (section 6.5) | None |
+  | `L5` Output | `answer`, `verify`, `repair` | Canary, links and the rules about a real person (section 6.4) | Canary: block; a link or a broken rule removes the claim |
+  | `L6` Grounding | `verify` | Section 6.4 | Unsupported claims removed, or the run abstains |
+
+  A block in the stream sends `guard {layer, action: block}`, `blocked {layer, category}` and `done
+  {outcome: blocked}`, with no `usage` and no suggestion (section 5 "Stream events"); a block at `L5` comes
+  after any draft already sent. Categories: `injection` (`L2`, which doesn't tell a jailbreak from a prompt
+  extraction) and `prompt_leak` (the `L5` canary). A passing `L2` check sends `guard {layer: L2, action:
+  pass}`. A classifier that raises lets the question through, with `guard {layer: L2, action: error}` and an
+  `error` log: the other layers still stand, and a guard bug must not refuse every visitor.
+- **Defense events:** each block writes one `defense_events` row through the DefenseLog: the layer, the
+  category, action `block` and the trace id. A gate refusal writes one too: `bot_check_failed` as `L0`
+  `bot`, `rate_limited` as `L1` `rate_limit`. The question is never stored there: `example_scrubbed` is
+  left null, since `/dash/defenses` shows examples only from the `adversarial` dataset (section 8).
 - **CORS:** one origin; the allowlist holds `https://zorzo.dev.br`, plus localhost when `APP_ENV=local`.
 - **Admin:** the Django admin listens on a local port, reachable only through an SSH tunnel; its views are
   read-only, except the "remove from public view" action on traces, which sets `removed_at` and writes a
@@ -296,7 +322,10 @@ domain pieces, not ports (section 6.5).
   descriptions at startup. A configuration Postgres doesn't have (resolved by the queries' own cast to
   `regconfig`) stops the API and the ingest before they serve or write; a `route` prompt with any other
   slot or none, an intent without a description or an intent kind the domain doesn't declare stops the
-  API; an example question in a language the domain doesn't declare stops the ingest. A chunk's `tsv`
+  API; an example question in a language the domain doesn't declare stops the ingest and the API.
+  `domain.yaml` also declares `contact`, the ordered contact options (`label`, `url`; zorzo: LinkedIn,
+  GitHub, email as `mailto:`), and `link_hosts`, the hosts an answer may link to (section 6.4); an intent
+  with `action: contact` needs a non-empty `contact`, or the API doesn't start. A chunk's `tsv`
   keeps the configuration of its ingest, so changing a language's configuration needs a new corpus
   version.
 - **Shutdown:** the gateway drains its background work (reservation releases, alerts, event rows), the API
@@ -352,7 +381,7 @@ Columns, types, constraints and indexes live in the migrations. What is still pl
 | `trace_spans` | existing | One row per step that ended (its `stage` end), with the tokens and cost of its model calls, the model that answered last and its fallback reason (why the last earlier entry of the stage's chain didn't answer: `cooling_down`, `rate_limited`, `timeout`, `failed`, `budget` or `request_cap`; null when the first entry tried answered); feeds the latency and fallback charts |
 | `trace_removals` | existing | Private record of the owner's manual removals; never shown in public |
 | `questions_log` | existing | For eval curation; outlives its trace (`trace_id` set null); outcome as its trace's |
-| `defense_events` | existing | |
+| `defense_events` | existing | One row per block or gate refusal (section 3 "Security", defense events) |
 | `log_events` | existing | Closed event catalog |
 | `rate_buckets` | existing | |
 | `budget_daily` | existing | Day in UTC |
@@ -399,17 +428,17 @@ Payloads: `contracts/sse-v1.schema.json`.
 | Event | Front use |
 | --- | --- |
 | `stage` | Lights the step on the HUD |
-| `guard` | Defense indicator |
+| `guard` | Defense indicator: the layer (section 3 "Security", guard layers) and whether it passed, blocked or failed |
 | `retrieval` | Brain points light up; ids match the chunk ids in `corpus.json` of the same version |
 | `tool` | Tool label |
 | `model` | Model label |
 | `token` | Draft answer text |
 | `claim` | Verified sentences replace the draft; removed claims shown as removed; a claim with verdict `gap` and no sources is the sentence naming the part of the question the sources don't cover |
 | `usage` | Cost and latency counter |
-| `blocked` | Blocked state |
+| `blocked` | Blocked state: the layer and the reason (`category`), shown in the interface language; replaces a draft already shown |
 | `degraded` | Search-only banner |
 | `error` | Bugs only |
-| `done` | `outcome` names the result (`answered`, `abstained`, `declined`, `blocked`, `degraded`, `error`, the stored outcomes' names; `cached` is a separate flag); link to the public trace; on an abstention or decline, `suggestion` is the id of the closest example question (section 6.3) |
+| `done` | `outcome` names the result (`answered`, `abstained`, `declined`, `blocked`, `degraded`, `error`, the stored outcomes' names; `cached` is a separate flag); link to the public trace; on an abstention or decline, `suggestion` is the id of the closest example question (section 6.3); `contact` holds the domain's contact options (section 6.5) |
 | `ping` | None: an SSE comment `: ping`, every `PING_INTERVAL` while nothing else is sent, keeps CloudFront's origin timeout from firing |
 | `graph` | **To detail** (Phase 2) |
 
@@ -530,6 +559,9 @@ States of the day's budget row; the day is UTC, so every visitor sees the same "
 
 ### 6.3 Agent run
 
+- **Guard:** the run starts with `guard`, before `route`: the `L2` classifier (section 3 "Security",
+  guard layers) under the deadline of the steps before `answer`. A block ends the run there, before the
+  cache lookup, and the blocked question never enters the conversation history.
 - **Routing:** `route` classifies the question into one of the domain's intents (`intents.yaml` in the domain
   package, ADR 0011; for zorzo: `career_fact`, `about_andre`, `about_system`, `projects_live`, `contact`,
   `off_topic`) with structured output, its schema narrowed to those names at startup, and rewrites a
@@ -539,14 +571,19 @@ States of the day's budget row; the day is UTC, so every visitor sees the same "
   attacks on other people, personal data), not by sentiment. It adds no model call and never changes the
   answer, only what public pages show (section 8). Each intent in `intents.yaml` declares the document
   kinds its retrieval reads (all when absent; with none of them found, the run abstains without an answer
-  call) and its action: `answer` (RAG) or `decline` (no answer call). For zorzo, `career_fact` (salary,
-  availability, visa, time zone) reads only `faq`, `off_topic` declines, and `contact` answers through RAG
-  until `contact_options` (F01-T08). The `route` prompt gets the intent list and descriptions from
+  call) and its action: `answer` (RAG), `decline` (no answer call) or `contact` (no answer call: the run
+  ends `answered` after `route`, before the cache lookup, with no claim, and the front shows the contact options of `done.contact`, section 6.5).
+  For zorzo, `career_fact` (salary, availability, visa, time zone) reads only `faq`, `off_topic` declines,
+  and `contact` sends the contact options. The `route` prompt gets the intent list and descriptions from
   `intents.yaml` (section 3 "Configuration"), so neither the core nor the prompt names an intent.
 - **Edge questions:** a follow-up with no history is an abstention with a fixed message asking what the
   visitor means; a question in a language the domain doesn't declare is answered in the domain's first
-  language (zorzo: English), with one line naming the languages the site answers in. The suggestion on an abstention or decline is the domain's example
-  question closest to the question by local embedding similarity (no model call).
+  language (zorzo: English), with one line naming the languages the site answers in.
+- **Suggestion:** on an abstention or decline, `done.suggestion` is the id of the domain's example question,
+  in the run's answer language, closest to the standalone question (the normalized question when `route`
+  didn't answer) by cosine similarity of their Embedder vectors: a local model, no model gateway call. The
+  examples are embedded once at startup, and again on first use if that failed; when an embedding fails or
+  the request's deadline has passed, `suggestion` is null. A block, an answer and search-only carry none.
 - **Length:** answers aim at `ANSWER_WORDS_DEFAULT` words, and up to `ANSWER_WORDS_MAX` when the visitor asks
   for more detail; beyond that the answer suggests opening the sources.
 - **Limits per request:** the graph's fixed path bounds its model calls: `route`, `assess`, `reformulate`
@@ -608,17 +645,30 @@ States of the day's budget row; the day is UTC, so every visitor sees the same "
 - **What is sent:** the published answer's claims, each with its verdict (`unsupported` ones too, shown as
   removed), then the `gap` sentence as a last `claim` with no sources and verdict `gap`. After a repair only
   the repaired answer's claims are sent.
-- **Untrusted text in a prompt:** the instructions (system message) hold only the domain's prompt and the
-  corpus passages; the question, and the claims the judge and the repair read, go in the user message,
-  the claims as JSON strings, so model or visitor text can't pose as structure or instructions.
+- **Untrusted text in a prompt** (guard layer `L3`): the instructions (system message) hold only the
+  domain's prompt, the canary line and the corpus passages; the question, and the claims the judge and the
+  repair read, go in the user message, the claims as JSON strings, so model or visitor text can't pose as
+  structure or instructions. Each passage goes inside a `<passage n title authority>` tag: the title is
+  escaped as an attribute, and any `<passage` or `</passage` in the text is broken (a space after the `<`),
+  so a passage can't close its tag or open another. The prompts say the tagged text is data.
 - **Extra objects:** when the model writes more than the one JSON object asked for, the last answer object
   counts, for the draft and the answer alike; the draft may then show an earlier one, which the checked
   claims or the abstention replace.
 - **Abstention:** "not in my sources", plus related sources and the contact link.
-- **About a real person:** third person always (first-person sources are rewritten); no salary, personal
-  life, inferred opinions or comparisons; superlatives only when quoted verbatim from an `authority: 3`
-  source; negative statements about employers or clients are declined.
-- **Canary:** the canary in the output blocks the response (L5).
+- **About a real person** (guard layer `L5`): third person always (first-person sources are rewritten); no
+  salary figure unless an FAQ passage states it, no personal life, inferred opinions or comparisons;
+  superlatives only when quoted verbatim from an `authority: 3` source; negative statements about employers
+  or clients are declined. The `answer` prompt states these rules, and the judge applies them: a claim that
+  breaks one is `unsupported`, even when its passage says it. Each passage carries its source's
+  `authority`, so the judge can tell where a superlative may come from.
+- **Links** (`L5`): a claim with a URL whose host is not in the domain's `link_hosts` (or a subdomain of
+  one) is removed with no judge vote, like a citation outside the retrieval set.
+- **Canary** (`L5`): `CANARY` is appended by the core to the system message of every model call, with the
+  instruction never to write it. Every text bound for the visitor (each `token`, each claim and the `gap`)
+  is checked for it first, ignoring case and every character but letters and digits. The draft holds back
+  its last characters (the canary's length minus one) until more text arrives or the answer ends, so not
+  even part of the canary is sent. A hit stops the answer stage and blocks the response (`prompt_leak`,
+  section 3 "Security", guard layers).
 
 ### 6.5 Tools
 
@@ -631,7 +681,7 @@ untrusted data, like retrieved chunks.
 | `get_document` | planned | `doc_key` from an enum of indexed documents → metadata and summary |
 | `list_projects` | planned | Public projects with links and status, from corpus metadata |
 | `github_activity` | planned | `repo` from the allowlist → the last `GITHUB_COMMITS_MAX` commits (title and date), open issues count, last release, from the public REST API; never reads repository content; cached `GITHUB_CACHE_TTL`; cited as a source with `fetched_at`; when GitHub is unavailable the answer says so and falls back to the corpus |
-| `contact_options` | planned | Returns links only, from the domain config, in this order: LinkedIn, GitHub, email (`mailto:`); never sends anything |
+| `contact_options` | planned | Returns links only: the domain's `contact` options, in their order (zorzo: LinkedIn, GitHub, email as `mailto:`); never sends anything. Until the tool registry (F04), every `done` carries the same list as `contact`, and the `contact` intent's reply is that list alone (section 6.3) |
 | `check_answerable`, `query_career_graph` | to detail | Phase 2 (career graph) |
 
 A code-search tool over the site's own repository (`search_site_code`) is not built: a curated `docs/code-map.md` (one section per module: what it
@@ -798,13 +848,15 @@ Behavior only; rendering and the 3D brain are in `zorzo-site`'s LLD.
   | No Turnstile token (script blocked, widget error or timeout) | The message of a second `403`; nothing is sent |
   | `502`, `503`, `504` or network failure | `offline` state (`503` comes from the API; `502` and `504` from CloudFront or Caddy when the API doesn't answer) |
   | Stream dropped before `done` | "Connection lost, ask again" (no resume) |
-  | `blocked` | The defense layer and the reason in plain words, a link to `/dash/defenses`, and "this was a mistake?" linking to the contact options |
+  | `blocked` | Any draft is removed; the defense layer and the reason in plain words, in the interface language from `layer` and `category`, a link to `/dash/defenses`, and "this was a mistake?" linking to the contact options |
   | `token` | Draft text, marked "checking against sources" |
   | `claim` | The checked claim replaces the draft, with numbered citations that open the passage, its source's title and link; a claim with verdict `unsupported` is shown struck through as "removed: not supported by the sources"; a `gap` claim is a plain note |
   | `degraded` | Banner plus up to `DEGRADED_MAX_PASSAGES` passages, each with its source's title and link; with none, "no matching sources for this question", the example questions and the contact options |
   | `done {outcome: abstained}` | The draft is replaced by "not in my sources", with the passages found and the contact link |
   | `done {outcome: declined}` | The decline message |
-  | `done` with `suggestion` | The suggested example question and the contact options |
+  | `done` with `suggestion` | The suggested example question, which asks it when clicked, like an example question on the first screen |
+  | `done {outcome: answered}` with no `claim` | The `contact` intent's reply: one line inviting the visitor to reach André, then the options of `done.contact` |
+  | `done` after an answer, abstention, decline or search-only reply | The contact options of `done.contact`, in their order (LinkedIn, GitHub, email); with the field missing or empty, the link to the page's contact section |
   | `error` | Generic message with the trace link |
 
 - **Interface language:** `navigator.language` starting with `pt` → Portuguese, anything else → English; a
@@ -869,6 +921,7 @@ endpoints and per-environment switches.
 | `FAILS_BEFORE_COOLDOWN` | 2 | Failures of an entry before the next one cools it (section 6.6) | Code (`adapters/litellm_models.py`) |
 | `MAX_COST_OVER_ESTIMATE` | 2× | Ceiling of a paid settle (section 6.2) | Code (`services/gateway.py`) |
 | `DEADLINE_MARGIN` | 1 s | How far past the deadline a deadline-bound call's own timeout is set (section 6.6) | Code (`services/gateway.py`) |
+| `GUARD_THRESHOLD` | 0.5 (the classifier's own decision boundary between its two labels; calibrated at M3 on the `adversarial` and `benign_tricky` datasets) | Guard layer `L2`: a score at or above it blocks | `limits.yaml` |
 | `CACHE_SIMILARITY` | 0.95 | Answer cache | `limits.yaml` |
 | `CACHE_TTL` | 60 days | Answer cache | `limits.yaml` |
 | `DEGRADED_MAX_PASSAGES` | 6 | Passages shown in search-only mode | `limits.yaml` |
@@ -907,6 +960,8 @@ endpoints and per-environment switches.
 | `LIMITS_FILE` | api, ingest | Path of `limits.yaml` | env file |
 | `MODELS_FILE` | api | Path of the models config; default per `APP_ENV` (section 3 "Configuration") | env file |
 | `RERANK_CACHE_DIR` | api | Where the rerank model is baked in the image | env file |
+| `GUARD_CLASSIFIER` | api | `prompt_guard`, or `fake` (deterministic, accepted only with `APP_ENV=local`) | env file |
+| `GUARD_CACHE_DIR` | api | Where the `L2` classifier is baked in the image | env file |
 | `ORT_DISABLE_TELEMETRY` | api | `1`: onnxruntime sends no usage telemetry to Microsoft (also set in code) | image |
 | `DATA_DIR` | ingest | Folder the local DataPublisher writes | env file |
 | `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `NVIDIA_API_KEY`, `GOOGLE_AI_API_KEY` | api, evals | Model providers | secret |
@@ -914,7 +969,7 @@ endpoints and per-environment switches.
 | `LANGSMITH_ENDPOINT` | api | LangSmith's API URL; unset is LangSmith's own; the tests point it at a fake | env file |
 | `TURNSTILE_SECRET` | api | Bot check (the public site key is in the front) | secret |
 | `ORIGIN_SECRET` | caddy | CloudFront origin header | secret |
-| `CANARY`, `SALT_SEED` | api | Prompt-leak canary; seed of the daily IP salt | secret |
+| `CANARY`, `SALT_SEED` | api | Prompt-leak canary (letters, digits, `-` and `_`; production refuses the published local example); seed of the daily IP salt | secret |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | api, dashboard, timers | Alerts; required by the API in production | secret |
 | `UPTIMEROBOT_API_KEY` | dashboard | Uptime pull | secret |
 | `AWS_DATA_WRITER_*`, `S3_BUCKET`, `CLOUDFRONT_DISTRIBUTION_ID` | ingest | Writes `data/` and invalidates the manifest | secret / env file |
@@ -943,6 +998,8 @@ What replaces each production service is in the HLD ("Deployment and environment
 - **Alerter and tracing:** the alerter only logs; LangSmith is on only when a key is present. The tests
   point `LANGSMITH_ENDPOINT` at a fake ingest endpoint (`tests/fakes/`), which records what it receives or
   hangs.
+- **Guard:** with `GUARD_CLASSIFIER=fake` the `L2` classifier scores 1 a question holding a fixed test
+  marker and 0 any other, so tests and runs without the model file pick their attacks.
 - **Tests:** a separate test database per session, with the Django migrations applied by a fixture; the fake
   provider server (`tests/fakes/`, a small ASGI app on `127.0.0.1`, since LiteLLM builds its own HTTP
   clients) answers scripted responses, 429s, hangs, malformed
@@ -964,7 +1021,7 @@ Architecture decisions (0001–0011) are indexed in the HLD.
 
 - [ ] Embedding model among 1024-dimension multilingual models (`bge-m3`, `multilingual-e5-large`,
   `snowflake-arctic-embed2`, `qwen3-embedding:0.6b`), starting with `bge-m3`: decided by recall at M1.
-- [ ] L2 guard classifier: a small local model or a cheap LLM classifier.
+- [ ] `GUARD_THRESHOLD`: calibrated at M3 on the `adversarial` and `benign_tricky` datasets.
 - [ ] Chat model of the local profile (Ollama): quick eval.
 - [ ] Free models per stage (route, answer, judge): eval matrix at M3.
 - [ ] `RELEVANCE_FLOOR` and `ASSESS_SKIP_SCORE`: calibrated at M3.
