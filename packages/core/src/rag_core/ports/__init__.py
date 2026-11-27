@@ -1,6 +1,6 @@
 """Ports: interfaces for what lives outside the core (LLD "Components and dependencies")."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -90,8 +90,11 @@ class VectorStore(Protocol):
 
     async def active_corpus(self) -> ActiveCorpus | None: ...
 
-    async def search(self, vector: list[float], text: str, k: int, version: int) -> list[SearchHit]:
-        """Hybrid in one query (vector + full text + RRF), over the given version only."""
+    async def search(
+        self, vector: list[float], text: str, k: int, version: int, kinds: Sequence[str] | None = None
+    ) -> list[SearchHit]:
+        """Hybrid in one query (vector + full text + RRF), over the given version only; with `kinds`, only
+        chunks of documents of those kinds."""
 
 
 class Reranker(Protocol):

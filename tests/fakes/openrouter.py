@@ -2,7 +2,9 @@
 its own HTTP clients.
 
 Scripted per model: each model has a queue of behaviors, consumed one per request; an empty queue answers
-normally. It records every request (path, model, body), so a test can assert which chain entries were called.
+normally. A request with an output schema reads first the queue of that schema's title (`script_schema`), so
+steps sharing a model (route, assess, reformulate) get their own replies. It records every request (path,
+model, body), so a test can assert which chain entries were called.
 
 - chat completions, as JSON or SSE (`stream: true`), with usage;
 - `/rerank`, scoring the documents in their given order unless `rerank_scores` says otherwise;
@@ -69,6 +71,7 @@ class FakeOpenRouter:
         self._server: FakeServer | None = None
         self._base = ""
         self.scripts: dict[str, deque[Behavior]] = defaultdict(deque)
+        self.schema_scripts: dict[str, deque[Behavior]] = defaultdict(deque)
         self.requests: list[Recorded] = []
         # By default the documents keep their order; a test sets another ranking.
         self.rerank_scores: Callable[[list[str]], list[float]] = lambda docs: [
@@ -81,6 +84,10 @@ class FakeOpenRouter:
     def always(self, model: str, behavior: Behavior, times: int = 1000) -> None:
         self.script(model, *([behavior] * times))
 
+    def script_schema(self, title: str, *behaviors: Behavior) -> None:
+        """Replies to requests whose output schema has this title (the Pydantic model's name)."""
+        self.schema_scripts[title].extend(behaviors)
+
     def models_called(self) -> list[str]:
         return [r.model for r in self.requests]
 
@@ -89,7 +96,8 @@ class FakeOpenRouter:
         path = request.url.path.removeprefix("/api/v1")
         model = body.get("model", "")
         self.requests.append(Recorded(path, model, body))
-        queue = self.scripts[model]
+        title = body.get("response_format", {}).get("json_schema", {}).get("schema", {}).get("title")
+        queue = self.schema_scripts[title] if title and self.schema_scripts[title] else self.scripts[model]
         behavior: Behavior = queue.popleft() if queue else Reply()
         if behavior == "rate_limited":
             return httpx.Response(429, headers={"Retry-After": "30"}, json={"error": {"code": 429}})

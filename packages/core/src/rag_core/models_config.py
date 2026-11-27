@@ -6,8 +6,11 @@ an invalid file stops the app.
 
 import hashlib
 import json
+import os
+import re
 from pathlib import Path
 from typing import Any, Literal, Self
+from urllib.parse import urlparse
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -17,6 +20,8 @@ from rag_core.limits import Limits
 StageName = Literal["route", "rerank", "answer", "judge"]
 
 _STRICT = ConfigDict(extra="forbid", frozen=True)
+# `${NAME}` or `${NAME:-default}` in a provider's base URL, read from the environment at load.
+_VARIABLE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
 
 
 class Price(BaseModel):
@@ -67,10 +72,26 @@ class Provider(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _openrouter_by_default(cls, data: Any) -> Any:
-        if isinstance(data, dict) and "kind" not in data and "openrouter.ai" in str(data.get("base_url", "")):
+    def _resolve_url_then_kind(cls, data: Any) -> Any:
+        """Reads `${VAR}`s in the base URL, then defaults the kind from the resolved URL."""
+        if isinstance(data, dict) and isinstance(data.get("base_url"), str):
+            data = {**data, "base_url": _VARIABLE.sub(_variable, data["base_url"])}
+        if isinstance(data, dict) and "kind" not in data and _is_openrouter(str(data.get("base_url", ""))):
             return {**data, "kind": "openrouter"}
         return data
+
+
+def _is_openrouter(url: str) -> bool:
+    host = urlparse(url).hostname or ""
+    return host == "openrouter.ai" or host.endswith(".openrouter.ai")
+
+
+def _variable(match: re.Match[str]) -> str:
+    name, default = match.group(1), match.group(2)
+    value = os.environ.get(name) or default  # set but empty counts as unset, as in the shell
+    if value is None:
+        raise ValueError(f"base_url needs the environment variable {name}")
+    return value
 
 
 class Stages(BaseModel):

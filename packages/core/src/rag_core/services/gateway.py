@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 
 import structlog
+from langchain_core.utils.json import parse_json_markdown
 from pydantic import BaseModel, ValidationError
 
 from rag_core.background import BackgroundTasks
@@ -431,8 +432,9 @@ class ModelGateway:
             log.warning("model_empty_answer", stage=stage, model=entry.model)
             return None
         try:
-            parsed = schema.model_validate_json(result.text) if schema is not None else None
-        except ValidationError:
+            # JSON mode, or JSON inside a Markdown fence (LLD "6.4 Answer contract and verification").
+            parsed = schema.model_validate(parse_json_markdown(result.text)) if schema is not None else None
+        except (ValidationError, ValueError):
             log.warning("model_schema_miss", stage=stage, model=entry.model)
             return None
         usage = Usage(result.tokens_in, result.tokens_out)
@@ -485,7 +487,7 @@ class ModelGateway:
     ) -> _Reservation | None:
         """Reserve the paid entry's estimate against the request and the day; None skips the entry."""
         assert entry.price is not None  # the config requires a price on a paid entry
-        prompt_tokens = math.ceil(chars / CHARS_PER_TOKEN)
+        prompt_tokens = estimate_tokens(chars)
         max_tokens = self.config.stage(stage).max_tokens
         estimate = (
             prompt_tokens * entry.price.input_per_mtok + max_tokens * entry.price.output_per_mtok
@@ -570,6 +572,11 @@ class ModelGateway:
             )
         except StoreUnavailableError as exc:
             log.error("budget_settle_failed", error=str(exc))
+
+
+def estimate_tokens(chars: int) -> int:
+    """Tokens in `chars` characters of text, rounded up, without a tokenizer."""
+    return math.ceil(chars / CHARS_PER_TOKEN)
 
 
 async def _aclose(chunks: AsyncIterator[object]) -> None:

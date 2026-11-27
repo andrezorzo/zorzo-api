@@ -3,7 +3,7 @@
 Vectors travel as pgvector's text form (`[1,2,3]`) with explicit casts, so no driver adapter is needed.
 """
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 
 import structlog
@@ -20,11 +20,12 @@ TEXT_SEARCH_CONFIG = {"en": "english", "pt": "portuguese"}
 
 HYBRID_SEARCH = text("""
 WITH vec AS (
-    SELECT id, row_number() OVER (ORDER BY embedding <=> CAST(:vector AS vector)) AS rank
-    FROM chunks
+    SELECT c.id, row_number() OVER (ORDER BY c.embedding <=> CAST(:vector AS vector)) AS rank
+    FROM chunks c JOIN documents d ON d.id = c.document_id
     -- Nearest neighbours always exist; below the floor they aren't a match (LLD "Values and configuration").
-    WHERE corpus_version = :version AND 1 - (embedding <=> CAST(:vector AS vector)) >= :min_similarity
-    ORDER BY embedding <=> CAST(:vector AS vector)
+    WHERE c.corpus_version = :version AND 1 - (c.embedding <=> CAST(:vector AS vector)) >= :min_similarity
+        AND (CAST(:kinds AS text[]) IS NULL OR d.kind = ANY(CAST(:kinds AS text[])))
+    ORDER BY c.embedding <=> CAST(:vector AS vector)
     LIMIT :k
 ), query AS (
     -- Any term of the question matches (OR), ranked by how many and how close; the question's language
@@ -33,8 +34,9 @@ WITH vec AS (
         || replace(plainto_tsquery('portuguese', :text)::text, '&', '|')::tsquery AS q
 ), fts AS (
     SELECT c.id, row_number() OVER (ORDER BY ts_rank_cd(c.tsv, query.q) DESC, c.id) AS rank
-    FROM chunks c, query
+    FROM chunks c JOIN documents d ON d.id = c.document_id, query
     WHERE c.corpus_version = :version AND c.tsv @@ query.q
+        AND (CAST(:kinds AS text[]) IS NULL OR d.kind = ANY(CAST(:kinds AS text[])))
     ORDER BY ts_rank_cd(c.tsv, query.q) DESC, c.id
     LIMIT :k
 ), fused AS (
@@ -75,7 +77,9 @@ class PgVectorStore:
             ).first()
         return ActiveCorpus(row.version, row.embed_model_tag) if row else None
 
-    async def search(self, vector: list[float], text_query: str, k: int, version: int) -> list[SearchHit]:
+    async def search(
+        self, vector: list[float], text_query: str, k: int, version: int, kinds: Sequence[str] | None = None
+    ) -> list[SearchHit]:
         async with self.db.engine.begin() as conn:
             # Keep scanning the HNSW graph until enough rows pass the version filter (pgvector 0.8).
             await conn.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
@@ -88,6 +92,7 @@ class PgVectorStore:
                     "version": version,
                     "rrf_k": self.rrf_k,
                     "min_similarity": self.min_similarity,
+                    "kinds": list(kinds) if kinds is not None else None,
                 },
             )
             return [SearchHit(r.id, r.title, r.content, float(r.score)) for r in rows]

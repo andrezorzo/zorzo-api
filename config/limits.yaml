@@ -25,3 +25,9 @@ budget_paid_cutoff: 0.8  # share of the day's budget at which paid entries stop
 request_cost_cap_usd: 0.01
 breaker_cooldown: 60  # seconds a free entry cools down when the provider sends no Retry-After (LiteLLM)
 alert_repeat_after: 43200  # seconds (12 h)
+answer_reserve: 12  # seconds left before `answer` starts, or the run goes search-only
+max_reformulate: 1
+max_repair: 1
+recursion_limit: 12  # LangGraph backstop; reaching it is a bug
+context_max_tokens: 2500  # passages in a prompt
+# relevance_floor and assess_skip_score: off until calibrated at M3 (LLD "6.3 Agent run")

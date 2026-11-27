@@ -2,7 +2,7 @@
 # provisional until the quick eval (F01-T06). The rerank chain is empty: only the local cross-encoder runs.
 providers:
   ollama:
-    base_url: http://localhost:11434/v1
+    base_url: ${OLLAMA_URL:-http://localhost:11434}/v1  # compose sets OLLAMA_URL=http://ollama:11434
 stages:
   route:
     max_tokens: 200

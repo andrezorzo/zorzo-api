@@ -96,3 +96,39 @@ def test_version_follows_content_not_formatting(tmp_path: Path) -> None:
     assert (
         config_version(load_models(write(tmp_path, VALID)), LIMITS.model_copy(update={"rrf_k": 61})) != base
     )
+
+
+def test_a_base_url_reads_its_variable_from_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    text = VALID.replace('"https://openrouter.ai/api/v1"', '"${GATEWAY_HOST:-http://localhost:1}/v1"')
+    monkeypatch.delenv("GATEWAY_HOST", raising=False)
+    assert load_models(write(tmp_path, text)).providers["openrouter"].base_url == "http://localhost:1/v1"
+    monkeypatch.setenv("GATEWAY_HOST", "")  # set but empty counts as unset, as in the shell
+    assert load_models(write(tmp_path, text)).providers["openrouter"].base_url == "http://localhost:1/v1"
+    monkeypatch.setenv("GATEWAY_HOST", "http://ollama:11434")
+    assert load_models(write(tmp_path, text)).providers["openrouter"].base_url == "http://ollama:11434/v1"
+    with pytest.raises(ValidationError, match="NEEDED_HOST"):
+        load_models(write(tmp_path, text.replace("${GATEWAY_HOST:-http://localhost:1}", "${NEEDED_HOST}")))
+
+
+def test_the_kind_follows_the_resolved_base_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ROUTER_URL", "https://openrouter.ai/api/v1")
+    text = VALID.replace('"https://openrouter.ai/api/v1"', '"${ROUTER_URL}"')
+    assert load_models(write(tmp_path, text)).providers["openrouter"].kind == "openrouter"
+    monkeypatch.setenv("ROUTER_URL", "http://ollama:11434/v1")
+    assert load_models(write(tmp_path, text)).providers["openrouter"].kind == "openai"
+
+
+@pytest.mark.parametrize(
+    ("url", "kind"),
+    [
+        ("https://openrouter.ai/api/v1", "openrouter"),
+        ("https://eu.openrouter.ai/api/v1", "openrouter"),
+        ("https://openrouter.ai.proxy.internal/v1", "openai"),
+        ("http://ollama:11434/v1?via=openrouter.ai", "openai"),
+    ],
+)
+def test_the_kind_is_openrouter_only_for_its_hosts(tmp_path: Path, url: str, kind: str) -> None:
+    text = VALID.replace('"https://openrouter.ai/api/v1"', f'"{url}"')
+    assert load_models(write(tmp_path, text)).providers["openrouter"].kind == kind

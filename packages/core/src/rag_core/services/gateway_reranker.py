@@ -4,6 +4,8 @@ Any failure (every free entry failed or cooling down, no time left) raises, and 
 to the local level.
 """
 
+from dataclasses import replace
+
 from rag_core.ports import SearchHit
 from rag_core.services.gateway import ModelGateway
 
@@ -19,5 +21,5 @@ class GatewayReranker:
         # The port carries no deadline: the call gets the stage's timeout, and the request's deadline, which
         # bounds the whole search-only run around it, cancels it if it comes first.
         scores = await self.gateway.rerank(query, [h.content for h in hits])
-        scored = [SearchHit(h.id, h.title, h.content, s) for h, s in zip(hits, scores, strict=True)]
+        scored = [replace(h, score=s) for h, s in zip(hits, scores, strict=True)]
         return sorted(scored, key=lambda h: h.score, reverse=True)

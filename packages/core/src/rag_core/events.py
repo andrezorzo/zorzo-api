@@ -28,6 +28,9 @@ StageName = Literal[
     "finish",
 ]
 DegradedReason = Literal["models_unavailable", "budget_exhausted", "quota_exhausted", "deadline"]
+# The result of a request, named as the stored outcomes are (`questions_log.outcome`); `error` (a bug) is
+# this stream's only, and storing it is F01-T10's to map.
+Outcome = Literal["answered", "abstained", "declined", "blocked", "degraded", "error"]
 
 
 class StreamEvent(BaseModel):
@@ -84,8 +87,10 @@ class Claim(StreamEvent):
     kind = "claim"
     i: int
     text: str
-    sources: list[int] = Field(description="Chunk ids")
-    verdict: Literal["supported", "partial", "unsupported"]
+    sources: list[int] = Field(description="Chunk ids; empty for the `gap` sentence")
+    verdict: Literal["supported", "partial", "unsupported", "gap"] = Field(
+        description="`gap`: the sentence naming the part of the question the sources don't cover"
+    )
 
 
 class Usage(StreamEvent):
@@ -118,8 +123,8 @@ class Error(StreamEvent):
 class Done(StreamEvent):
     kind = "done"
     trace_id: UUID
+    outcome: Outcome
     cached: bool
-    abstained: bool
     suggestion: str | None = Field(
         description="Id of the closest example question, on an abstention or decline"
     )

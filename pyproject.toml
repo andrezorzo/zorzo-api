@@ -13,6 +13,9 @@ dependencies = [
 
 [tool.uv]
 package = false
+# LangGraph's own packages, held at releases two weeks old when langgraph was pinned (F01-T06); newer ones
+# come in a reviewed PR.
+constraint-dependencies = ["langgraph-checkpoint==4.3.1", "langgraph-prebuilt==1.1.1"]
 
 [tool.uv.workspace]
 members = ["packages/core", "apps/api", "apps/dashboard", "apps/ingest", "domains/zorzo"]
@@ -114,5 +117,15 @@ ignore_imports = [
     "rag_core.adapters.** -> openai",
 ]
 # Apps wire adapters at startup, so an app reaching a client through an adapter is allowed.
+allow_indirect_imports = true
+unmatched_ignore_imports_alerting = "none"
+
+[[tool.importlinter.contracts]]
+name = "only the agent package uses langgraph"
+type = "forbidden"
+source_modules = ["rag_core", "rag_api", "rag_ingest", "domain_zorzo"]
+forbidden_modules = ["langgraph"]
+ignore_imports = ["rag_core.agent.** -> langgraph"]
+# The API runs the graph through `rag_core.agent`.
 allow_indirect_imports = true
 unmatched_ignore_imports_alerting = "none"

@@ -37,7 +37,7 @@ zorzo-api/
   packages/core/        generic core: retrieval, model gateway, agent graph, verification,
                         guard, telemetry, ingest pipeline, eval harness; ports and adapters   (existing: settings,
                         errors, health, events, retrieval, search-only answer, ingest
-                        pipeline, model gateway, budget, alerts,
+                        pipeline, model gateway, budget, alerts, agent graph, verification,
                         Postgres/Ollama/rerank/gitleaks/publisher/LiteLLM/Telegram
                         adapters)
   apps/api/             FastAPI: HTTP routes, SSE, gate; wires core + domain at startup      (existing: healthz, ask)
@@ -46,7 +46,8 @@ zorzo-api/
   domains/zorzo/        domain parts (ADR 0011), inside the `domain_zorzo` package: corpus/,
                         examples.yaml, prompts/, intents.yaml, tools/, evals/ (datasets),
                         loaders.yaml, public.yaml                                             (existing: domain.yaml,
-                                                                                              corpus/, examples.yaml)
+                                                                                              corpus/, examples.yaml,
+                                                                                              prompts/, intents.yaml)
   config/               models.yaml, models.local.yaml, limits.yaml                           (existing)
   contracts/            sse-v1.schema.json, openapi.json snapshot                             (existing: sse-v1)
   infra/                terraform/, compose files, Caddyfiles, systemd units and timers       (existing: compose,
@@ -150,7 +151,7 @@ connection; the domain is chosen by `DOMAIN` and loaded by the apps, never by `c
 | EventLog | `write` | Level, component, event, fields | — | One `log_events` row, written in the background; never blocks the caller |
 | DataPublisher | `publish` | Brain and corpus data for a version | Manifest | S3 adapter writes `data/<hash>/` and invalidates only the manifest; local adapter writes a folder the local Caddy serves |
 
-Core modules: Retrieval, Ingest pipeline and Model gateway **existing**; Gate, Guard, Agent graph, Verification,
+Core modules: Retrieval, Ingest pipeline, Model gateway, Gate, Agent graph and Verification **existing**; Guard,
 Telemetry and Eval harness **planned**. Responsibilities: HLD section "Architecture" (core and domain). Tools are
 domain pieces, not ports (section 6.5).
 
@@ -345,7 +346,7 @@ Conventions:
 
 | Method and path | Status | Input | Output | Behavior |
 | --- | --- | --- | --- | --- |
-| `POST /api/v1/ask` | existing (search-only until the agent graph) | `q` (1 to `MAX_QUESTION_CHARS` characters after trimming), `session` (UUID), `turnstile` (non-empty; verified by the gate) | `200 text/event-stream`; errors per section 3, with `503 unavailable` also when there is no active corpus version or its `embed_model_tag` differs from the API's embedder | The gate runs before the stream opens; after it passes, the events below |
+| `POST /api/v1/ask` | existing | `q` (1 to `MAX_QUESTION_CHARS` characters after trimming), `session` (UUID), `turnstile` (non-empty; verified by the gate) | `200 text/event-stream`; errors per section 3, with `503 unavailable` also when there is no active corpus version or its `embed_model_tag` differs from the API's embedder | The gate runs before the stream opens; after it passes, the events below |
 | `GET /api/healthz` | existing | — | `200 {status: ok, mode: normal \| degraded, db: ok}`, with `degraded` when the gateway's mode is a degraded reason (section 2, ModelGateway `mode`); `503 {status: down, mode: unknown, db: down}` when the database can't be reached | Never cached (`Cache-Control: no-store`; CloudFront caches no error responses for `/api/*`), no gate. Used by the front, the deploy smoke test and UptimeRobot |
 
 JSON read routes for traces, evals, defenses, status and sources are not part of the API: the dashboard
@@ -487,15 +488,18 @@ States of the day's budget row; the day is UTC, so every visitor sees the same "
 
 ### 6.3 Agent run
 
-- **Routing:** `route` classifies the intent (`career_fact`, `about_andre`, `about_system`, `projects_live`,
-  `contact`, `off_topic`) with structured output and rewrites a follow-up into a standalone question. Its
-  output is `intent`, `standalone_question`, `language` (ISO 639-1), `follow_up` (the question refers to
-  earlier turns) and `public_ok`: `public_ok` is: whether the question may appear on public pages, judged by content
-  category (offensive, harassment, sexual content, attacks on other people, personal data), not by
-  sentiment. It adds no model call and never changes the answer, only what public pages show (section 8). In the
-  MVP `career_fact` (salary, availability, visa, time zone) goes through RAG over the FAQ only (retrieval
-  filtered to `kind = faq`; with no FAQ passage the run abstains without an answer call); `off_topic` →
-  decline, with no answer call; `contact` → `contact_options`; the other intents go through RAG.
+- **Routing:** `route` classifies the question into one of the domain's intents (`intents.yaml` in the domain
+  package, ADR 0011; for zorzo: `career_fact`, `about_andre`, `about_system`, `projects_live`, `contact`,
+  `off_topic`) with structured output, its schema narrowed to those names at startup, and rewrites a
+  follow-up into a standalone question. Its output is `intent`, `standalone_question`, `language` (ISO
+  639-1), `follow_up` (the question refers to earlier turns) and `public_ok`: `public_ok` is whether the
+  question may appear on public pages, judged by content category (offensive, harassment, sexual content,
+  attacks on other people, personal data), not by sentiment. It adds no model call and never changes the
+  answer, only what public pages show (section 8). Each intent in `intents.yaml` declares the document
+  kinds its retrieval reads (all when absent; with none of them found, the run abstains without an answer
+  call) and its action: `answer` (RAG) or `decline` (no answer call). For zorzo, `career_fact` (salary,
+  availability, visa, time zone) reads only `faq`, `off_topic` declines, and `contact` answers through RAG
+  until `contact_options` (F01-T08). The core names no intent.
 - **Edge questions:** a follow-up with no history is an abstention with a fixed message asking what the
   visitor means; a question in a language other than English or Portuguese is answered in English, with one
   line saying the site answers in both. The suggestion on an abstention or decline is the domain's example
@@ -516,8 +520,11 @@ States of the day's budget row; the day is UTC, so every visitor sees the same "
 - **Failures by moment:** `route`, `assess` or `reformulate` failing on every entry, or `answer` failing
   before its first token, sends the run to search-only (`degraded {reason: models_unavailable}`), with the
   passages already found or a retrieval of the raw question; too little time before `answer` is
-  `degraded {reason: deadline}`. `answer` failing after its first token, or the judge failing or running
-  out of time, ends in an abstention after the draft: a draft is never published unverified.
+  `degraded {reason: deadline}` (the steps before it run under `time left − ANSWER_RESERVE`). `answer`
+  failing after its first token, or the judge failing or running out of time, ends in an abstention after
+  the draft: a draft is never published unverified. `REQUEST_DEADLINE` passing with nothing found yet (a
+  hung search) ends with `error` then `done`, as on the search-only path: "no matching sources" would be
+  untrue. An ending already sent (the claims, or search-only) stands whatever fails after it.
 - **Retries:** one retry with jitter, only on timeout, 5xx or 429, and only if the remaining time covers it.
   After that a tool result becomes `{"status": "unavailable"}` and the answer says which source was missing.
 - **Repeats:** a tool call whose key was already seen returns the memoized result; a second repeat forces
@@ -558,6 +565,12 @@ States of the day's budget row; the day is UTC, so every visitor sees the same "
 - **What is sent:** the published answer's claims, each with its verdict (`unsupported` ones too, shown as
   removed), then the `gap` sentence as a last `claim` with no sources and verdict `gap`. After a repair only
   the repaired answer's claims are sent.
+- **Untrusted text in a prompt:** the instructions (system message) hold only the domain's prompt and the
+  corpus passages; the question, and the claims the judge and the repair read, go in the user message,
+  the claims as JSON strings, so model or visitor text can't pose as structure or instructions.
+- **Extra objects:** when the model writes more than the one JSON object asked for, the last answer object
+  counts, for the draft and the answer alike; the draft may then show an earlier one, which the checked
+  claims or the abstention replace.
 - **Abstention:** "not in my sources", plus related sources and the contact link.
 - **About a real person:** third person always (first-person sources are rewritten); no salary, personal
   life, inferred opinions or comparisons; superlatives only when quoted verbatim from an `authority: 3`
@@ -785,7 +798,7 @@ endpoints and per-environment switches.
 | `MAX_BODY_BYTES` | 8 KB | Request body, in Caddy and in the API | Caddyfile, `limits.yaml` |
 | `PING_INTERVAL` | 10 s | SSE heartbeat | `limits.yaml` |
 | `REQUEST_DEADLINE` | 20 s | Whole request; the search-only path ends with `error` then `done` when it passes | `limits.yaml` |
-| `ANSWER_RESERVE` | 12 s | Time kept for `answer` (section 6.3) | `limits.yaml` |
+| `ANSWER_RESERVE` | 12 s | Time kept for `answer` (section 6.3); must be shorter than `REQUEST_DEADLINE`, checked at startup | `limits.yaml` |
 | `TIMEOUT_ROUTE` / `TIMEOUT_RERANK` / `TIMEOUT_ANSWER` / `TIMEOUT_JUDGE` | 3 s / 2.5 s / 12 s / 5 s | Model gateway per stage; the remote rerank of 20 candidates took 1.0 to 2.0 s when measured on 2026-11-25 | `limits.yaml` |
 | `TIMEOUT_SEARCH_CORPUS` / `TIMEOUT_GITHUB_ACTIVITY` | 1.5 s / 2 s | Tools | `limits.yaml` |
 | `TIMEOUT_TURNSTILE` | 3 s | Bot check (`siteverify`); Cloudflare sets no value | `limits.yaml` |

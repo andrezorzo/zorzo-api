@@ -1,0 +1,11 @@
+# The intents `route` classifies a question into (LLD "6.3 Agent run"); the route prompt describes each one.
+# `kinds`: the document kinds the intent's retrieval reads (all when absent). `action`: `answer` (default, the
+# RAG path) or `decline` (no answer call).
+career_fact:  # salary or rates, availability, visa, time zone: answered from the FAQ only
+  kinds: [faq]
+about_andre: {}
+about_system: {}
+projects_live: {}
+contact: {}
+off_topic:
+  action: decline

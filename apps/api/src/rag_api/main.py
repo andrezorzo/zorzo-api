@@ -18,7 +18,8 @@ from rag_core.adapters.pgvector_store import PgVectorStore
 from rag_core.adapters.postgres import Database
 from rag_core.adapters.rate_limit import PostgresRateLimiter
 from rag_core.adapters.turnstile import TurnstileBotCheck
-from rag_core.domain import load_domain
+from rag_core.agent.graph import build_graph
+from rag_core.domain import load_domain, load_intents, load_prompts
 from rag_core.limits import Limits, load_limits
 from rag_core.models_config import config_version, load_models
 from rag_core.ports import Alerter
@@ -86,6 +87,9 @@ def create_app(settings: ApiSettings) -> FastAPI:
 
     app = FastAPI(title="rag-api", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.domain = domain
+    app.state.prompts = load_prompts(settings.domain)
+    app.state.intents = load_intents(settings.domain)
+    app.state.agent = build_graph()
     app.state.db = db
     app.state.limits = limits
     app.state.embedder = build_embedder(settings)
