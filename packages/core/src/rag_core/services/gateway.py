@@ -11,7 +11,7 @@ import asyncio
 import contextlib
 import math
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 
 import structlog
@@ -31,6 +31,7 @@ from rag_core.ports import (
     EventLog,
     ModelRouter,
     ProviderError,
+    RateLimitedError,
     StoreUnavailableError,
 )
 from rag_core.services.alerts import Alerts
@@ -52,6 +53,19 @@ MAX_COST_OVER_ESTIMATE = 2
 # The background work gets this long at shutdown, its three kinds at once, plus a short wait for what it
 # cancels (`CANCEL_WAIT_S`): Docker kills the container 10 s after SIGTERM.
 SHUTDOWN_DRAIN_S = 6.0
+# Why an entry didn't answer, as the trace records it (`Completion.fallback_reason`). Not here: `budget` and
+# `request_cap`, the reasons for skipping the paid entry, which is last in the chain, so no later entry
+# answers with them (see the plan's AC5).
+COOLING_DOWN, RATE_LIMITED_REASON, TIMEOUT, FAILED = "cooling_down", "rate_limited", "timeout", "failed"
+
+
+def _reason(exc: BaseException) -> str:
+    """Why a failed call didn't answer, as the trace names it."""
+    if isinstance(exc, CoolingDownError):
+        return COOLING_DOWN
+    if isinstance(exc, RateLimitedError):
+        return RATE_LIMITED_REASON
+    return TIMEOUT if isinstance(exc, TimeoutError) else FAILED
 
 
 class ModelsUnavailableError(Exception):
@@ -72,6 +86,9 @@ class Completion:
     cost_usd: float
     provider: str
     model: str
+    # Why the last earlier entry of the stage's chain didn't answer (`FALLBACK_REASONS`); None when the
+    # first entry tried answered.
+    fallback_reason: str | None = None
 
 
 @dataclass
@@ -91,6 +108,7 @@ class _Outcome:
 
     completion: Completion | None = None
     failed: bool = False
+    reason: str = FAILED  # why this entry didn't answer, when it didn't
 
 
 @dataclass
@@ -145,9 +163,12 @@ class ModelGateway:
         json_schema = schema.model_json_schema() if schema is not None else None
         chain = self.config.stage(stage)
         await self._note_cooldowns()
+        why: str | None = None
         for entry in chain.free:
             for _ in range(ATTEMPTS_PER_FREE_ENTRY):
                 if not self._callable(stage, entry, deadline_at):
+                    if self._cooling_down(stage, entry):
+                        why = COOLING_DOWN
                     break
                 try:
                     async with asyncio.timeout_at(deadline_at):
@@ -160,12 +181,14 @@ class ModelGateway:
                         )
                 except (ProviderError, TimeoutError) as exc:
                     self._failed(stage, exc)
+                    why = _reason(exc)
                     break
                 finally:
                     await self._note_cooldowns()
                 completion = self._completion(stage, entry, result, schema, cost=0.0)
                 if completion is not None:
-                    return completion
+                    return replace(completion, fallback_reason=why)
+                why = FAILED  # the model's miss
         reservation = await self._paid_reservation(stage, messages, deadline_at, spend)
         if reservation is not None:
             paid_result = await self._paid_call(
@@ -183,7 +206,7 @@ class ModelGateway:
                 cost = await self._settle_success(reservation, paid_result)
                 completion = self._completion(stage, reservation.entry, paid_result, schema, cost)
                 if completion is not None:
-                    return completion
+                    return replace(completion, fallback_reason=why)
         raise ModelsUnavailableError(stage)
 
     async def stream(
@@ -197,9 +220,12 @@ class ModelGateway:
         """
         chain = self.config.stage(stage)
         await self._note_cooldowns()
+        why: str | None = None
         for entry in chain.free:
             for _ in range(ATTEMPTS_PER_FREE_ENTRY):
                 if not self._callable(stage, entry, deadline_at):
+                    if self._cooling_down(stage, entry):
+                        why = COOLING_DOWN
                     break
                 chunks = self.models.stream(
                     entry_id(stage, entry),
@@ -216,8 +242,9 @@ class ModelGateway:
                 finally:
                     await self._note_cooldowns()
                 if outcome.completion is not None:
-                    yield outcome.completion
+                    yield replace(outcome.completion, fallback_reason=why)
                     return
+                why = outcome.reason
                 if outcome.failed:  # the provider's failure: next entry; a model miss gets another try
                     break
         reservation = await self._paid_reservation(stage, messages, deadline_at, spend)
@@ -237,7 +264,7 @@ class ModelGateway:
             finally:
                 await self._note_cooldowns()
             if outcome.completion is not None:
-                yield outcome.completion
+                yield replace(outcome.completion, fallback_reason=why)
                 return
         raise ModelsUnavailableError(stage)
 
@@ -342,6 +369,9 @@ class ModelGateway:
 
     # -- calls --------------------------------------------------------------------------------------------
 
+    def _cooling_down(self, stage: StageName, entry: Entry) -> bool:
+        return entry_id(stage, entry) in self._cooling
+
     def _callable(self, stage: StageName, entry: Entry, deadline_at: float) -> bool:
         """Time is left and the entry isn't cooling down."""
         return not self._out_of_time(deadline_at) and entry_id(stage, entry) not in self._cooling
@@ -387,6 +417,7 @@ class ModelGateway:
                 if wrote:
                     raise ModelsUnavailableError(f"{stage} failed after the first token") from exc
                 outcome.failed = True
+                outcome.reason = _reason(exc)
                 return
             raise
         cost = 0.0 if reservation is None else await self._settle_success(reservation, result)

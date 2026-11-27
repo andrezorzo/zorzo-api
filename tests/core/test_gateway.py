@@ -302,6 +302,53 @@ async def test_a_model_miss_is_retried_once_on_the_entry_then_the_chain_moves_on
     assert not await rig.gateway.models.cooldowns()  # misses are the model's: no entry cools
 
 
+# -- F01-T10 AC5: why an earlier entry didn't answer ---------------------------------------------------------
+
+
+async def test_the_completion_names_why_the_earlier_entry_didnt_answer(rig: Rig) -> None:
+    first = await rig.complete()
+    assert (first.model, first.fallback_reason) == (A, None)  # the first entry tried answered
+
+    rig.fake.script(A, "rate_limited")
+    limited = await rig.complete()
+    assert (limited.model, limited.fallback_reason) == (B, "rate_limited")
+    cooling = await rig.complete()  # A is still cooling from the 429
+    assert (cooling.model, cooling.fallback_reason) == (B, "cooling_down")
+
+
+@pytest.mark.parametrize(
+    ("failure", "reason"), [("error", "failed"), ("malformed", "failed"), ("hang", "timeout")]
+)
+async def test_a_failed_or_timed_out_entry_is_named(rig: Rig, failure: str, reason: str) -> None:
+    with_limits(rig, timeout_answer=0.3)
+    rig.fake.script(A, failure)
+    result = await rig.complete()
+    assert (result.model, result.fallback_reason) == (B, reason)
+
+
+async def test_a_model_miss_on_the_first_entry_is_a_failure(rig: Rig) -> None:
+    rig.fake.script(A, Reply(text="not json"), Reply(text="not json"))
+    rig.fake.script(B, Reply(text='{"supported": false}'))
+    result = await rig.complete(schema=Verdict)
+    assert (result.model, result.fallback_reason) == (B, "failed")
+
+
+async def test_the_reason_is_the_last_earlier_entrys(rig: Rig) -> None:
+    rig.fake.script(A, "rate_limited")
+    rig.fake.script(B, "error")
+    rig.fake.script(PAID, Reply(tokens_in=1000, tokens_out=100))
+    result = await rig.complete()
+    assert (result.model, result.fallback_reason) == (PAID, "failed")
+
+
+async def test_a_stream_names_why_the_earlier_entry_didnt_answer(rig: Rig) -> None:
+    *_, first = await rig.stream()
+    assert isinstance(first, Completion) and first.fallback_reason is None
+    rig.fake.script(A, "error")
+    *_, second = await rig.stream()
+    assert isinstance(second, Completion) and (second.model, second.fallback_reason) == (B, "failed")
+
+
 # -- AC2: the paid entry ----------------------------------------------------------------------------------
 
 
