@@ -11,6 +11,7 @@ from rag_core.adapters.factory import (
     build_embedder,
     build_gateway,
     build_rerankers,
+    build_tracer,
     provider_keys,
     rerank_chain,
 )
@@ -45,6 +46,12 @@ async def _warm_rerankers(app: FastAPI) -> None:
         except Exception:
             # Not fatal: the rerank chain falls to the next level at question time (ADR 0009).
             log.warning("rerank_warmup_failed", level=type(level).__name__, exc_info=True)
+
+
+async def _flush_tracer(app: FastAPI) -> None:
+    """Give LangSmith's queue a moment to drain at shutdown; what is left is dropped."""
+    if app.state.tracer is not None:
+        await anyio.to_thread.run_sync(app.state.tracer.flush, SHUTDOWN_DRAIN_S)
 
 
 def _alerter(settings: ApiSettings) -> Alerter:
@@ -92,7 +99,10 @@ def create_app(settings: ApiSettings) -> FastAPI:
                     try:
                         await app.state.trace_writes.drain(SHUTDOWN_DRAIN_S)
                     finally:
-                        await db.close()
+                        try:
+                            await _flush_tracer(app)
+                        finally:
+                            await db.close()
 
     app = FastAPI(title="rag-api", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.domain = domain
@@ -116,6 +126,7 @@ def create_app(settings: ApiSettings) -> FastAPI:
         settings.app_env,
     )
     app.state.trace_sinks = []  # extra sinks next to the stream and the recorder, for the tests
+    app.state.tracer = build_tracer(settings)  # LangSmith only with a key; ambient tracing off either way
     app.state.trace_store = PostgresTraceStore(db)
     app.state.trace_writes = BackgroundTasks()  # the end-of-request writes, drained at shutdown
     # Everything the stored trace gets passes this first (LLD "Security", trace redaction).

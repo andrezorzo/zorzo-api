@@ -63,6 +63,25 @@ def _agent_context(state: Any, sink: TraceSink, corpus_version: int, deadline_at
     )
 
 
+def _langsmith_run(state: Any, trace_id: UUID, question: str) -> Any:
+    """The request's LangSmith sink; None without a key, or when LangSmith can't be reached at all (never
+    fatal: the question is answered and its trace stored without it)."""
+    if state.tracer is None:
+        return None
+    try:
+        return state.tracer.sink(trace_id, question, state.redactor)
+    except Exception as exc:
+        log.warning("langsmith_failed", error=type(exc).__name__)
+        return None
+
+
+def _finish_langsmith(run: Any, facts: TraceFacts) -> None:
+    try:
+        run.finish(facts)
+    except Exception as exc:
+        log.warning("langsmith_failed", error=type(exc).__name__)
+
+
 async def _write_trace(state: Any, recorder: TraceRecorder, facts: TraceFacts) -> None:
     """The stored trace, written once `done` has been sent; a failure is logged, never raised: the visitor
     already has the answer."""
@@ -107,7 +126,9 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
     trace_id: str = request.state.trace_id
     stream = QueueSink()
     recorder = TraceRecorder(started_at)
-    sink = FanOutSink([stream, recorder, *state.trace_sinks])
+    # In order: the visitor's stream, the stored trace, LangSmith (with a key), then the tests' extras.
+    langsmith = _langsmith_run(state, UUID(trace_id), question)
+    sink = FanOutSink([stream, recorder, *([langsmith] if langsmith else []), *state.trace_sinks])
 
     async def run() -> None:
         # The stream outlives the middleware's log context, so the trace id is bound again here.
@@ -146,6 +167,8 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
             )
             # After `done`, so nothing waits on the database while events are sent. A task of the app's own,
             # shielded: a visitor who leaves now doesn't cancel the write, and shutdown drains it.
+            if langsmith is not None:
+                _finish_langsmith(langsmith, facts)
             write = state.trace_writes.spawn(_write_trace(state, recorder, facts))
             await asyncio.shield(write)
 

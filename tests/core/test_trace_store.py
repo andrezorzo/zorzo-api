@@ -55,7 +55,7 @@ def rows(url: str) -> tuple[int, int, int]:
             conn.execute(f"SELECT count(*) FROM {table}").fetchone()
             for table in ("public_traces", "trace_spans", "questions_log")
         ]
-    return tuple(row[0] for row in found if row)  # type: ignore[return-value]
+    return tuple(row[0] for row in found if row)
 
 
 async def test_a_trace_is_written_in_one_transaction(store: PostgresTraceStore, database_url: str) -> None:

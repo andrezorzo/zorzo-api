@@ -6,10 +6,12 @@ pages that read it are F02's.
 
 import dataclasses
 import json
+import time
 from collections.abc import Callable, Iterator
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
+import langsmith.utils as langsmith_utils
 import psycopg
 import pytest
 import structlog
@@ -23,15 +25,19 @@ from rag_core.ports import StoreUnavailableError
 from rag_core.services.trace import StoredTrace
 from structlog.testing import capture_logs
 
-from tests.api.test_answer import ANSWER_A, ANSWER_B, CLAIMS, answer, routed, script, stages
+from tests.api.test_answer import ANSWER_A, ANSWER_B, CLAIMS, answer, routed, script, stages, verdicts
 from tests.api.test_ask import QUESTION, ask
 from tests.conftest import api_settings, build_app, reset_tables, seed_budget
 from tests.contract.sse import Stream
+from tests.fakes.langsmith import FakeLangSmith
 from tests.fakes.openrouter import FakeOpenRouter, Reply
 
 PAID = "test/answer-paid"
 PAID_COST = 0.000321
 ROUTE_A, ROUTE_B = "test/route:free", "test/route-b:free"
+AMBIENT_WAIT_S = 1.0  # how long a background post would take to reach the fake endpoint
+HUNG_LANGSMITH_BOUND_S = 10  # the stream of a hung LangSmith ends well within the request deadline
+MIN_PROMPT_LINE_CHARS = 12  # a shorter line (a heading, a bullet) is too common to prove a leak
 TRACE_TABLES = ("questions_log", "public_traces", "log_events", "budget_daily")
 
 
@@ -270,3 +276,117 @@ def test_a_fallback_is_recorded_in_the_model_event_and_the_span(
         event = next(e.data for e in stream.only("model") if e.data["stage"] == step)
         assert event["fallback_reason"] is None
         assert next(s for s in trace["spans"] if s["step"] == step)["fallback_reason"] is None
+
+
+# -- AC1 and AC3: LangSmith gets the same steps, redacted ----------------------------------------------------
+
+LS_KEY = "lsv2_pt_" + "0123456789abcdef0123456789abcdef_0123456789"
+SALT = "test-seed-" * 4  # `api_settings`' salt seed: one of the API's own secret values
+OWNER_EMAIL = "andre_zorzo@yahoo.com"  # in the zorzo domain's `pii_allowlist`
+EMAIL, PHONE, CPF = "maria.silva@example.com", "+55 11 98765-4321", "529.982.247-25"
+HIDDEN_QUESTION = f"I am Maria, {EMAIL}, call me on {PHONE}, my CPF is {CPF}: what AWS services did he use?"
+HIDDEN_CLAIMS = [
+    (f"Maria ({EMAIL}) asked about AWS.", [1]),
+    ("He used Lambda with a zero​width joiner in the text.", [1]),
+    (f"The owner's address is {OWNER_EMAIL} and the seed is {SALT}.", [1, 2]),
+]
+
+
+def traced_client(url: str, fake: FakeOpenRouter, langsmith: FakeLangSmith) -> TestClient:
+    settings = api_settings(url, langsmith_api_key=LS_KEY, langsmith_endpoint=langsmith.serve())
+    return TestClient(build_app(settings, openrouter=fake))
+
+
+def flush(client: TestClient) -> None:
+    app: Any = client.app
+    app.state.tracer.flush(10)
+
+
+def test_langsmith_gets_the_same_steps(corpus_database: str, fake: FakeOpenRouter) -> None:
+    langsmith = FakeLangSmith()
+    script(fake)
+    with traced_client(corpus_database, fake, langsmith) as client:
+        stream = ask(client)
+        flush(client)
+    root_id = stream.only("done")[0].data["trace_id"]
+    runs = langsmith.runs()
+    [root] = [r for r in runs if r["id"] == root_id]
+    assert root["name"] == "ask" and root.get("parent_run_id") is None
+    children = sorted((r for r in runs if r.get("parent_run_id") == root_id), key=lambda r: r["start_time"])
+    assert [c["name"] for c in children if c["run_type"] == "chain"] == stages(stream)
+    assert root["outputs"]["outcome"] == "answered"
+    assert root["outputs"]["claims"] == [e.data["text"] for e in stream.only("claim")]
+    models = [r for r in runs if r["run_type"] == "llm"]
+    assert [m["extra"]["metadata"]["ls_model_name"] for m in models] == [
+        e.data["model"] for e in stream.only("model")
+    ]
+    assert all(m["outputs"]["usage_metadata"]["input_tokens"] == 100 for m in models)
+
+
+def test_langsmith_is_off_without_a_key(
+    corpus_database: str, fake: FakeOpenRouter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    langsmith = FakeLangSmith()
+    # LangChain's own tracing, switched on by the environment, would post the graph's runs to the endpoint.
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_ENDPOINT", langsmith.serve())
+    cast(Any, langsmith_utils.get_env_var).cache_clear()  # the SDK reads these once
+    script(fake)
+    try:
+        with TestClient(build_app(api_settings(corpus_database), openrouter=fake)) as client:
+            assert ask(client).names()[-1] == "done"
+        time.sleep(AMBIENT_WAIT_S)  # a background post would arrive by now
+    finally:
+        monkeypatch.undo()
+        cast(Any, langsmith_utils.get_env_var).cache_clear()
+    assert langsmith.received == []
+
+
+def test_a_hung_langsmith_never_holds_the_stream(corpus_database: str, fake: FakeOpenRouter) -> None:
+    langsmith = FakeLangSmith()
+    langsmith.mode = "hang"
+    script(fake)
+    with traced_client(corpus_database, fake, langsmith) as client:
+        started = time.monotonic()
+        stream = ask(client)
+        assert time.monotonic() - started < HUNG_LANGSMITH_BOUND_S
+        assert stream.names()[-1] == "done"
+        assert "claim" in stream.names()
+        trace = trace_of(corpus_database, stream)
+        assert trace["outcome"] == "answered"
+        app: Any = client.app
+        app.state.tracer.flush = lambda timeout: None  # don't wait out the hang at shutdown here
+
+
+def all_stored_text(url: str) -> str:
+    with psycopg.connect(url) as conn:
+        rows = [
+            conn.execute(f"SELECT coalesce(string_agg(to_jsonb(t)::text, ' '), '') FROM {table} t").fetchone()
+            for table in ("public_traces", "trace_spans", "questions_log")
+        ]
+    return " ".join(row[0] for row in rows if row)
+
+
+def test_the_stored_trace_and_langsmith_are_redacted(corpus_database: str, fake: FakeOpenRouter) -> None:
+    reset_tables(corpus_database, "questions_log", "public_traces")
+    langsmith = FakeLangSmith()
+    script(
+        fake,
+        draft=answer(HIDDEN_CLAIMS),
+        judge=verdicts((0, "supported"), (1, "supported"), (2, "supported")),
+    )
+    with traced_client(corpus_database, fake, langsmith) as client:
+        stream = ask(client, {**QUESTION, "q": HIDDEN_QUESTION})
+        flush(client)
+        app: Any = client.app
+        prompts = [line.strip() for p in app.state.prompts.model_dump().values() for line in p.splitlines()]
+    assert stream.only("done")[0].data["outcome"] == "answered"
+    assert any(OWNER_EMAIL in e.data["text"] for e in stream.only("claim"))  # the visitor's own stream: as is
+    for where, text in (("stored", all_stored_text(corpus_database)), ("langsmith", langsmith.text())):
+        for leaked in (EMAIL, "98765", CPF, SALT, "​", "\\u200b"):
+            assert leaked not in text, (where, leaked)
+        for line in (p for p in prompts if len(p) >= MIN_PROMPT_LINE_CHARS):
+            assert line not in text and json.dumps(line)[1:-1] not in text, (where, line)
+        for placeholder in ("[email]", "[phone]", "[cpf]", "[secret]"):
+            assert placeholder in text, (where, placeholder)
+        assert OWNER_EMAIL in text  # the domain's allowlist passes

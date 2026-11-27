@@ -78,6 +78,9 @@ services:
       MODELS_FILE: config/models.local.yaml
       # Only needed when MODELS_FILE points at a config with OpenRouter entries.
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      # LangSmith tracing, on only with a key; empty sends nothing (LLD "Environment variables").
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
       # The API binds to 127.0.0.1 by default. To reach it from the host through the port below,
       # set HOST to 0.0.0.0 here (owner's decision).
     depends_on:
