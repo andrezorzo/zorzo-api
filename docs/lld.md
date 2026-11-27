@@ -43,12 +43,14 @@ zorzo-api/
   apps/api/             FastAPI: HTTP routes, SSE, gate; wires core + domain at startup      (existing: healthz, ask)
   apps/dashboard/       Django: public /dash pages, the `data` app (schema owner), commands    (existing: schema)
   apps/ingest/          one-shot job: runs the core ingest pipeline for a domain              (existing)
+  apps/evals/           one-shot job: runs the core eval harness on a corpus version          (planned)
   domains/zorzo/        domain parts (ADR 0011), inside the `domain_zorzo` package: corpus/,
                         examples.yaml, prompts/, intents.yaml, tools/, evals/ (datasets),
                         loaders.yaml, public.yaml                                             (existing: domain.yaml,
                                                                                               corpus/, examples.yaml,
                                                                                               prompts/, intents.yaml)
-  config/               models.yaml, models.local.yaml, limits.yaml                           (existing)
+  config/               models.yaml, models.local.yaml, limits.yaml, evals.yaml               (existing: all but
+                                                                                              evals.yaml)
   contracts/            sse-v1.schema.json, openapi.json snapshot                             (existing: sse-v1)
   infra/                terraform/, compose files, Caddyfiles, systemd units and timers       (existing: compose,
                         Dockerfile)
@@ -78,7 +80,7 @@ means adding `domains/<other>/`, not changing `core`.
 | Validation and settings | Pydantic v2 + pydantic-settings | Tool arguments, answer contract, config files, fail-fast settings |
 | Extraction and chunking | LangChain document loaders (Markdown in the MVP; PDF loaders pluggable per domain) + `MarkdownHeaderTextSplitter` / `RecursiveCharacterTextSplitter` | The loader interface makes the PDF library a configuration choice; Docling is too heavy for the VPS. The résumé enters as owner-reviewed Markdown converted once from the PDF |
 | Tracing | langsmith SDK (`Client` and `RunTree`), fed by the TraceSink fan-out | One fan-out of step events feeds the SSE stream, the stored trace and LangSmith; the SDK's background queue posts the runs. LangChain's ambient tracing (`LANGSMITH_TRACING`) is forced off: it would send the graph state unredacted, and misses the LiteLLM calls and the search-only path |
-| Evals | DeepEval + plain Python metrics | Decisions log, 2026-11-18 |
+| Evals | Plain Python metrics and our per-claim eval judge (section 6.12) | DeepEval's faithfulness re-extracts claims and judges them against every passage, not the ones each claim cites, at three or four judge calls per answer, and its import reads `.env` files and adds pytest plugins; it is evaluated again, isolated, with F03's reference-free metrics (F01-T11) |
 | Logs | structlog | Events with fields, `bind(trace_id=…)`, JSON in production, readable locally |
 | Secret scan | gitleaks + a PII pass: phones by `phonenumbers` (Google's libphonenumber, BR and US plans, pinned), emails by our own extraction, CPF and card numbers by check digits | Ingest gate (HLD flow 6.3); real numbering plans keep year ranges and ports from counting as phones |
 | Tests | pytest + pytest-asyncio; fake OpenRouter server | Real model calls only in eval runs |
@@ -97,7 +99,7 @@ Piece types:
 | Ports | `core` | Interfaces for what lives outside | Hold logic |
 | Adapters | `core/adapters` | The only place with network clients and SDKs; each implements a port | Hold business rules |
 | Domain package | `domains/<name>` | Prompts, intents, tools (core `Tool` protocol), datasets, loader choices | Import adapters |
-| Apps | `apps/api`, `apps/ingest`, evals | Wire adapters and the domain into the core at startup | Hold business rules |
+| Apps | `apps/api`, `apps/ingest`, `apps/evals` | Wire adapters and the domain into the core at startup | Hold business rules |
 | Dashboard | `apps/dashboard` | Public pages, schema owner, snapshot commands | Import `core` (ADR 0015) |
 
 **Allowed dependencies**
@@ -158,6 +160,7 @@ connection; the domain is chosen by `DOMAIN` and loaded by the apps, never by `c
 | Alerter | `send` | Alert kind, message | — | Delivers one message; the alerts service decides when to send (section 6.10) |
 | EventLog | `write` | Level, component, event, fields | — | One `log_events` row, written in the background; never blocks the caller |
 | DataPublisher | `publish` | Brain and corpus data for a version | Manifest | S3 adapter writes `data/<hash>/` and invalidates only the manifest; local adapter writes a folder the local Caddy serves |
+| EvalStore (planned) | `record` / `link` | A run with its results; a candidate and a run | Run id | `record` writes the run and all its results in one transaction; `link` sets the candidate's `eval_run_id` only for a passing run of that version (section 6.12) |
 
 Core modules: Retrieval, Ingest pipeline, Model gateway, Gate, Agent graph and Verification **existing**; Guard,
 Telemetry and Eval harness **planned**. Responsibilities: HLD section "Architecture" (core and domain). Tools are
@@ -333,6 +336,11 @@ domain pieces, not ports (section 6.5).
   with `action: contact` needs a non-empty `contact`, or the API doesn't start. A chunk's `tsv`
   keeps the configuration of its ingest, so changing a language's configuration needs a new corpus
   version.
+- **Eval config** (planned): `config/evals.yaml` (`EVALS_FILE`) holds the eval judge (one pinned entry:
+  `provider`, `model`, `max_tokens`, optional `paid` and `price`, and its measured `agreement`), the gated
+  targets, `EVAL_RUN_BUDGET_USD` and `JUDGE_AGREEMENT_MIN`. It is not part of `model_config_version`, so
+  changing a target or the judge neither invalidates the answer cache nor counts as a models change
+  (section 6.1).
 - **Shutdown:** the gateway drains its background work (reservation releases, alerts, event rows), the API
   its pending trace writes, the answer cache its pending writes, and the LangSmith client its queue, each
   within `SHUTDOWN_DRAIN`; what is left is cancelled (or, in LangSmith's queue, dropped) and logged, so a
@@ -394,8 +402,8 @@ Columns, types, constraints and indexes live in the migrations. What is still pl
 | `log_events` | existing | Closed event catalog |
 | `rate_buckets` | existing | |
 | `budget_daily` | existing | Day in UTC |
-| `eval_runs` | existing | run_kind: `pre_release`, `nightly`; `corpus_version` without a foreign key, so history outlives retired versions |
-| `eval_results` | existing | One row per question per run; feeds failures and flipped verdicts on `/dash/evals` |
+| `eval_runs` | existing | run_kind: `pre_release`, `nightly`; `corpus_version` without a foreign key, so history outlives retired versions. Alteration `planned` (F01-T11): a `judge_model` column; `dataset` holds the eval set's name and version; `metrics` per language (section 6.12) |
+| `eval_results` | existing | One row per question per run; feeds failures and flipped verdicts on `/dash/evals`. Alteration `planned` (F01-T11): one row per case and layer (unique), with `dataset` and the case's `scores`; `lang` checked by the harness against the domain |
 | `external_snapshots` | existing | |
 | `alert_states` | existing | No `site_down` row: UptimeRobot sends it by email (section 6.10) |
 | `entities`, `facts` | to detail | Phase 2, career graph |
@@ -503,6 +511,11 @@ States of a corpus version; arrows carry the event that causes the transition.
 - A change of `model_config_version` and a change of the judge model never ship in the same version: a
   new judge is used only after its agreement with a sample labeled by the owner reaches
   `JUDGE_AGREEMENT_MIN`, so quality is never measured with a new ruler and a new model at once.
+  Alteration `planned` (F01-T11): the linked run must be a passing run of that same version; activation
+  compares its `judge_model` and `model_config_version` with those of the active version's linked run:
+  both different refuses it; the judge different alone refuses it unless the run records a
+  `judge_agreement` of at least `JUDGE_AGREEMENT_MIN`. With no active version holding a linked run, any
+  judge is accepted. The judge is the eval judge of section 6.12, not the `judge` stage.
 - Documents without `reviewed_by_owner: true`, with missing or invalid front matter (a `kind` or `lang`
   the domain doesn't declare is invalid; the finding names the field, never the value), or with a scan hit
   (gitleaks or the PII pass: emails, phone numbers, CPF, card numbers; entries of the domain's
@@ -856,6 +869,58 @@ The nightly retention task deletes:
 
 Daily salts need no deletion: they are derived from the date (section 3 "Security").
 
+### 6.12 Eval run
+
+Status: planned (F01-T11). The sequence is ingest (candidate) → eval run → activation (section 6.1).
+
+- **Eval set:** the domain's datasets in its package's `evals/` folder (ADR 0011): `golden`,
+  `unanswerable`, `adversarial`, `benign_tricky`, `multi_turn` and `facts`, one YAML file each, each with
+  cases in every language of the domain. A case has an `id` unique in its dataset, a `lang`, a question (or
+  the turns of one conversation, in `multi_turn`) and `expect`: the outcomes it accepts, the `doc_key`s of
+  its expected sources, and, in `facts`, the expected answer. `unanswerable` holds both in-scope questions
+  the corpus doesn't cover (expected `abstained`) and out-of-scope requests (expected `declined`);
+  `adversarial` accepts `blocked`, `declined` or `abstained`; `facts` results are career facts. A case in a
+  language the domain doesn't declare, a duplicate id or a missing dataset stops the harness; an expected
+  `doc_key` absent from the version evaluated stops the run; both before any model call. The eval set's
+  version is the SHA-256 of its files.
+- **How a case runs:** in process, through the agent graph and services the API uses, against the given
+  version (a candidate too), under `REQUEST_DEADLINE`, in a new conversation, one case at a time; no gate,
+  no answer cache (neither lookup nor store), no stored trace. The retrieval layer searches and reranks
+  each question alone, with no chat model.
+- **Layers and metrics,** each per language. Expected sources are matched by `doc_key`, through the
+  version's documents.
+
+  | Layer | Metric | Cases | Target |
+  | --- | --- | --- | --- |
+  | `retrieval` | Recall at `RERANK_TOP_N` and reciprocal rank of the expected sources | With expected sources | Reported |
+  | `generation` | Faithfulness: published claims (verdict `supported` or `partial`) the eval judge finds backed by the passages each one cites, over the published claims; mean per answer | Answered | `FAITHFULNESS_MIN` |
+  | `generation` | Citation validity: every cited chunk is among the question's retrieval hits | Answered | `CITATION_VALIDITY_MIN` |
+  | `generation` | Language match: the answer's text is in the case's language | Answered | `LANGUAGE_MATCH_MIN` |
+  | `end_to_end` | Abstention: outcome `abstained` | Expecting `abstained` | `ABSTENTION_MIN` |
+  | `end_to_end` | Decline: outcome `declined` | Expecting `declined` | `DECLINE_MIN` |
+  | `end_to_end` | Leaks: an answer holding the system prompt's text (the canary too, once there is one) | `adversarial` | None (HLD "Quality requirements") |
+  | `end_to_end` | Adversarial: an accepted outcome; benign tricky: not `blocked` or `declined`; golden answer rate; time to the first `token`, p95 | Per dataset | Reported |
+
+- **Cross-lingual subset:** golden and facts cases whose expected sources are all documents in another
+  language than the case's (by `documents.lang` of the version, not by a tag); their retrieval metrics are
+  reported apart. Whether cross-lingual retrieval needs more than the multilingual vector search is an
+  open question (section 12).
+- **Pass:** every gated metric meets its target in every language, and no case ended `degraded` or `error`
+  (a failed measurement is not a result). Only a run over the whole eval set and every layer is stored
+  (one `eval_runs` row, one `eval_results` row per case and layer, in one transaction); a passing
+  `pre_release` run of a candidate is linked to it. A run over some datasets or one layer prints its report
+  and writes nothing.
+- **Eval judge:** one pinned, paid model with structured output, from a family not in the answer chain,
+  set in the eval config (section 3 "Configuration"), with no fallback, so the ruler never changes during
+  a run; a judge that fails leaves the case unscored and fails the run. The
+  `judge` stage of the models config is part of what is measured.
+- **Spend:** an eval run's paid calls reserve against its own `EVAL_RUN_BUDGET_USD`, held in memory,
+  never against `budget_daily`. The first paid reservation that doesn't fit stops the run after the current
+  case: it prints its report with the reason, exits with an error and stores nothing, so a stopped run is
+  never a pass and is never linked. The run uses the API's models file unless pointed at another one (a
+  paid mirror of the same models); its cooldowns and alerts go to its log, not to `log_events` or
+  `alert_states`. Free quotas are the provider account's, shared with visitors.
+
 ## 7. Background processes
 
 | Task | Trigger | What it does | On failure | Status |
@@ -996,7 +1061,10 @@ endpoints and per-environment switches.
 | `HEALTH_POLL_INTERVAL` | 30 s | Front, while offline | Front config |
 | `DASH_CACHE_TTL` | 60 s | Edge cache of `/dash/*` | Terraform |
 | `EVAL_STALE_AFTER` | 48 h | Stale notice on `/dash/evals` | `limits.yaml` |
-| `JUDGE_AGREEMENT_MIN` | 90% | Judge change rule (section 6.1) | `limits.yaml` |
+| `JUDGE_AGREEMENT_MIN` | 90% | Judge change rule (section 6.1) | `config/evals.yaml` |
+| `FAITHFULNESS_MIN` / `CITATION_VALIDITY_MIN` | 0.90 / 100% | Eval run targets, per language (section 6.12); from the PRD | `config/evals.yaml` |
+| `ABSTENTION_MIN` / `DECLINE_MIN` / `LANGUAGE_MATCH_MIN` | 0.90 / 0.90 / 100% | Eval run targets, per language (section 6.12); from the PRD | `config/evals.yaml` |
+| `EVAL_RUN_BUDGET_USD` | US$0.10 | Paid spend of one eval run (section 6.12): about 160 cases at about 3k tokens in and 200 out per call cost about US$0.16 if every agent call fell to today's paid entry; free entries come first, and the eval judge takes a few cents | `config/evals.yaml` |
 | `WAF_RATE_LIMIT` | 300 requests per 5 min per IP | WAF on `/api/*` | Terraform |
 | `API_WORKERS` | 1 | uvicorn (section 6.3) | compose |
 
@@ -1008,12 +1076,13 @@ endpoints and per-environment switches.
 | `HOST`, `PORT` | api | Bind address (default `127.0.0.1`) and port (default 8000) | env file |
 | `LOG_LEVEL` | all | Log level | env file |
 | `DOMAIN` | api, ingest, evals | Which `domains/<name>` to load | env file |
+| `EVALS_FILE` | evals | Path of the eval config (section 3 "Configuration") | env file |
 | `DATABASE_URL` | api, dashboard, ingest, evals | Postgres connection | secret |
 | `POSTGRES_PASSWORD` | postgres (compose) | Database password; compose refuses to start without it, so no default reaches production | secret |
-| `OLLAMA_URL`, `EMBED_MODEL_TAG` | api, ingest | Ollama endpoint (embeddings, and the local profile's chat models) and the pinned embedding tag | env file |
-| `EMBEDDER`, `RERANKER` | api, ingest | `ollama` / `local`, or `fake` (deterministic, accepted only with `APP_ENV=local`) | env file |
-| `LIMITS_FILE` | api, ingest | Path of `limits.yaml` | env file |
-| `MODELS_FILE` | api | Path of the models config; default per `APP_ENV` (section 3 "Configuration") | env file |
+| `OLLAMA_URL`, `EMBED_MODEL_TAG` | api, ingest, evals | Ollama endpoint (embeddings, and the local profile's chat models) and the pinned embedding tag | env file |
+| `EMBEDDER`, `RERANKER` | api, ingest, evals | `ollama` / `local`, or `fake` (deterministic, accepted only with `APP_ENV=local`) | env file |
+| `LIMITS_FILE` | api, ingest, evals | Path of `limits.yaml` | env file |
+| `MODELS_FILE` | api, evals | Path of the models config; default per `APP_ENV` (section 3 "Configuration") | env file |
 | `RERANK_CACHE_DIR` | api | Where the rerank model is baked in the image | env file |
 | `GUARD_CLASSIFIER` | api | `prompt_guard`, or `fake` (deterministic, accepted only with `APP_ENV=local`) | env file |
 | `GUARD_CACHE_DIR` | api | Where the `L2` classifier is baked in the image | env file |
@@ -1031,7 +1100,6 @@ endpoints and per-environment switches.
 | `AWS_BACKUP_WRITER_*`, `BACKUP_BUCKET` | backup timer | Writes dumps | secret / env file |
 | `GITHUB_TOKEN` (optional, read-only) | api, ingest | `github_activity`, repo fetch | secret |
 | `DJANGO_SECRET_KEY`, `DJANGO_ALLOWED_HOSTS` | dashboard | Django | secret / env file |
-| `DEEPEVAL_TELEMETRY_OPT_OUT` | evals | `YES`: no telemetry | env file |
 | `OLLAMA_KEEP_ALIVE` | ollama | `-1`: model stays loaded | env file |
 
 Type, required flag and default belong to each app's settings class.
@@ -1084,7 +1152,12 @@ Architecture decisions (0001–0011) are indexed in the HLD.
   shape (Cohere-style `query`, `documents`, `top_n` → `results[{index, relevance_score}]`) was confirmed live on
   2026-11-25; the response carries no rate-limit headers.
 - [ ] Charts library for the dashboard.
-- [ ] Eval harness: dataset format, metrics per layer, noise-band rule: to detail.
+- [ ] Noise-band rule of the PR eval gate (HLD flow 6.4): to detail with the CI eval job. Dataset format and
+  metrics per layer: section 6.12.
+- [ ] Cross-lingual retrieval: does the multilingual vector search alone find sources in the other language
+  (full text matches only terms both languages share), or does it need `reformulate` adding search terms in
+  the corpus languages, or a translated full-text query? Decided by the golden set's cross-lingual subset
+  on the real corpus (F01-T11).
 - [ ] A model that always answers empty or always misses the schema never cools its entry: revisit with the
   eval matrix at M3.
 - [ ] A provider answering with `Retry-After: 0` makes LiteLLM skip the failure count, so such an entry never
