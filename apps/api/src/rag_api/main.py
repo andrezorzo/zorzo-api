@@ -104,6 +104,7 @@ def create_app(settings: ApiSettings) -> FastAPI:
     app.state.gate = Gate(
         TurnstileBotCheck(settings.turnstile_secret.get_secret_value(), limits.timeout_turnstile),
         PostgresRateLimiter(db),
+        app.state.gateway.event_log,
         limits,
         settings.salt_seed.get_secret_value().encode(),
         settings.app_env,

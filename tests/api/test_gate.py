@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 from rag_core.adapters.rate_limit import LOCK_TIMEOUT_S
 from structlog.testing import capture_logs
 
-from tests.conftest import api_settings, build_app
+from tests.conftest import api_settings, build_app, reset_tables
 from tests.fakes.turnstile import DUMMY_TOKEN, FAIL_SECRET, FakeSiteverify
 
 NOON = datetime(2026, 11, 25, 12, 0, tzinfo=UTC)
@@ -151,6 +151,27 @@ def test_limits_questions_per_session(make_api: Any) -> None:
     response = api.ask(**asking(session=session))  # a new IP: the session's bucket refuses
     assert response.status_code == 429
     assert response.headers["Retry-After"] == "300"
+
+
+def test_a_rate_limit_leaves_a_log_events_row(make_api: Any, corpus_database: str) -> None:
+    """F01-T10 AC6: the refusal is a `log_events` row, with the empty buckets' kinds and nothing that
+    identifies the asker."""
+    reset_tables(corpus_database, "log_events")
+    api, session, ip = make_api(limits=SMALL), uuid.uuid4(), new_ip()
+    assert [api.ask(**asking(ip=ip, session=session)).status_code for _ in range(2)] == [200, 200]
+    assert api.ask(**asking(ip=ip, session=session)).status_code == 429
+    assert api.client.portal is not None
+    api.client.portal.call(api.app.state.gate.event_log.drain)  # the app's own loop
+    with psycopg.connect(corpus_database) as conn:
+        rows = conn.execute(
+            "SELECT level, source, component, event, trace_id, fields, to_jsonb(log_events)::text "
+            "FROM log_events"
+        ).fetchall()
+    assert len(rows) == 1
+    level, source, component, event, trace_id, fields, whole_row = rows[0]
+    assert (level, source, component, event, trace_id) == ("warning", "app", "gate", "rate_limited", None)
+    assert sorted(fields["buckets"]) == ["ip_burst", "session_burst"]
+    assert str(session) not in whole_row and ip not in whole_row and "ip:" not in whole_row
 
 
 def test_says_when_the_daily_limit_resets(make_api: Any) -> None:
