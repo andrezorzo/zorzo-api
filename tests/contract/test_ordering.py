@@ -25,6 +25,19 @@ def test_accepts_a_search_only_stream() -> None:
     check_ordering(_events("stage", "stage", "degraded", "retrieval", "done"))
 
 
+def test_accepts_a_block_of_the_output_check_after_the_draft() -> None:
+    check_ordering(_events("stage", "stage", "token", "token", "blocked", "done"))
+
+
+def test_accepts_a_block_of_the_input_check() -> None:
+    check_ordering(_events("stage", "guard", "stage", "blocked", "done", done={**DONE, "outcome": "blocked"}))
+
+
+def test_accepts_a_done_carrying_the_contact_options() -> None:
+    contact = [{"label": "GitHub", "url": "https://github.com/andrezorzo"}]
+    check_ordering(_events("stage", "claim", "usage", "done", done={**DONE, "contact": contact}))
+
+
 def test_accepts_a_verified_answer() -> None:
     check_ordering(_events("stage", "retrieval", "token", "token", "claim", "claim", "usage", "done"))
 

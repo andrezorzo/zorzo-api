@@ -10,3 +10,13 @@ document_kinds: [resume, narrative, faq, repo, project_doc, site_doc, post]
 # its digits written together.
 pii_allowlist:
   - andre_zorzo@yahoo.com
+# How to reach him, in the order the page shows them: `done.contact` and the `contact` intent's reply.
+contact:
+  - label: LinkedIn
+    url: https://www.linkedin.com/in/andrezorzo
+  - label: GitHub
+    url: https://github.com/andrezorzo
+  - label: Email
+    url: mailto:andre_zorzo@yahoo.com
+# The hosts an answer's claim may link to (a subdomain counts); a claim with any other link is removed.
+link_hosts: [zorzo.dev.br, github.com, linkedin.com]

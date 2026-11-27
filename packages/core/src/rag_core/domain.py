@@ -13,6 +13,8 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
+from rag_core.events import ContactOption
+
 
 class DomainError(RuntimeError):
     """The domain package is missing or its config is invalid."""
@@ -27,6 +29,10 @@ class DomainConfig(BaseModel):
     document_kinds: tuple[str, ...] = Field(min_length=1)  # the `kind`s a corpus document may have
     # Exact strings the PII pass lets through, e.g. the owner's public email (LLD "6.1 Corpus version").
     pii_allowlist: tuple[str, ...] = ()
+    # How to reach the owner, in order: sent on every `done` and as the `contact` intent's reply (LLD "6.5").
+    contact: tuple[ContactOption, ...] = ()
+    # Hosts (and their subdomains) a claim may link to; a claim with any other link is removed (LLD "6.4").
+    link_hosts: tuple[str, ...] = ()
 
 
 class Example(BaseModel):
@@ -85,11 +91,12 @@ class Intent(BaseModel):
 
     description: str = Field(min_length=1)  # what `route` is told the intent covers
     kinds: tuple[str, ...] = ()  # document kinds its retrieval reads; empty means every kind
-    action: Literal["answer", "decline"] = "answer"
+    action: Literal["answer", "decline", "contact"] = "answer"
 
 
-def load_intents(name: str, kinds: Collection[str]) -> dict[str, Intent]:
-    """The domain's intents, each kind checked against the domain's `document_kinds`."""
+def load_intents(name: str, kinds: Collection[str], contact: Collection[ContactOption]) -> dict[str, Intent]:
+    """The domain's intents, each kind checked against the domain's `document_kinds`, and an intent that
+    sends the contact options against the domain's `contact`."""
     try:
         raw = _read_yaml(name, "intents.yaml")
         if not isinstance(raw, dict) or not raw:
@@ -103,6 +110,8 @@ def load_intents(name: str, kinds: Collection[str]) -> dict[str, Intent]:
         unknown = sorted({kind for intent in intents.values() for kind in intent.kinds} - set(kinds))
         if unknown:
             raise ValueError(f"unknown document kinds {unknown}; the domain's: {list(kinds)}")
+        if not contact and any(intent.action == "contact" for intent in intents.values()):
+            raise ValueError("an intent with action contact needs the domain's contact options")
         return intents
     except Exception as exc:
         raise DomainError(f"invalid intents in {_package(name)}/intents.yaml: {exc}") from exc
