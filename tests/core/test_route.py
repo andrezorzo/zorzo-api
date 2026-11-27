@@ -26,7 +26,7 @@ OUTPUT = {
     "public_ok": True,
 }
 PROMPTS = load_prompts("zorzo")
-SCHEMA = route_schema(list(load_intents("zorzo")))
+SCHEMA = route_schema(tuple(load_intents("zorzo")))
 
 
 @pytest.fixture

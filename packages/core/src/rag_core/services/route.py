@@ -1,7 +1,7 @@
 """Routing (LLD "6.3 Agent run"): one structured-output call classifies the question and rewrites it to stand
 on its own."""
 
-from collections.abc import Sequence
+import functools
 from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, create_model
@@ -21,12 +21,13 @@ class RouteResult(BaseModel):
     public_ok: bool  # whether the question may appear on public pages; never changes the answer
 
 
-def route_schema(intents: Sequence[str]) -> type[RouteResult]:
+@functools.cache
+def route_schema(intents: tuple[str, ...]) -> type[RouteResult]:
     """The route output with `intent` limited to these names, so the model's structured output and the
-    validation both know the domain's intents. Built once, at startup."""
+    validation both know the domain's intents. Built once per set of names."""
     if not intents:
         raise ValueError("route needs at least one intent")
-    intent: Any = Literal[tuple(intents)]
+    intent: Any = Literal[intents]
     return create_model("RouteResult", __base__=RouteResult, intent=(intent, ...))
 
 

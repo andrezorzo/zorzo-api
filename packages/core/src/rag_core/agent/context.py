@@ -13,7 +13,7 @@ from rag_core.limits import Limits
 from rag_core.models_config import StageName as ModelStage
 from rag_core.ports import Embedder, Reranker, SearchHit, TraceSink, VectorStore
 from rag_core.services.gateway import Completion, ModelGateway, ModelsUnavailableError, RequestSpend
-from rag_core.services.route import RouteResult
+from rag_core.services.route import RouteResult, route_schema
 
 
 @dataclass
@@ -25,7 +25,6 @@ class AgentContext:
     limits: Limits
     prompts: Prompts
     intents: Mapping[str, Intent]  # the domain's intents: what each one retrieves and does
-    route_schema: type[RouteResult]  # the route output narrowed to those intents
     languages: Sequence[str]  # the domain's answer languages; the first is the default
     sink: TraceSink
     corpus_version: int
@@ -39,6 +38,11 @@ class AgentContext:
     drafted: bool = False
     found: list[SearchHit] = field(default_factory=list)
     settled: Outcome | None = None  # set once a step sent the stream's ending (claims, or search-only)
+
+    @property
+    def route_schema(self) -> type[RouteResult]:
+        """The route output narrowed to the domain's intents, so a routed intent is always one of them."""
+        return route_schema(tuple(self.intents))
 
     def seconds_left(self) -> float:
         return self.deadline_at - asyncio.get_running_loop().time()

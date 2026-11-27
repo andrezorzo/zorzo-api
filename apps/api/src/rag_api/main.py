@@ -25,7 +25,6 @@ from rag_core.models_config import config_version, load_models
 from rag_core.ports import Alerter
 from rag_core.services.gate import Gate
 from rag_core.services.gateway import ModelGateway
-from rag_core.services.route import route_schema
 from rag_core.telemetry import configure_logging
 
 from rag_api import ask, errors, health
@@ -90,7 +89,6 @@ def create_app(settings: ApiSettings) -> FastAPI:
     app.state.domain = domain
     app.state.prompts = load_prompts(settings.domain)
     app.state.intents = load_intents(settings.domain)
-    app.state.route_schema = route_schema(list(app.state.intents))
     app.state.agent = build_graph()
     app.state.db = db
     app.state.limits = limits

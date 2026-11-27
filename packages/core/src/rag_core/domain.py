@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
+
+from rag_core.ingest.frontmatter import DOCUMENT_KINDS
 
 
 class DomainError(RuntimeError):
@@ -77,13 +79,26 @@ class Intent(BaseModel):
     kinds: tuple[str, ...] = ()  # document kinds its retrieval reads; empty means every kind
     action: Literal["answer", "decline"] = "answer"
 
+    @field_validator("kinds")
+    @classmethod
+    def _known_kinds(cls, kinds: tuple[str, ...]) -> tuple[str, ...]:
+        # A misspelled kind would match no document, and the intent would abstain on every question.
+        unknown = sorted(set(kinds) - set(DOCUMENT_KINDS))
+        if unknown:
+            raise ValueError(f"unknown document kinds {unknown}; known: {list(DOCUMENT_KINDS)}")
+        return kinds
+
 
 def load_intents(name: str) -> dict[str, Intent]:
     try:
         raw = _read_yaml(name, "intents.yaml")
         if not isinstance(raw, dict) or not raw:
             raise ValueError("expected a mapping of intent names")
-        return {str(key): Intent.model_validate(value or {}) for key, value in raw.items()}
+        # YAML 1.1 reads `no`, `off` or `null` as non-strings; quote such a name instead of losing it.
+        odd = [key for key in raw if not isinstance(key, str)]
+        if odd:
+            raise ValueError(f"intent names must be strings (quote them): {odd}")
+        return {key: Intent.model_validate(value or {}) for key, value in raw.items()}
     except Exception as exc:
         raise DomainError(f"invalid intents in {_package(name)}/intents.yaml: {exc}") from exc
 

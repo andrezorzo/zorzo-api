@@ -1,10 +1,11 @@
 """ADR 0011, F01-T06: the intents and what each one does come from the domain package, not the core."""
 
+import re
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
-from rag_core.domain import load_intents
+from rag_core.domain import Intent, load_intents
 from rag_core.services.route import route_schema
 
 CORE = Path(__file__).resolve().parents[2] / "packages/core/src/rag_core"
@@ -19,7 +20,7 @@ def test_the_domain_declares_its_intents_and_their_rules() -> None:
 
 
 def test_route_accepts_only_the_domains_intents() -> None:
-    schema = route_schema(["billing", "other"])
+    schema = route_schema(("billing", "other"))
     assert schema.model_validate({**ROUTED, "intent": "billing"}).intent == "billing"
     assert schema.model_json_schema()["properties"]["intent"]["enum"] == ["billing", "other"]
     with pytest.raises(ValidationError):
@@ -30,4 +31,9 @@ def test_the_core_names_no_domain_intent() -> None:
     names = load_intents("zorzo")
     for path in CORE.rglob("*.py"):
         text = path.read_text()
-        assert not [n for n in names if f'"{n}"' in text], path
+        assert not [n for n in names if re.search(rf"[\"']{n}[\"']", text)], path
+
+
+def test_a_misspelled_kind_stops_the_app() -> None:
+    with pytest.raises(ValidationError, match="faqs"):
+        Intent(kinds=("faqs",))

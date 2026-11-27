@@ -8,10 +8,9 @@ from langgraph.graph import START, StateGraph
 from rag_core.agent.context import AgentContext
 from rag_core.agent.graph import Agent, run_agent
 from rag_core.agent.state import AgentState
-from rag_core.domain import load_prompts
+from rag_core.domain import Intent, load_prompts
 from rag_core.events import StreamEvent
 from rag_core.services.gateway import RequestSpend
-from rag_core.services.route import route_schema
 from structlog.testing import capture_logs
 
 from tests.core.test_gateway import LIMITS
@@ -46,8 +45,7 @@ async def test_the_recursion_backstop_abstains_and_logs() -> None:
         rerankers=[],
         limits=LIMITS,
         prompts=load_prompts("zorzo"),
-        intents={},
-        route_schema=route_schema(["any"]),
+        intents={"any": Intent()},
         languages=["en"],
         sink=sink,
         corpus_version=1,
