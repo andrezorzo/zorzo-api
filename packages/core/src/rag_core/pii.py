@@ -51,6 +51,11 @@ MAX_WINDOW_GROUPS = 6  # a phone is rarely written in more groups
 CPF = re.compile(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b|\b\d{11}\b")
 CARD = re.compile(r"\b(?:\d[ -]?){12,18}\d\b")
 
+# What `scrub` puts in the place of a match.
+EMAIL_MARK, PHONE_MARK, CPF_MARK, CARD_MARK = "[email]", "[phone]", "[cpf]", "[card]"
+# What can hide a match from the plain text: an entity, a wrapped line, markup, zero-width characters.
+HIDING_FORMS = re.compile(r"[&<\n\r*_`\\\u200b-\u200d\u2060\ufeff]")
+
 
 def _cpf_valid(value: str) -> bool:
     digits = [int(c) for c in value if c.isdigit()]
@@ -220,11 +225,6 @@ def personal_data(text: str, allowlist: Iterable[str] | Allowed = ()) -> list[st
     if any(_luhn(m.group()) for t in texts for m in CARD.finditer(t)):
         rules.append("pii:card")
     return rules
-
-
-EMAIL_MARK, PHONE_MARK, CPF_MARK, CARD_MARK = "[email]", "[phone]", "[cpf]", "[card]"
-# What can hide a match from the plain text: an entity, a wrapped line, markup, zero-width characters.
-HIDING_FORMS = re.compile(r"[&<\n\r*_`\\\u200b-\u200d\u2060\ufeff]")
 
 
 def scrub(text: str, ok: Allowed) -> str:

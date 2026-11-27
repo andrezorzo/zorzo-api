@@ -1,6 +1,7 @@
 """API settings, validated at startup (LLD "Configuration")."""
 
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from rag_core.settings import AppSettings
@@ -78,7 +79,11 @@ class ApiSettings(AppSettings):
             self.telegram_chat_id,
             self.langsmith_api_key,
         ]
-        return [s.get_secret_value() for s in secrets if s is not None]
+        values = [s.get_secret_value() for s in secrets if s is not None]
+        password = urlsplit(
+            self.database_url
+        ).password  # percent-encoded in the URL, as the database knows it
+        return [*values, *([password, unquote(password)] if password else [])]
 
     @model_validator(mode="after")
     def _real_secrets_in_production(self) -> "ApiSettings":

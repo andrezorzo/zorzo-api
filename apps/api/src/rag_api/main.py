@@ -50,15 +50,23 @@ async def _warm_rerankers(app: FastAPI) -> None:
             log.warning("rerank_warmup_failed", level=type(level).__name__, exc_info=True)
 
 
+async def _close_traces(app: FastAPI) -> None:
+    """The trace writes first (they end LangSmith's last runs), then LangSmith's queue, within one
+    `SHUTDOWN_DRAIN_S` in all: what the writes leave of it is the queue's."""
+    loop = asyncio.get_running_loop()
+    ends_at = loop.time() + SHUTDOWN_DRAIN_S
+    await app.state.trace_writes.drain(SHUTDOWN_DRAIN_S)
+    await anyio.to_thread.run_sync(app.state.tracer.close, max(0.0, ends_at - loop.time()))
+
+
 async def _shut_down(app: FastAPI) -> None:
     """The independent closes, at once: the bot check's client, the gateway's background work (budget
-    settles, alerts), the trace writes and LangSmith's queue. Each failure is logged, never stops the rest;
-    the whole takes about `SHUTDOWN_DRAIN_S`, within Docker's 10 s."""
+    settles, alerts) and the traces. Each failure is logged, never stops the rest; the whole takes about
+    `SHUTDOWN_DRAIN_S`, within Docker's 10 s."""
     closing = {
         "bot_check": app.state.gate.bot_check.close(),
         "gateway": app.state.gateway.close(),
-        "trace_writes": app.state.trace_writes.drain(SHUTDOWN_DRAIN_S),
-        "tracer": anyio.to_thread.run_sync(app.state.tracer.close, SHUTDOWN_DRAIN_S),
+        "traces": _close_traces(app),
     }
     results = await asyncio.gather(*closing.values(), return_exceptions=True)
     for name, result in zip(closing, results, strict=True):

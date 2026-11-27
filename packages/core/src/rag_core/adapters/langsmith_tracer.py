@@ -109,6 +109,7 @@ class RunSink:
         last = root  # the latest step's run, where the passages found belong
         claims: list[str] = []
         outcome = "error"  # a request that never reached `done`
+        ended_at = self._events[-1][0] if self._events else datetime.now(UTC)
         for at, event in self._events:
             if isinstance(event, Stage):
                 if event.status == "start":
@@ -128,6 +129,10 @@ class RunSink:
                 claims.append(event.text)
             elif isinstance(event, Done):
                 outcome = event.stored_outcome
+                ended_at = at
+        for step in open_steps.values():  # a step cut by the deadline or a failure never sent its end
+            step.end(error="cut: the step never ended", end_time=ended_at)
+            step.patch()
         root.end(
             outputs=self._redactor.walk({"outcome": outcome, "claims": claims}),
             metadata=self._redactor.walk(
@@ -138,6 +143,7 @@ class RunSink:
                     "model_config_version": facts.model_config_version,
                 }
             ),
+            end_time=ended_at,
         )
         root.patch()
 

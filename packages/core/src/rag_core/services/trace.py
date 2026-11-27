@@ -55,7 +55,7 @@ class _OpenStep:
 
 class TraceRecorder:
     """A TraceSink that keeps what the stored trace needs, each step with the moment it started (`record` is
-    synchronous, so that is when it was sent). `finish` turns it into the `StoredTrace`."""
+    synchronous, so that is when it was sent). `build` turns it into the `StoredTrace`."""
 
     def __init__(
         self, started_at: datetime, clock: Callable[[], datetime] = lambda: datetime.now(UTC)
@@ -92,7 +92,7 @@ class TraceRecorder:
         elif (step := self._open.pop(event.name, None)) is not None:
             self._spans.append(_span(event.name, step, event.ms or 0))
 
-    def finish(self, facts: TraceFacts, redactor: Redactor) -> StoredTrace | None:
+    def build(self, facts: TraceFacts, redactor: Redactor) -> StoredTrace | None:
         """The trace of a request that reached `done`, its events redacted (`facts.question` already is);
         None without `done` (no outcome is known)."""
         if self._done is None:

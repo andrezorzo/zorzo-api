@@ -128,3 +128,41 @@ def test_personal_data_hidden_from_the_plain_text_is_found(text: str, leaked: st
 
 def test_a_lone_surrogate_is_removed() -> None:
     assert REDACTOR.text("a\ud800b") == "ab"  # JSON lets it through, UTF-8 can't encode it
+
+
+def test_a_key_written_as_html_entities_is_found_after_the_scrub_decodes_it() -> None:
+    redacted = REDACTOR.text("a&amp;#64;b.com e sk&amp;#45;abcdefghijklmnop")
+    assert "abcdefghijklmnop" not in redacted and "[email]" in redacted
+
+
+def test_a_configured_secret_written_as_html_entities_is_found() -> None:
+    encoded = "".join(f"&#{ord(c)};" for c in SECRET)  # shows as the secret on a page
+    assert SECRET not in REDACTOR.text(f"seed {encoded} end") and "[secret]" in REDACTOR.text(encoded)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "https://zorzo.dev.br/blog/building-a-rag-pipeline-in-2026-part-2",
+        "see https://zorzo.dev.br/blog/building-a-rag-pipeline-in-2026-part-2, then",
+        "building-a-rag-pipeline-in-2026-part-2-with-citations",  # a slug on its own
+        "550e8400-e29b-41d4-a716-446655440000",  # a canonical UUID
+        "trace 550E8400-E29B-41D4-A716-446655440000 ended",
+    ],
+)
+def test_a_url_slug_or_uuid_is_not_a_key(text: str) -> None:
+    assert REDACTOR.text(text) == text
+
+
+def test_a_short_secret_inside_a_longer_token_leaves_none_of_it() -> None:
+    redactor = Redactor(secrets=["123456789"])
+    assert redactor.text("id 12345678901234567890abcdefABCDEF12 end") == "id [secret] end"
+
+
+def test_a_short_numeric_secret_inside_a_phone_number_leaves_none_of_it() -> None:
+    redacted = Redactor(secrets=["987654"]).text("call +55 11 98765-4321 or 987654")
+    assert "98765" not in redacted and "4321" not in redacted
+
+
+def test_fullwidth_characters_do_not_hide_an_email() -> None:
+    assert REDACTOR.text("joao.silva\uff20gmail.com")  # a fullwidth at sign == "[email]"

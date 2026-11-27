@@ -333,6 +333,16 @@ async def test_a_model_miss_on_the_first_entry_is_a_failure(rig: Rig) -> None:
     assert (result.model, result.fallback_reason) == (B, "failed")
 
 
+async def test_a_miss_the_same_entrys_retry_makes_good_is_no_fallback(rig: Rig) -> None:
+    rig.fake.script(A, Reply(text="not json"), Reply(text='{"supported": false}'))
+    result = await rig.complete(schema=Verdict)
+    assert (result.model, result.fallback_reason) == (A, None)  # the first entry tried answered
+
+    rig.fake.script(A, "no_text")  # a stream with no text, then a good one on the same entry
+    *_, final = await rig.stream()
+    assert isinstance(final, Completion) and (final.model, final.fallback_reason) == (A, None)
+
+
 async def test_the_reason_is_the_last_earlier_entrys(rig: Rig) -> None:
     rig.fake.script(A, "rate_limited")
     rig.fake.script(B, "error")

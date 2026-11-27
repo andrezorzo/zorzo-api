@@ -197,7 +197,8 @@ class ModelGateway:
                 completion = self._completion(stage, entry, result, schema, cost=0.0)
                 if completion is not None:
                     return replace(completion, fallback_reason=why)
-                why = Why.FAILED  # the model's miss
+            else:  # the entry's attempts all ended in the model's miss: that is why the next entry is called
+                why = Why.FAILED
         reservation = await self._paid_reservation(stage, messages, deadline_at, spend)
         if reservation is not None:
             paid_result = await self._paid_call(
@@ -252,9 +253,11 @@ class ModelGateway:
                 if outcome.completion is not None:
                     yield replace(outcome.completion, fallback_reason=why)
                     return
-                why = outcome.reason
                 if outcome.failed:  # the provider's failure: next entry; a model miss gets another try
+                    why = outcome.reason
                     break
+            else:  # the entry's attempts all ended in the model's miss
+                why = Why.FAILED
         reservation = await self._paid_reservation(stage, messages, deadline_at, spend)
         if reservation is not None:
             chunks = self.models.stream(

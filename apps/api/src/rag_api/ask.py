@@ -73,7 +73,7 @@ def _redacted_trace(
     The question is redacted once, here; the sinks (LangSmith) and the recorder take it as it is."""
     facts = replace(facts, question=redactor.text(facts.question))
     sink.finish(facts)  # a sink that fails is logged and skipped
-    return recorder.finish(facts, redactor)
+    return recorder.build(facts, redactor)
 
 
 async def _store_trace(state: Any, sink: FanOutSink, recorder: TraceRecorder, facts: TraceFacts) -> None:
@@ -152,7 +152,7 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                     end_with_error(sink, UUID(trace_id))  # every sink, so a stored trace ends too
             finally:
                 # However the run ended (a visitor who left included), LangSmith's root run is ended. A
-                # task of the app's own, so the visitor leaving doesn't cancel it and shutdown drains it;
+                # task of the app's own, so a visitor who leaves doesn't cancel it and shutdown drains it;
                 # spawned with no `await` since `done` was sent, so nothing can cancel the run before it.
                 facts = TraceFacts(
                     trace_id=UUID(trace_id),
@@ -164,7 +164,11 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                     model_config_version=state.model_config_version,
                     retention=timedelta(seconds=state.limits.retention_public_traces),
                 )
-                state.trace_writes.spawn(_store_trace(state, sink, recorder, facts))
+                write = state.trace_writes.spawn(_store_trace(state, sink, recorder, facts))
+            # The stream closes once the trace exists (the trace `done` names is there when the visitor
+            # follows it); never while events are still being sent. Shielded: a visitor who leaves now
+            # doesn't cancel the write. Not reached when the run was cancelled.
+            await asyncio.shield(write)
 
     async def events() -> AsyncIterator[ServerSentEvent]:
         task = asyncio.create_task(run())
