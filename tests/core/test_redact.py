@@ -230,3 +230,81 @@ def test_a_short_numeric_secret_inside_a_phone_number_leaves_none_of_it() -> Non
 def test_fullwidth_characters_do_not_hide_an_email() -> None:
     fullwidth_at_sign = "\uff20"
     assert REDACTOR.text(f"joao.silva{fullwidth_at_sign}gmail.com") == "[email]"
+
+
+# -- review round 3 --------------------------------------------------------------------------------------
+
+
+def test_an_allowlist_search_keeps_the_positions_of_the_text() -> None:
+    # Lowercasing `İ` makes two characters of one; the positions of what follows must still be the text's.
+    for separator in ("", " "):  # glued to the address (another address) or apart from it
+        text = "x " + "İ" * 21 + separator + "andre_zorzo@yahoo.com victim@example.com"
+        redacted = REDACTOR.text(text)
+        assert "victim" not in redacted
+        assert ("andre_zorzo@yahoo.com" in redacted) == (separator == " ")
+
+
+def test_a_secret_written_with_entity_like_text_is_found() -> None:
+    secret = "Pw&amp;copy9xyzQ"
+    redactor = Redactor(secrets=[secret])
+    assert redactor.text(f"it is {secret}") == "it is [secret]"  # as the secret is written
+    assert redactor.text("it is Pw©" + "9xyzQ") == "it is [secret]"  # as a page shows it
+
+
+def test_a_phone_inside_an_escaped_tag_is_found() -> None:
+    redacted = REDACTOR.text("call &amp;lt;b (11) 98765-4321&amp;gt; now")
+    assert "98765" not in redacted and "4321" not in redacted and "[phone]" in redacted
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "KEY=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+        "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4=",
+        "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4===",
+        "export TOKEN=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4==\nnext",
+    ],
+)
+def test_a_token_followed_by_equals_signs_is_found(text: str) -> None:
+    redacted = REDACTOR.text(text)
+    assert "a1b2c3d4e5f6" not in redacted and "[secret]" in redacted
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "https://example.com/blog/2024-11-desenvolvimento-de-software-com-python",
+        "/0001-use-python3-for-the-backend-service.md",
+        "https://zorzo.dev.br/blog/building-a-rag-pipeline-in-2026-part-2",
+        "2024-11-a-very-long-title-about-the-internationalization-of-everything",
+    ],
+)
+def test_slugs_do_not_depend_on_word_length(text: str) -> None:
+    assert REDACTOR.text(text) == text
+
+
+def test_a_key_with_few_parts_or_cut_in_groups_is_still_a_key() -> None:
+    assert REDACTOR.text("SKLIVEABCDEFGHIJKLMNOPQRSTUV_12345678901234") == "[secret]"
+    assert REDACTOR.text("a1b2c3d4-e5f6g7h8-i9j0k1l2-m3n4o5p6") == "[secret]"  # all groups mixed
+
+
+def test_two_secrets_that_overlap_are_both_cut() -> None:
+    redactor = Redactor(secrets=["abcd1234", "1234wxyz"])
+    assert redactor.text("pass abcd1234wxyz end") == "pass [secret] end"
+
+
+def test_a_base64_key_with_slashes_is_found_outside_a_url() -> None:
+    key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    assert REDACTOR.text(f"secret {key} end") == "secret [secret] end"
+    assert REDACTOR.text(f"see https://example.com/docs/{key.replace('/', '-')} now").count("[secret]") == 0
+
+
+def test_a_whole_pem_block_is_replaced() -> None:
+    pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA1234\nabcdEFGH\n-----END RSA PRIVATE KEY-----"
+    assert REDACTOR.text(f"key:\n{pem}\nthen") == "key:\n[secret]\nthen"
+
+
+def test_a_text_that_decodes_past_the_layer_limit_is_replaced_whole() -> None:
+    nested = "contact &amp;amp;amp;amp;#64; me"  # one layer more than the redactor decodes
+    assert REDACTOR.text(nested) == "[redacted]"
+    assert REDACTOR.text("Tom &amp;amp; Jerry") == "Tom & Jerry"  # within the limit

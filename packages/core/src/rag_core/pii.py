@@ -227,12 +227,14 @@ def personal_data(text: str, allowlist: Iterable[str] | Allowed = ()) -> list[st
     return rules
 
 
-def spans(text: str, ok: Allowed) -> list[tuple[int, int, str]]:
+def spans(text: str, ok: Allowed, also: Iterable[str] = ()) -> list[tuple[int, int, str]]:
     """Where the text holds an email, phone, CPF or card number the rules of `personal_data` find, as
     `(start, end, placeholder)`; allowlisted ones are left out. Nothing is rewritten: the caller merges these
     with other detectors' spans (`rag_core.services.redact`).
 
-    The text should already be as a page renders it (entities decoded, hidden characters gone).
+    The text should already be as a page renders it (entities decoded, hidden characters gone). `also` are
+    earlier forms of it (before an entity was decoded): a phone the matcher reads in one of them, which the
+    text's own markup hides from it, is found again in `text` and counts.
     """
     found = [
         (m.start(), m.end(), EMAIL_MARK)
@@ -241,7 +243,8 @@ def spans(text: str, ok: Allowed) -> list[tuple[int, int, str]]:
     ]
     found += [(m.start(), m.end(), CPF_MARK) for m in CPF.finditer(text) if _cpf_valid(m.group())]
     found += [(m.start(), m.end(), CARD_MARK) for m in CARD.finditer(text) if _luhn(m.group())]
-    for raw in _unlisted_phones(text, ok):
+    raws = dict.fromkeys(raw for t in (text, *also) for raw in _unlisted_phones(t, ok))
+    for raw in raws:
         located = [(m.start(), m.end(), PHONE_MARK) for m in _phone_in_text(raw).finditer(text)]
         # The matcher read the phone in the text as it prepares it (markup gone, a wrapped line joined). One
         # it can't find again as written is hidden too well to cut out: the whole text goes, failing closed.
