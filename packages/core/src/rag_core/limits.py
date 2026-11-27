@@ -38,6 +38,8 @@ class Limits(BaseModel):
     request_cost_cap_usd: float = Field(ge=0)
     breaker_cooldown: float = Field(gt=0)
     alert_repeat_after: float = Field(gt=0)
+    # Retention (LLD "6.11"): a public trace's `expires_at` is its write time plus this.
+    retention_public_traces: float = Field(gt=0)
     # Agent run (LLD "6.3 Agent run").
     answer_reserve: float = Field(gt=0)
     max_reformulate: int = Field(ge=0)

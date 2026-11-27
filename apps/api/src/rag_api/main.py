@@ -17,14 +17,17 @@ from rag_core.adapters.factory import (
 from rag_core.adapters.pgvector_store import PgVectorStore, check_text_search
 from rag_core.adapters.postgres import Database
 from rag_core.adapters.rate_limit import PostgresRateLimiter
+from rag_core.adapters.trace_store import PostgresTraceStore
 from rag_core.adapters.turnstile import TurnstileBotCheck
 from rag_core.agent.graph import build_graph
+from rag_core.background import BackgroundTasks
 from rag_core.domain import load_domain, load_intents, load_prompts
 from rag_core.limits import Limits, load_limits
 from rag_core.models_config import config_version, load_models
 from rag_core.ports import Alerter
 from rag_core.services.gate import Gate
-from rag_core.services.gateway import ModelGateway
+from rag_core.services.gateway import SHUTDOWN_DRAIN_S, ModelGateway
+from rag_core.services.redact import Redactor
 from rag_core.telemetry import configure_logging
 
 from rag_api import ask, errors, health
@@ -79,14 +82,17 @@ def create_app(settings: ApiSettings) -> FastAPI:
             yield
         finally:
             # Each close runs even when an earlier one raises; the database closes last, after the
-            # gateway's pending budget settles and alerts.
+            # gateway's pending budget settles and alerts, and the trace writes.
             try:
                 await app.state.gate.bot_check.close()
             finally:
                 try:
                     await app.state.gateway.close()
                 finally:
-                    await db.close()
+                    try:
+                        await app.state.trace_writes.drain(SHUTDOWN_DRAIN_S)
+                    finally:
+                        await db.close()
 
     app = FastAPI(title="rag-api", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.domain = domain
@@ -109,7 +115,11 @@ def create_app(settings: ApiSettings) -> FastAPI:
         settings.salt_seed.get_secret_value().encode(),
         settings.app_env,
     )
-    app.state.trace_sinks = []  # extra sinks next to the stream (stored trace, F01-T10)
+    app.state.trace_sinks = []  # extra sinks next to the stream and the recorder, for the tests
+    app.state.trace_store = PostgresTraceStore(db)
+    app.state.trace_writes = BackgroundTasks()  # the end-of-request writes, drained at shutdown
+    # Everything the stored trace gets passes this first (LLD "Security", trace redaction).
+    app.state.redactor = Redactor(domain.pii_allowlist, settings.secret_values())
     # Added before the error middleware, so it runs inside it and its refusal carries the trace id.
     app.add_middleware(BodyLimit, limit=lambda: app.state.limits.max_body_bytes)
     errors.install(app)

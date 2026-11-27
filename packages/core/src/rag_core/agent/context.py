@@ -61,7 +61,17 @@ class AgentContext:
         self.tokens_in += completion.usage.tokens_in
         self.tokens_out += completion.usage.tokens_out
         self.cost_usd += completion.cost_usd
-        self.sink.record(Model(stage=step, model=completion.model, provider=completion.provider))
+        self.sink.record(
+            Model(
+                stage=step,
+                model=completion.model,
+                provider=completion.provider,
+                tokens_in=completion.usage.tokens_in,
+                tokens_out=completion.usage.tokens_out,
+                cost_usd=completion.cost_usd,
+                fallback_reason=completion.fallback_reason,
+            )
+        )
 
     async def call(
         self,

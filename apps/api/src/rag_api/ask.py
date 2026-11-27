@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -9,7 +10,7 @@ import structlog
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 from rag_core.agent.context import AgentContext
-from rag_core.agent.graph import run_agent
+from rag_core.agent.graph import RunResult, run_agent
 from rag_core.errors import ApiError, ErrorCode
 from rag_core.events import Done, StreamEvent
 from rag_core.ports import StoreUnavailableError, TraceSink
@@ -19,7 +20,7 @@ from rag_core.services.gate import Asker
 from rag_core.services.gateway import RequestSpend
 from rag_core.services.search_only import run_search_only
 from rag_core.services.stream import end_with_error
-from rag_core.services.trace import FanOutSink
+from rag_core.services.trace import FanOutSink, TraceFacts, TraceRecorder
 from sse_starlette import EventSourceResponse, ServerSentEvent
 
 log = structlog.get_logger()
@@ -62,9 +63,21 @@ def _agent_context(state: Any, sink: TraceSink, corpus_version: int, deadline_at
     )
 
 
+async def _write_trace(state: Any, recorder: TraceRecorder, facts: TraceFacts) -> None:
+    """The stored trace, written once `done` has been sent; a failure is logged, never raised: the visitor
+    already has the answer."""
+    try:
+        trace = recorder.finish(facts, state.redactor)
+        if trace is not None:
+            await state.trace_store.write(trace)
+    except Exception as exc:
+        log.error("trace_write_failed", error=type(exc).__name__)  # by type: its text may quote SQL
+
+
 @router.post("/api/v1/ask")
 async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
     state = request.app.state
+    started_at = datetime.now(UTC)
     peer = request.client.host if request.client else None
     asker = Asker(body.session, request.headers.get(VIEWER_HEADER), peer)
     # One deadline for the whole request: the gate, the corpus check and the stream share it.
@@ -93,11 +106,13 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
     corpus = await corpus_service.servable(state.vector_store, state.embedder.tag, left)
     trace_id: str = request.state.trace_id
     stream = QueueSink()
-    sink = FanOutSink([stream, *state.trace_sinks])
+    recorder = TraceRecorder(started_at)
+    sink = FanOutSink([stream, recorder, *state.trace_sinks])
 
     async def run() -> None:
         # The stream outlives the middleware's log context, so the trace id is bound again here.
         with structlog.contextvars.bound_contextvars(trace_id=trace_id):
+            result: RunResult | None = None
             try:
                 if reason is not None:  # a degraded mode: search-only, with no model call
                     await run_search_only(
@@ -114,11 +129,25 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                     )
                 else:
                     context = _agent_context(state, sink, corpus.version, deadline_at)
-                    await run_agent(question, UUID(trace_id), agent=state.agent, context=context)
+                    result = await run_agent(question, UUID(trace_id), agent=state.agent, context=context)
             except Exception:
                 # Whatever escaped the service, the visitor's stream still ends with `done`.
                 log.exception("stream_failed")
                 end_with_error(sink, UUID(trace_id))  # every sink, so a stored trace ends too
+            facts = TraceFacts(
+                trace_id=UUID(trace_id),
+                question=question,
+                intent=result.intent if result else None,
+                lang=result.language if result else None,
+                public_ok=result.public_ok if result else None,
+                corpus_version=corpus.version,
+                model_config_version=state.model_config_version,
+                retention=timedelta(seconds=state.limits.retention_public_traces),
+            )
+            # After `done`, so nothing waits on the database while events are sent. A task of the app's own,
+            # shielded: a visitor who leaves now doesn't cancel the write, and shutdown drains it.
+            write = state.trace_writes.spawn(_write_trace(state, recorder, facts))
+            await asyncio.shield(write)
 
     async def events() -> AsyncIterator[ServerSentEvent]:
         task = asyncio.create_task(run())

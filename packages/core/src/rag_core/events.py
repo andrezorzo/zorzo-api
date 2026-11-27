@@ -29,7 +29,7 @@ StageName = Literal[
 ]
 DegradedReason = Literal["models_unavailable", "budget_exhausted", "quota_exhausted", "deadline"]
 # The result of a request, named as the stored outcomes are (`questions_log.outcome`); `error` (a bug) is
-# this stream's only, and storing it is F01-T10's to map.
+# this stream's only (the stored trace keeps it as it is, LLD "4. Data").
 Outcome = Literal["answered", "abstained", "declined", "blocked", "degraded", "error"]
 
 
@@ -75,7 +75,17 @@ class Model(StreamEvent):
     stage: str
     model: str
     provider: str
-    fallback_reason: str | None = None
+    # The usage and cost of the call this event names, as `usage` sums them. Optional in the schema, so
+    # streams recorded before they existed stay valid; the API always sends them.
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost_usd: float = 0.0
+    fallback_reason: str | None = Field(
+        default=None,
+        description="Why an earlier entry of the stage's chain didn't answer: `cooling_down`, "
+        "`rate_limited`, `timeout`, `failed`, `budget` or `request_cap`; null when the first entry "
+        "tried answered",
+    )
 
 
 class Token(StreamEvent):

@@ -25,6 +25,11 @@ class ApiSettings(AppSettings):
     # Alerts (LLD "6.10 Alerts"): required in production; locally the alerter only logs.
     telegram_bot_token: SecretStr | None = None
     telegram_chat_id: SecretStr | None = None
+    # LangSmith (LLD "Configuration"): a key turns it on; without one the API sends nothing. The endpoint is
+    # LangSmith's own unless set (the tests point it at a fake).
+    langsmith_api_key: SecretStr | None = None
+    langsmith_project: str | None = None
+    langsmith_endpoint: str | None = None
 
     @field_validator(
         "openrouter_api_key",
@@ -33,6 +38,9 @@ class ApiSettings(AppSettings):
         "google_ai_api_key",
         "telegram_bot_token",
         "telegram_chat_id",
+        "langsmith_api_key",
+        "langsmith_project",
+        "langsmith_endpoint",
         mode="before",
     )
     @classmethod
@@ -55,6 +63,22 @@ class ApiSettings(AppSettings):
             "GOOGLE_AI_API_KEY": self.google_ai_api_key,
         }
         return {name: key.get_secret_value() if key else None for name, key in keys.items()}
+
+    def secret_values(self) -> list[str]:
+        """Every secret value the app holds, for the trace redactor. A setting that adds a secret (such as
+        the canary of F01-T08) adds it here."""
+        secrets = [
+            self.turnstile_secret,
+            self.salt_seed,
+            self.openrouter_api_key,
+            self.groq_api_key,
+            self.nvidia_api_key,
+            self.google_ai_api_key,
+            self.telegram_bot_token,
+            self.telegram_chat_id,
+            self.langsmith_api_key,
+        ]
+        return [s.get_secret_value() for s in secrets if s is not None]
 
     @model_validator(mode="after")
     def _real_secrets_in_production(self) -> "ApiSettings":

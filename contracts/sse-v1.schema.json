@@ -337,6 +337,21 @@
           "title": "Provider",
           "type": "string"
         },
+        "tokens_in": {
+          "default": 0,
+          "title": "Tokens In",
+          "type": "integer"
+        },
+        "tokens_out": {
+          "default": 0,
+          "title": "Tokens Out",
+          "type": "integer"
+        },
+        "cost_usd": {
+          "default": 0.0,
+          "title": "Cost Usd",
+          "type": "number"
+        },
         "fallback_reason": {
           "anyOf": [
             {
@@ -347,6 +362,7 @@
             }
           ],
           "default": null,
+          "description": "Why an earlier entry of the stage's chain didn't answer: `cooling_down`, `rate_limited`, `timeout`, `failed`, `budget` or `request_cap`; null when the first entry tried answered",
           "title": "Fallback Reason"
         }
       },

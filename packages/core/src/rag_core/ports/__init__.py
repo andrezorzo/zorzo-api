@@ -5,9 +5,12 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from rag_core.events import StreamEvent
+
+if TYPE_CHECKING:  # the services import these ports
+    from rag_core.services.trace import StoredTrace
 
 # Every candidate embedding model has 1024 dimensions (LLD "Open questions"); the dashboard's models
 # declare the same size for the `vector` columns.
@@ -320,10 +323,19 @@ class CorpusStore(Protocol):
 
 
 class TraceSink(Protocol):
-    """Receives the step events that feed the stream (and, later, the stored trace and LangSmith)."""
+    """Receives the step events: one fan-out per request hands each to the visitor's stream, the trace
+    recorder and, only with a LangSmith key, LangSmith (LLD "Components and dependencies")."""
 
     def record(self, event: StreamEvent) -> None:
         """Never blocks."""
+
+
+class TraceStore(Protocol):
+    """Writes the trace of a finished request (LLD "Transactions")."""
+
+    async def write(self, trace: "StoredTrace") -> None:
+        """The public trace, its spans and the questions-log row in one transaction; a store that fails
+        raises `StoreUnavailableError`."""
 
 
 class DataPublisher(Protocol):
@@ -377,5 +389,6 @@ __all__ = [
     "SecretScanner",
     "StoreUnavailableError",
     "TraceSink",
+    "TraceStore",
     "VectorStore",
 ]
