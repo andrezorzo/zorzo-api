@@ -276,8 +276,8 @@ domain pieces, not ports (section 6.5).
   `pt: portuguese`); the first language is the default. Each intent in `intents.yaml` has a `description`,
   and the `route` prompt's `$intents` slot is filled with the intents and their descriptions at startup; a
   prompt without the slot, an intent without a description, an intent kind or an example question language
-  the domain doesn't declare, or a configuration Postgres doesn't have (resolved as the queries resolve it,
-  `to_regconfig`) stops the API and the ingest before they serve or write. A chunk's `tsv` keeps the
+  the domain doesn't declare, or a configuration Postgres doesn't have (resolved by the queries' own cast
+  to `regconfig`) stops the API and the ingest before they serve or write. A chunk's `tsv` keeps the
   configuration of its ingest, so changing a language's configuration needs a new corpus version.
 - **Shutdown:** the gateway drains its background work (reservation releases, alerts, event rows) within
   `SHUTDOWN_DRAIN`, then cancels what is left and logs it, so a stuck write never holds the process.

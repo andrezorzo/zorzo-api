@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 import structlog
 from pgvector import Vector
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from rag_core.adapters.factory import ConfigError
 from rag_core.adapters.postgres import Database
@@ -67,15 +68,16 @@ class TextSearchConfigError(ConfigError):
 
 
 async def check_text_search(db: Database, configs: Collection[str]) -> None:
-    """Raises `TextSearchConfigError` naming each configuration Postgres doesn't have. `to_regconfig` resolves
-    a name as the queries' `CAST(… AS regconfig)` does (case folding, schema, `search_path`)."""
-    async with db.engine.connect() as conn:
-        missing = sorted(
-            await conn.scalars(
-                text("SELECT name FROM unnest(CAST(:names AS text[])) name WHERE to_regconfig(name) IS NULL"),
-                {"names": sorted(set(configs))},
-            )
-        )
+    """Raises `TextSearchConfigError` naming each configuration Postgres doesn't have. Each name goes
+    through the queries' own `CAST(… AS regconfig)` (case folding, schema, `search_path`), in a savepoint."""
+    missing = []
+    async with db.engine.begin() as conn:
+        for name in sorted(set(configs)):
+            try:
+                async with conn.begin_nested():
+                    await conn.execute(text("SELECT CAST(:name AS regconfig)"), {"name": name})
+            except DBAPIError:
+                missing.append(name)
     if missing:
         raise TextSearchConfigError(f"Postgres has no text search configuration {missing}")
 
