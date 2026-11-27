@@ -5,9 +5,11 @@ chunk ids. A claim citing no passage, or one outside the request's passages, is 
 vote; the judge labels the rest against their cited passages only.
 """
 
+import contextlib
 import json
 import re
-from collections.abc import Callable, Iterator, Sequence
+import unicodedata
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -20,15 +22,14 @@ Verdict = Literal["supported", "partial", "unsupported"]
 CheckedVerdict = Literal[Verdict, "gap"]  # `gap`: the sentence naming what the passages don't cover
 
 _STRICT = ConfigDict(extra="forbid", frozen=True)
-# Where the answer's JSON starts: after a Markdown fence when there is one, otherwise at a brace opening a
-# key, so a brace in prose before it doesn't count.
-_FENCE = re.compile(r"```[A-Za-z]*[ \t]*\n?")
+# Where the answer's JSON may start: any brace opening a key, tried in order (a fence or a sentence before it,
+# or an example object, is passed over until one parses as the answer).
 _JSON_START = re.compile(r'\{\s*"')
-_CLOSING_FENCE = "```"
-# Our prompt elements, however spaced or written (the full-width less-than sign too); model or visitor text
-# inside one must not open or close any of them.
-FULLWIDTH_LESS_THAN = "\uff1c"
-_DELIMITER = re.compile(rf"[<{FULLWIDTH_LESS_THAN}]\s*(/?)\s*(claim|checked_claims|passage)\b", re.IGNORECASE)
+_DECODER = json.JSONDecoder(strict=False)  # a raw newline inside a string is read, as the draft reads it
+# Our prompt elements, however spaced or written (the full-width and small less-than signs too); model or
+# visitor text inside one must not open or close any of them. Invisible characters are dropped first.
+LESS_THAN_SIGNS = "<\uff1c\ufe64"
+_DELIMITER = re.compile(rf"[{LESS_THAN_SIGNS}]\s*(/?)\s*(claim|checked_claims|passage)\b", re.IGNORECASE)
 
 
 class AnswerClaim(BaseModel):
@@ -72,34 +73,24 @@ class CheckedClaim:
     verdict: CheckedVerdict
 
 
-def _json_starts(text: str) -> list[int]:
-    """Where the answer's JSON may start, most likely first: the first brace opening a key, and the first one
-    after a Markdown fence; the fence's goes first when the fence comes before any such brace."""
-    first = _JSON_START.search(text)
-    fence = _FENCE.search(text)
-    after_fence = _JSON_START.search(text, fence.end()) if fence is not None else None
-    starts = [m.start() for m in (first, after_fence) if m is not None]
-    if fence is not None and (first is None or fence.start() < first.start()):
-        starts.reverse()
-    return list(dict.fromkeys(starts))
-
-
-def _candidates(text: str, parser: Callable[[str], Any]) -> Iterator[Any]:
-    """`text` parsed from each possible start, with or without a closing fence after the JSON."""
-    for start in _json_starts(text):
-        part = text[start:]
-        cut = part.rfind(_CLOSING_FENCE)
-        for piece in (part, part[:cut]) if cut > 0 else (part,):
-            try:
-                yield parser(piece)
-            except ValueError:
-                continue
+def _decoded(text: str, partial: bool) -> Iterator[Any]:
+    """The JSON values starting at each possible start; with `partial`, also what an unfinished one holds
+    so far. Text after a value (a closing fence, a sentence) is left out."""
+    for match in _JSON_START.finditer(text):
+        try:
+            yield _DECODER.raw_decode(text, match.start())[0]
+            continue
+        except ValueError:
+            pass
+        if partial:
+            with contextlib.suppress(ValueError):
+                yield parse_partial_json(text[match.start() :])
 
 
 def read_answer(text: str) -> AnswerContract | None:
     """The answer from its whole text (JSON mode, fenced JSON, or JSON after a sentence); None when it
     doesn't validate. It tries the starts `draft_text` tries, so the draft and the answer agree."""
-    for parsed in _candidates(text, json.loads):
+    for parsed in _decoded(text, partial=False):
         try:
             return AnswerContract.model_validate(parsed)
         except ValueError:  # JSON that isn't the contract
@@ -109,7 +100,7 @@ def read_answer(text: str) -> AnswerContract | None:
 
 def draft_text(partial: str) -> str:
     """The claims' text so far, read from the answer's JSON as it grows; never JSON or passage numbers."""
-    for parsed in _candidates(partial, parse_partial_json):
+    for parsed in _decoded(partial, partial=True):
         claims = parsed.get("claims") if isinstance(parsed, dict) else None
         if isinstance(claims, list):
             texts = [c["text"] for c in claims if isinstance(c, dict) and isinstance(c.get("text"), str)]
@@ -143,7 +134,8 @@ def judge_input(claims: Sequence[CitedClaim]) -> str:
 def as_data(text: str) -> str:
     """Text placed inside a prompt element, unable to open or close one of ours (other text is untouched,
     so `List<T>` stays as written)."""
-    return _DELIMITER.sub(r"&lt;\1\2", text)
+    visible = "".join(c for c in text if unicodedata.category(c) != "Cf")
+    return _DELIMITER.sub(r"&lt;\1\2", visible)
 
 
 def apply_verdicts(
