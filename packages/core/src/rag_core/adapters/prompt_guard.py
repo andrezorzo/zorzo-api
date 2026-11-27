@@ -5,7 +5,9 @@ the tokenizer read them, and loaded offline from `GUARD_CACHE_DIR` in the image.
 Labels: 0 benign, 1 malicious.
 """
 
+import asyncio
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +44,8 @@ class PromptGuardClassifier(shared.LazyModel[tuple[Any, Any]]):
 
     def __init__(self, cache_dir: Path) -> None:
         super().__init__(cache_dir, GUARD_SLOTS)
-        self._limiter: anyio.CapacityLimiter | None = None  # made on the first question, inside the loop
+        self._limiter: anyio.CapacityLimiter | None = None  # made inside the running loop
+        self._limiter_loop: asyncio.AbstractEventLoop | None = None
 
     def _build(self) -> tuple[Any, Any]:
         snapshot = shared.download_snapshot(MODEL, MODEL_REVISION, list(MODEL_FILES_SHA256), self.cache_dir)
@@ -53,18 +56,30 @@ class PromptGuardClassifier(shared.LazyModel[tuple[Any, Any]]):
         # CPU-bound: keep it off the event loop. A visitor can fill the slots with questions, so a busy model
         # is waited for, never reported as a failure (which fails open): the caller's deadline ends the wait.
         # The limiter makes the waiters queue on the event loop, holding no worker thread.
-        limiter = self._limiter or anyio.CapacityLimiter(GUARD_SLOTS)
-        self._limiter = limiter
-        while True:
-            try:
-                return await anyio.to_thread.run_sync(
-                    self._score, text, abandon_on_cancel=True, limiter=limiter
-                )
-            except shared.ModelBusyError:  # a thread the deadline abandoned still holds a slot
-                await anyio.sleep(BUSY_RETRY_S)
+        cancelled = threading.Event()  # set when the caller gives up: a thread that starts late does nothing
+        try:
+            while True:
+                try:
+                    return await anyio.to_thread.run_sync(
+                        self._score, text, cancelled, abandon_on_cancel=True, limiter=self._limiter_here()
+                    )
+                except shared.ModelBusyError:  # a thread the deadline abandoned still holds a slot
+                    await anyio.sleep(BUSY_RETRY_S)
+        except BaseException:
+            cancelled.set()
+            raise
 
-    def _score(self, text: str) -> float:
+    def _limiter_here(self) -> anyio.CapacityLimiter:
+        """The limiter of the running event loop (one is bound to the loop that first used it)."""
+        loop = asyncio.get_running_loop()
+        if self._limiter is None or self._limiter_loop is not loop:
+            self._limiter, self._limiter_loop = anyio.CapacityLimiter(GUARD_SLOTS), loop
+        return self._limiter
+
+    def _score(self, text: str, cancelled: threading.Event) -> float:
         with self.slot():
+            if cancelled.is_set():  # the caller left while this waited for the slot
+                return 0.0
             tokenizer, session = self.model()
             encoded = tokenizer.encode(text)
             inputs = {

@@ -73,3 +73,21 @@ async def test_the_warning_comes_again_after_its_interval_with_the_dropped_count
     assert counts == [1, 4]
     db.release.set()
     await writer.drain()
+
+
+async def test_the_throttle_holds_across_bursts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(row_writer, "MAX_PENDING_ROWS", 1)
+    monkeypatch.setattr(time, "monotonic", lambda: 1000.0)
+    db = SlowDb()
+    writer = RowWriter(db, INSERT, "test_row_failed")  # type: ignore[arg-type]
+    with capture_logs() as logs:
+        for _ in range(3):  # a burst, drained, then another within the interval
+            writer.write({"n": 0})
+            writer.write({"n": 1})
+            writer.write({"n": 2})
+            db.release.set()
+            await writer.drain()
+            db.release.clear()
+    # the first drop warned at once; later bursts only report their tail when they drain, one per burst
+    counts = [e["dropped"] for e in logs if e["event"] == "rows_dropped"]
+    assert counts == [1, 1, 2, 2]

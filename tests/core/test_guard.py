@@ -142,6 +142,8 @@ PLAIN_TEXT = [
     "Big Data: Spark. Data: março. Profile: senior. Intel: x86. Tel: 123. About: him. FTP: yes.",
     'He said "https://zorzo.dev.br" and zorzo.dev.br—o site.',
     "p.ex. a migration, e.g. to AWS, i.e. event-driven.",
+    "Data:12/03/2020, Big Data:Spark and HTTP:80 are not links.",  # no space after the colon
+    "Metadata:x and the www. prefix, then www.. and www. alone.",  # a lone `www.` is text
     "See mailto:andre_zorzo@yahoo.com and tel:123 in the footer.",  # not explicit URLs: they are text
     # A bare host is not a link: the page shows a claim as text (`textContent`), so it is not clickable,
     # and only an explicit URL is something a visitor might copy. Accepted residual risk
@@ -164,6 +166,10 @@ def test_text_that_is_not_an_explicit_url_is_kept(text: str) -> None:
         ("See https://github.com, and more.", True),  # trailing punctuation isn't part of the host
         ("(see https://github.com/x)", True),
         ("See https://github.com\u2014 the code.", True),
+        (
+            "See <https://github.com> and \u300chttps://github.com\u300d\u3001 then https://github.com\u3001",
+            True,
+        ),
         ("See \u201chttps://github.com\u201d", True),
         ("See https://zorzo.dev.br/a\u2019 page", True),
         ("See https://evil.example/zorzo.dev.br", False),
@@ -180,12 +186,22 @@ def test_text_that_is_not_an_explicit_url_is_kept(text: str) -> None:
         ("See JaVaScRiPt:alert(1)", False),
         ("See data:text/html,<script>x</script>", False),
         ("See vbscript:x", False),
+        ("See data:,x and data:text/html;base64,AAA", False),
+        ("See https:evil.com and HTTP:Evil.com/x", False),
+        ("See -https://evil.com/x", False),  # a prefix doesn't make it another scheme
+        ("See ...https://evil.com and 1https://evil.com", False),
+        ("See +www.evil.com and 2www.evil.com and -www.evil.com", False),
+        ("See https://github.com/a,https://evil.com", False),  # a second URL inside an allowed link
+        ("See https://github.com/a;www.evil.com and https://github.com/a|//evil.com", False),
+        ("See https://github.com/a\u200dhttps://evil.com", False),  # a zero-width joiner between them
+        ("See https://github.com/a//b and https://github.com/?u=1&v=2", True),
         ("Run javascript:alert(1)", False),
         ("See https:evil.com", False),  # http(s) without its slashes
         ("See https:Evil.com", False),
         ("See https://github.com:8443/x", False),  # a port
         ("See https://github.com%2eevil.com/", False),  # an escape
-        ("See https://git\u200bhub.com/", False),  # a character that is not an ASCII host
+        ("See https://evil\u200b.com/", False),  # invisible characters are dropped before the host is read
+        ("See https://git\u200bhub.com/", True),  # the same drop: browsers ignore it, and it is github.com
         ("See https://\u0435vil.com/x", False),  # a Cyrillic letter in the host
         ("See https://evil\u3002com/x", False),  # an ideographic full stop is a dot
         ("See https://evil\uff61com/x", False),
@@ -285,7 +301,15 @@ def test_a_long_run_of_letters_is_scanned_once() -> None:
     started = time.perf_counter()
     assert links_allowed("a" * 50_000, HOSTS) and links_allowed("a" * 50_000 + "://x", HOSTS) is False
     assert links_allowed("www." * 20_000, HOSTS) is False
-    assert time.perf_counter() - started < 0.1
+    assert time.perf_counter() - started < 1  # linear: the quadratic scan took minutes
+
+
+def test_the_canary_is_found_in_compatibility_capitals() -> None:
+    watch = CanaryWatch("ISTANBUL-marker-0123456789-abcdefghijklmnopqrstuvwxyz")
+    bold = "".join(chr(0x1D400 + ord(c) - ord("A")) if "A" <= c <= "Z" else c for c in "ISTANBUL")
+    assert bold != "ISTANBUL" and watch.found(f"{bold} marker 0123456789 abcdefghijklmnopqrstuvwxyz")
+    squared = "".join(chr(0x1F130 + ord(c) - ord("A")) if "A" <= c <= "Z" else c for c in "ISTANBUL")
+    assert watch.found(f"{squared} marker 0123456789 abcdefghijklmnopqrstuvwxyz")  # squared capitals
 
 
 def test_the_canary_is_found_through_case_folding_and_accents() -> None:

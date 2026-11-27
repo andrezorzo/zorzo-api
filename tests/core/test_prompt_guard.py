@@ -3,6 +3,7 @@ integrity check and the scoring around the model are tested with stand-ins."""
 
 import asyncio
 import hashlib
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -130,10 +131,7 @@ async def test_a_busy_classifier_is_waited_for_not_failed_open(
 async def test_questions_waiting_for_a_slot_hold_no_worker_thread(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import threading
-
-    running, release = [], threading.Event()
-    lock = threading.Lock()
+    running, release, lock = [], threading.Event(), threading.Lock()
 
     class Tokenizer:
         def encode(self, text: str) -> Any:
@@ -149,7 +147,34 @@ async def test_questions_waiting_for_a_slot_hold_no_worker_thread(
     classifier = PromptGuardClassifier(tmp_path)
     monkeypatch.setattr(classifier, "model", lambda: (Tokenizer(), Session()))
     tasks = [asyncio.create_task(classifier.score("q")) for _ in range(8)]
-    await asyncio.sleep(0.3)
+    async with asyncio.timeout(5):
+        while len(running) < prompt_guard.GUARD_SLOTS:
+            await asyncio.sleep(0.01)
+    await asyncio.sleep(0.1)  # time for a third to start, if one could
     assert len(running) == prompt_guard.GUARD_SLOTS  # the other six wait on the event loop
     release.set()
     assert await asyncio.gather(*tasks) == [pytest.approx(softmax_malicious([[6.0, 0.0]]))] * 8
+
+
+async def test_a_thread_that_starts_after_its_caller_left_does_no_inference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    classifier = PromptGuardClassifier(tmp_path)
+    ran: list[str] = []
+
+    def model() -> Any:
+        ran.append("model")
+        raise AssertionError("inference must not start")
+
+    monkeypatch.setattr(classifier, "model", model)
+    cancelled = threading.Event()
+    cancelled.set()
+    assert classifier._score("q", cancelled) == 0.0 and ran == []
+
+
+async def test_the_limiter_follows_the_running_loop(tmp_path: Path) -> None:
+    classifier = PromptGuardClassifier(tmp_path)
+    first = classifier._limiter_here()
+    assert classifier._limiter_here() is first
+    classifier._limiter_loop = None  # as if it had been made in another loop
+    assert classifier._limiter_here() is not first

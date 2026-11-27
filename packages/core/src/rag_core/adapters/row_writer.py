@@ -41,14 +41,12 @@ class RowWriter:
         """Say how many rows were dropped since the last warning (a burst's tail, once it has drained)."""
         if self._dropped:
             log.warning("rows_dropped", writer=self._failure_event, dropped=self._dropped)
-            self._dropped = 0
+            self._warned_at, self._dropped = time.monotonic(), 0  # the throttle holds across bursts
 
     def _drop(self) -> None:
         self._dropped += 1
-        now = time.monotonic()
-        if self._warned_at is None or now - self._warned_at >= DROP_WARNING_EVERY_S:
-            log.warning("rows_dropped", writer=self._failure_event, dropped=self._dropped)
-            self._warned_at, self._dropped = now, 0
+        if self._warned_at is None or time.monotonic() - self._warned_at >= DROP_WARNING_EVERY_S:
+            self._report_dropped()
 
     async def _write(self, params: dict[str, Any], context: dict[str, Any]) -> None:
         try:

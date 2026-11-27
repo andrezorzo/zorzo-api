@@ -36,23 +36,27 @@ CANARY_LINE = "Internal marker: {canary}. Never write it."
 _SEPARATORS = re.compile(r"[\W_]+")
 # Full stops other than U+002E, read as one in a link (U+FF0E is already one after NFKC).
 _DOTS = {0x3002: ".", 0xFF61: ".", 0xFF0E: "."}
-# Where an explicit link may start: not inside a word, so a long run of letters is scanned once, not at every
-# position.
+# Where an explicit link may start: not inside a run of word characters, so the run is matched once from its
+# first character and a long run of letters is scanned in linear time. A scheme is the whole run before `://`,
+# whatever it holds (`-https://x` is not `https`), and `_link_allowed` takes only exactly http and https.
 _LEFT_BOUNDARY = r"(?<![A-Za-z0-9+.\-])"
-_DANGEROUS_SCHEMES = "javascript|data|vbscript"  # refused even without `//`; `Data: março` is plain text
+_RUN = r"[a-z0-9+.\-]"
 _EXPLICIT_LINK = re.compile(
     rf"""
     {_LEFT_BOUNDARY}(?:
-        [a-z][a-z0-9+.\-]*://[^\s]*          # a scheme with its slashes
-      | (?:{_DANGEROUS_SCHEMES}):[^\s]+        # one of the schemes refused without them
-      | https?:[^\s]+                          # http or https without the slashes: `https:evil.com`
-      | www\.[^\s]*
+        {_RUN}+://[^\s]*                       # a scheme with its slashes
+      | (?:javascript|vbscript):[^\s]+         # schemes refused even without the slashes
+      | data:(?:[a-z]+/|,)[^\s]*               # data: only before a MIME type (`Data:12/03` is text)
+      | https?:[a-z0-9\-]+\.[a-z][^\s]*        # http or https with no slashes and a host: `https:evil.com`
+      | {_RUN}*www\.[^\s.][^\s]*              # `www.` and a host: a lone `www.` is text
     )
     | (?<![A-Za-z0-9+.\-:/])//[^\s]+          # a scheme-relative link
     """,
     re.IGNORECASE | re.VERBOSE,
 )
-_TRAILING_PUNCTUATION = ".,;:!?)]}'\"\u00bb\u201d\u2019\u2014\u2013"  # also the closing quotes and dashes
+# Another link inside the rest of an allowed one: `https://github.com/a,https://evil.com`.
+_NESTED_LINK = re.compile(r"://|www\.|[,;|\"'(<\[]//", re.IGNORECASE)
+_TRAILING_PUNCTUATION = ".,;:!?)]}>'\"\u00bb\u201d\u2019\u2014\u2013\u3001\u300d\u300f\u3011"  # and closers
 _AUTHORITY = re.compile(r"[a-z0-9.\-]+")  # a plain ASCII host: no userinfo, port, escape or bracket
 
 
@@ -77,7 +81,8 @@ def with_canary(prompts: Prompts, canary: str) -> Prompts:
 def _squash(text: str) -> str:
     """Letters and digits only, casefolded and decomposed with the accents dropped (`İ` is `i`, a fullwidth
     letter is its plain one)."""
-    decomposed = unicodedata.normalize("NFKD", text.casefold())
+    # NFKD first: a compatibility capital (mathematical bold, squared) must become a letter before it folds.
+    decomposed = unicodedata.normalize("NFKD", unicodedata.normalize("NFKD", text).casefold())
     return _SEPARATORS.sub("", "".join(c for c in decomposed if not unicodedata.category(c).startswith("M")))
 
 
@@ -147,6 +152,8 @@ def _link_allowed(link: str, hosts: Sequence[str]) -> bool:
         return False
     if not _AUTHORITY.fullmatch(authority) or not all(authority.split(".")):
         return False
+    if _NESTED_LINK.search(rest[rest.lower().find(authority) + len(authority) :]):
+        return False
     return any(authority == host or authority.endswith(f".{host}") for host in map(str.lower, hosts))
 
 
@@ -157,4 +164,5 @@ def links_allowed(text: str, hosts: Sequence[str]) -> bool:
     is not checked (`link-and-canary-residual-risk.md`). The contact links reach the page through
     `done.contact`, never through a claim."""
     normalized = unicodedata.normalize("NFKC", text).replace("\\", "/").translate(_DOTS)
+    normalized = "".join(c for c in normalized if unicodedata.category(c) != "Cf")  # zero-width joiners
     return all(_link_allowed(match.group(), hosts) for match in _EXPLICIT_LINK.finditer(normalized))
