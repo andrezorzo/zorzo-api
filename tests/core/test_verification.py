@@ -76,10 +76,12 @@ def test_claims_before_the_language_still_stream() -> None:
     assert draft_text(reordered[: reordered.index("Lambda") + len("Lambda")]) == "He used Lambda"
 
 
-def test_the_draft_and_the_answer_take_the_same_of_two_objects() -> None:
+def test_with_two_answer_objects_the_last_one_counts() -> None:
     example = '{"answer_lang": "en", "claims": [], "gap": null, "abstained": true}'
     text = f"If nothing matches: {example}\nAnswer: {ANSWER}"
     answer = read_answer(text)
     assert answer is not None and answer.claims[0].text == draft_text(text) == TEXT
-    truncated_repeat = ANSWER + '\n{"answer_lang": "en", "claims": [{"text": "He wrote more'
-    assert draft_text(truncated_repeat) == TEXT  # a whole answer wins over an unfinished one
+    answer_start = text.index("Answer: ") + len("Answer: ")
+    drafts = [draft_text(text[:n]) for n in range(answer_start + 1, len(text) + 1)]
+    assert drafts[-1] == TEXT and any(0 < len(d) < len(TEXT) for d in drafts)  # it streams as it grows
+    assert all(TEXT.startswith(d) for d in drafts)

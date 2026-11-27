@@ -100,23 +100,18 @@ def _contract(parsed: Any) -> AnswerContract | None:
 def draft_text(streamed: str) -> str:
     """The claims' text so far, read from the answer's JSON as it grows; never JSON or passage numbers.
 
-    The rule is `read_answer`'s: the last whole object that validates; while none has, the last unfinished
-    object holding a `claims` list. A format example or an unreadable object is passed over. A known limit:
-    an example still streaming before the answer starts shows as the draft until the answer arrives; the
-    checked claims replace the draft anyway.
+    The rule is `read_answer`'s, by position: the object that starts last among those that are the answer
+    so far (a whole one that validates, or an unfinished one holding a `claims` list). A format example or
+    an unreadable object before it is passed over. A known limit: when the model writes more than one
+    answer object, the last one counts, so the draft may have shown an earlier one; the checked claims (or
+    the abstention) replace the draft anyway, and nothing is published unverified.
     """
-    whole: list[Any] = []
-    unfinished: list[Any] = []
+    claims: list[Any] | None = None
     for parsed, complete in _decoded(streamed, allow_unfinished=True):
-        claims = parsed.get("claims") if isinstance(parsed, dict) else None
-        if complete and _contract(parsed) is not None:
-            whole.append(claims)
-        elif not complete and isinstance(claims, list):
-            unfinished.append(claims)
-    found = whole or unfinished
-    if not found:
-        return ""
-    texts = [c["text"] for c in found[-1] if isinstance(c, dict) and isinstance(c.get("text"), str)]
+        held = parsed.get("claims") if isinstance(parsed, dict) else None
+        if (complete and _contract(parsed) is not None) or (not complete and isinstance(held, list)):
+            claims = held
+    texts = [c["text"] for c in claims or [] if isinstance(c, dict) and isinstance(c.get("text"), str)]
     return " ".join(t for t in texts if t)
 
 
