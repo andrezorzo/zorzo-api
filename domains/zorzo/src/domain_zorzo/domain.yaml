@@ -1,5 +1,10 @@
 name: zorzo
-languages: [en, pt]
+# ISO 639-1 code: the Postgres text search configuration of that language. The first is the default.
+languages:
+  en: english
+  pt: portuguese
+# The kinds a corpus document's front matter may declare.
+document_kinds: [resume, narrative, faq, repo, project_doc, site_doc, post]
 # The owner's public contact details the PII pass lets through (LLD "6.1 Corpus version"): an exact string,
 # or a phone with its +country code, which then covers its standard international and national forms and
 # its digits written together.

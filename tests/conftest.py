@@ -5,6 +5,7 @@ The migrations run once per test session into a template database; each test dat
 """
 
 import os
+import shutil
 import subprocess
 import sys
 import uuid
@@ -28,6 +29,8 @@ from tests.fakes.openrouter import FakeOpenRouter, stop_all
 from tests.fakes.turnstile import PASS_SECRET, FakeSiteverify
 
 ROOT = Path(__file__).resolve().parents[1]
+# Test-only domain packages (`domain_<name>`), importable once this folder is on the path.
+FIXTURE_DOMAINS = ROOT / "tests/fixtures/domains"
 ADMIN_URL = os.environ.get("TEST_DATABASE_ADMIN_URL", "postgresql://zorzo:zorzo@localhost:5432/postgres")
 
 
@@ -82,9 +85,17 @@ def database_url() -> Iterator[str]:
 
 
 def run_ingest(
-    url: str, data_dir: Path, *args: str, app_env: str = "local", embedder: str = "fake"
+    url: str,
+    data_dir: Path,
+    *args: str,
+    app_env: str = "local",
+    embedder: str = "fake",
+    domain: str = "zorzo",
+    domains_dir: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """The real ingest command (fake embedder by default) against the given database."""
+    """The real ingest command (fake embedder by default) against the given database; `domains_dir` puts a
+    folder of test domain packages on the path."""
+    path = {"PYTHONPATH": str(domains_dir)} if domains_dir else {}
     return subprocess.run(
         [sys.executable, "-m", "rag_ingest", *args],
         cwd=ROOT,
@@ -92,16 +103,25 @@ def run_ingest(
             **os.environ,
             "DATABASE_URL": url,
             "APP_ENV": app_env,
-            "DOMAIN": "zorzo",
+            "DOMAIN": domain,
             "EMBEDDER": embedder,
             # Nothing listens here: with EMBEDDER=ollama, embedding fails at once.
             "OLLAMA_URL": "http://127.0.0.1:9",
             "DATA_DIR": str(data_dir),
+            **path,
         },
         capture_output=True,
         text=True,
         timeout=120,
     )
+
+
+def copy_domain(folder: Path, name: str, domain_yaml: str) -> Path:
+    """A copy of the `sample` test domain as `domain_<name>` in `folder`, with its own `domain.yaml`; returns
+    the folder, to put on the path."""
+    shutil.copytree(FIXTURE_DOMAINS / "domain_sample", folder / f"domain_{name}")
+    (folder / f"domain_{name}" / "domain.yaml").write_text(domain_yaml)
+    return folder
 
 
 def ingest_fixture_corpus(url: str, data_dir: Path) -> None:

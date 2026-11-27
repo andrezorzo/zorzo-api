@@ -3,7 +3,7 @@
 Vectors travel as pgvector's text form (`[1,2,3]`) with explicit casts, so no driver adapter is needed.
 """
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Collection, Mapping, Sequence
 from contextlib import asynccontextmanager
 
 import structlog
@@ -16,9 +16,11 @@ from rag_core.ports import ActiveCorpus, ChunkRow, DocumentRow, PublishedChunk, 
 log = structlog.get_logger()
 
 INGEST_LOCK_KEY = 0x7A6F727A6F  # one ingest run at a time (LLD "Concurrency and idempotency")
-TEXT_SEARCH_CONFIG = {"en": "english", "pt": "portuguese"}
 
-HYBRID_SEARCH = text("""
+# One OR-ed query per text search configuration; the names are bound parameters, never SQL text.
+QUERY_IN_CONFIG = "replace(plainto_tsquery(CAST(:config_{n} AS regconfig), :text)::text, '&', '|')::tsquery"
+
+HYBRID_SEARCH = """
 WITH vec AS (
     SELECT c.id, row_number() OVER (ORDER BY c.embedding <=> CAST(:vector AS vector)) AS rank
     FROM chunks c JOIN documents d ON d.id = c.document_id
@@ -29,9 +31,8 @@ WITH vec AS (
     LIMIT :k
 ), query AS (
     -- Any term of the question matches (OR), ranked by how many and how close; the question's language
-    -- isn't known here, so both configurations are searched.
-    SELECT replace(plainto_tsquery('english', :text)::text, '&', '|')::tsquery
-        || replace(plainto_tsquery('portuguese', :text)::text, '&', '|')::tsquery AS q
+    -- isn't known here, so every configuration of the domain is searched.
+    SELECT {query} AS q
 ), fts AS (
     SELECT c.id, row_number() OVER (ORDER BY ts_rank_cd(c.tsv, query.q) DESC, c.id) AS rank
     FROM chunks c JOIN documents d ON d.id = c.document_id, query
@@ -49,7 +50,24 @@ FROM fused f
 JOIN chunks c ON c.id = f.id
 JOIN documents d ON d.id = c.document_id
 ORDER BY f.score DESC, c.id
-""")
+"""
+
+
+class TextSearchConfigError(RuntimeError):
+    """A text search configuration the domain names is missing from Postgres."""
+
+
+async def check_text_search(db: Database, configs: Collection[str]) -> None:
+    """Raises `TextSearchConfigError` naming each configuration Postgres doesn't have (`pg_ts_config`)."""
+    async with db.engine.connect() as conn:
+        present = set(
+            await conn.scalars(
+                text("SELECT cfgname FROM pg_ts_config WHERE cfgname = ANY(:names)"), {"names": list(configs)}
+            )
+        )
+    missing = sorted(set(configs) - present)
+    if missing:
+        raise TextSearchConfigError(f"Postgres has no text search configuration {missing}")
 
 
 def to_vector(values: list[float]) -> str:
@@ -63,10 +81,17 @@ def from_vector(text_value: str) -> list[float]:
 class PgVectorStore:
     """Read side, used by the API."""
 
-    def __init__(self, db: Database, rrf_k: int, min_similarity: float) -> None:
+    def __init__(
+        self, db: Database, rrf_k: int, min_similarity: float, text_search: Mapping[str, str]
+    ) -> None:
+        """`text_search`: the domain's languages, each with its Postgres text search configuration."""
         self.db = db
         self.rrf_k = rrf_k
         self.min_similarity = min_similarity
+        configs = list(dict.fromkeys(text_search.values()))
+        self._configs = {f"config_{n}": config for n, config in enumerate(configs)}
+        query = "\n        || ".join(QUERY_IN_CONFIG.format(n=n) for n in range(len(configs)))
+        self._search = text(HYBRID_SEARCH.format(query=query))
 
     async def active_corpus(self) -> ActiveCorpus | None:
         async with self.db.engine.connect() as conn:
@@ -84,8 +109,9 @@ class PgVectorStore:
             # Keep scanning the HNSW graph until enough rows pass the version filter (pgvector 0.8).
             await conn.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
             rows = await conn.execute(
-                HYBRID_SEARCH,
+                self._search,
                 {
+                    **self._configs,
                     "vector": to_vector(vector),
                     "text": text_query,
                     "k": k,
@@ -101,8 +127,10 @@ class PgVectorStore:
 class PgCorpusStore:
     """Write side, used by ingest (LLD "6.1 Corpus version")."""
 
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db: Database, text_search: Mapping[str, str]) -> None:
+        """`text_search`: the domain's languages, each with its Postgres text search configuration."""
         self.db = db
+        self.text_search = dict(text_search)
 
     @asynccontextmanager
     async def lock(self) -> AsyncIterator[bool]:
@@ -193,7 +221,7 @@ class PgCorpusStore:
                             "tokens": c.tokens,
                             "hash": c.hash,
                             "embedding": to_vector(c.embedding),
-                            "config": TEXT_SEARCH_CONFIG[doc_ids[c.doc_key][1]],
+                            "config": self.text_search[doc_ids[c.doc_key][1]],
                         }
                         for c in chunks
                     ],

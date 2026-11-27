@@ -1,16 +1,19 @@
-"""AC4: hybrid search over the active version, through the Postgres adapter with handcrafted vectors."""
+"""F01-T02 AC4: hybrid search over the active version, through the Postgres adapter with handcrafted vectors;
+F01-T14 AC3: full text in the domain's languages."""
 
 from collections.abc import AsyncIterator
 
 import psycopg
 import pytest
-from rag_core.adapters.pgvector_store import PgVectorStore, to_vector
+from rag_core.adapters.pgvector_store import PgCorpusStore, PgVectorStore, to_vector
 from rag_core.adapters.postgres import Database
-from rag_core.ports import EMBEDDING_DIM
+from rag_core.domain import load_domain
+from rag_core.ports import EMBEDDING_DIM, ChunkRow, DocumentRow
 
 from tests.conftest import create_migrated_database, drop_database
 
 DIM = EMBEDDING_DIM
+ZORZO_TEXT_SEARCH = load_domain("zorzo").languages
 
 
 def unit(*weights: tuple[int, float]) -> list[float]:
@@ -52,7 +55,7 @@ def add_version(
 async def store() -> AsyncIterator[tuple[PgVectorStore, str]]:
     url = create_migrated_database()
     db = Database(url)
-    yield PgVectorStore(db, rrf_k=60, min_similarity=0.5), url
+    yield PgVectorStore(db, rrf_k=60, min_similarity=0.5, text_search=ZORZO_TEXT_SEARCH), url
     await db.close()
     drop_database(url)
 
@@ -103,3 +106,19 @@ async def test_full_text_matches_any_term_of_the_question(store: tuple[PgVectorS
         version, chunk = add_version(conn, [("serverless pipelines on aws", unit((5, 1)))])
     hits = await vs.search(unit((0, 1)), "Which AWS services did he use?", k=20, version=version)
     assert [h.id for h in hits] == [chunk]
+
+
+async def test_full_text_uses_the_domains_configurations(store: tuple[PgVectorStore, str]) -> None:
+    zorzo, _ = store
+    text_search = {"en": "english", "es": "spanish"}
+    corpus = PgCorpusStore(zorzo.db, text_search)
+    version = await corpus.create_candidate("t")
+    row = DocumentRow("guia", "Guía", "manual", "es", 1, None, None, "h")
+    await corpus.write(
+        version, [row], [ChunkRow("guia", "Guía", "Los árboles del parque", 1, "c", unit((5, 1)))]
+    )
+    other = PgVectorStore(zorzo.db, rrf_k=60, min_similarity=0.5, text_search=text_search)
+    # "árbol" and "árboles" share a stem only in Spanish (`arbol`; English and Portuguese keep the accent):
+    # the chunk was indexed with `spanish`, and the query is searched in it.
+    assert [h.title for h in await other.search(unit((0, 1)), "árbol", k=20, version=version)] == ["Guía"]
+    assert await zorzo.search(unit((0, 1)), "árbol", k=20, version=version) == []

@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 from rag_core.adapters.postgres import Database
-from rag_core.domain import load_intents, load_prompts
+from rag_core.domain import load_domain, load_intents, load_prompts
 from rag_core.services.gateway import ModelsUnavailableError, RequestSpend
 from rag_core.services.route import route, route_schema
 
@@ -25,8 +25,9 @@ OUTPUT = {
     "follow_up": False,
     "public_ok": True,
 }
-PROMPTS = load_prompts("zorzo")
-SCHEMA = route_schema(tuple(load_intents("zorzo")))
+INTENTS = load_intents("zorzo", load_domain("zorzo").document_kinds)
+PROMPTS = load_prompts("zorzo", INTENTS)
+SCHEMA = route_schema(tuple(INTENTS))
 
 
 @pytest.fixture

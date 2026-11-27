@@ -5,7 +5,7 @@ from pathlib import Path
 
 import structlog
 
-from rag_core.domain import Example
+from rag_core.domain import DomainConfig, Example
 from rag_core.ingest import gate, publish
 from rag_core.ingest.chunking import ChunkDraft, split
 from rag_core.limits import Limits
@@ -50,7 +50,7 @@ async def run_ingest(
     store: CorpusStore,
     embedder: Embedder,
     scanner: SecretScanner,
-    allowlist: tuple[str, ...],
+    domain: DomainConfig,
     limits: Limits,
 ) -> Summary:
     """Write a new candidate version from `source`; nothing is embedded or written unless the gate passes.
@@ -60,7 +60,7 @@ async def run_ingest(
     """
     version = await store.create_candidate(embedder.tag)
     try:
-        return await _fill_candidate(version, source, store, embedder, scanner, allowlist, limits)
+        return await _fill_candidate(version, source, store, embedder, scanner, domain, limits)
     except BaseException as exc:  # rejected, failed or cancelled: the original error is what the caller sees
         if isinstance(exc, IngestRejectedError):
             # Logged before the reject, so the owner learns what to fix even if the reject fails.
@@ -83,10 +83,10 @@ async def _fill_candidate(
     store: CorpusStore,
     embedder: Embedder,
     scanner: SecretScanner,
-    allowlist: tuple[str, ...],
+    domain: DomainConfig,
     limits: Limits,
 ) -> Summary:
-    documents, problems = await gate.check(source, scanner, allowlist)
+    documents, problems = await gate.check(source, scanner, domain)
     if not documents and not problems:
         problems = [Finding(str(source), "no documents")]
     if problems:

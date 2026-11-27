@@ -4,14 +4,14 @@ The core never imports a domain statically; the apps call `load_domain` at start
 """
 
 import importlib
+from collections.abc import Collection, Mapping
 from importlib.resources import files
 from pathlib import Path
+from string import Template
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, field_validator
-
-from rag_core.ingest.frontmatter import DOCUMENT_KINDS
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 
 class DomainError(RuntimeError):
@@ -22,9 +22,16 @@ class DomainConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     name: str
-    languages: tuple[str, ...]
+    # ISO 639-1 code → the Postgres text search configuration of that language; the first is the default.
+    languages: dict[str, str] = Field(min_length=1)
+    document_kinds: tuple[str, ...] = Field(min_length=1)  # the `kind`s a corpus document may have
     # Exact strings the PII pass lets through, e.g. the owner's public email (LLD "6.1 Corpus version").
     pii_allowlist: tuple[str, ...] = ()
+
+    @property
+    def language_codes(self) -> tuple[str, ...]:
+        """The languages in file order; the first is the default."""
+        return tuple(self.languages)
 
 
 class Example(BaseModel):
@@ -61,12 +68,17 @@ def load_domain(name: str) -> DomainConfig:
         raise DomainError(f"invalid domain config in {package}/domain.yaml: {exc}") from exc
 
 
-def load_examples(name: str) -> list[Example]:
+def load_examples(name: str, languages: Collection[str]) -> list[Example]:
+    """The example questions, each in one of the domain's languages."""
     try:
         raw = _read_yaml(name, "examples.yaml")
         if not isinstance(raw, list):
             raise ValueError("expected a list of questions")
-        return [Example.model_validate(item) for item in raw]
+        examples = [Example.model_validate(item) for item in raw]
+        undeclared = sorted({e.lang for e in examples} - set(languages))
+        if undeclared:
+            raise ValueError(f"languages {undeclared} are not the domain's: {list(languages)}")
+        return examples
     except Exception as exc:
         raise DomainError(f"invalid example questions in {_package(name)}/examples.yaml: {exc}") from exc
 
@@ -76,20 +88,23 @@ class Intent(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    description: str = Field(min_length=1)  # what `route` is told the intent covers
     kinds: tuple[str, ...] = ()  # document kinds its retrieval reads; empty means every kind
     action: Literal["answer", "decline"] = "answer"
 
     @field_validator("kinds")
     @classmethod
-    def _known_kinds(cls, kinds: tuple[str, ...]) -> tuple[str, ...]:
+    def _known_kinds(cls, kinds: tuple[str, ...], info: ValidationInfo) -> tuple[str, ...]:
         # A misspelled kind would match no document, and the intent would abstain on every question.
-        unknown = sorted(set(kinds) - set(DOCUMENT_KINDS))
+        known = (info.context or {}).get("kinds")
+        unknown = sorted(set(kinds) - set(known)) if known is not None else []
         if unknown:
-            raise ValueError(f"unknown document kinds {unknown}; known: {list(DOCUMENT_KINDS)}")
+            raise ValueError(f"unknown document kinds {unknown}; the domain's: {list(known or ())}")
         return kinds
 
 
-def load_intents(name: str) -> dict[str, Intent]:
+def load_intents(name: str, kinds: Collection[str]) -> dict[str, Intent]:
+    """The domain's intents, each kind checked against the domain's `document_kinds`."""
     try:
         raw = _read_yaml(name, "intents.yaml")
         if not isinstance(raw, dict) or not raw:
@@ -98,7 +113,9 @@ def load_intents(name: str) -> dict[str, Intent]:
         odd = [key for key in raw if not isinstance(key, str)]
         if odd:
             raise ValueError(f"intent names must be strings (quote them): {odd}")
-        return {key: Intent.model_validate(value or {}) for key, value in raw.items()}
+        return {
+            key: Intent.model_validate(value or {}, context={"kinds": kinds}) for key, value in raw.items()
+        }
     except Exception as exc:
         raise DomainError(f"invalid intents in {_package(name)}/intents.yaml: {exc}") from exc
 
@@ -116,12 +133,21 @@ class Prompts(BaseModel):
     repair: str
 
 
-def load_prompts(name: str) -> Prompts:
+def _intent_list(intents: Mapping[str, Intent]) -> str:
+    return "\n".join(f"- `{key}`: {intent.description}" for key, intent in intents.items())
+
+
+def load_prompts(name: str, intents: Mapping[str, Intent]) -> Prompts:
+    """The prompt templates, with the `route` prompt's `$intents` filled from `intents.yaml` once, so the
+    prompt never names an intent; the other `$slot`s are left for the nodes."""
     try:
         folder = files(_package(name)).joinpath("prompts")
-        return Prompts(
-            **{field: folder.joinpath(f"{field}.md").read_text() for field in Prompts.model_fields}
-        )
+        texts = {field: folder.joinpath(f"{field}.md").read_text() for field in Prompts.model_fields}
+        route = Template(texts["route"])
+        if "intents" not in route.get_identifiers():
+            raise ValueError("route.md has no $intents slot for the domain's intents")
+        texts["route"] = route.safe_substitute(intents=_intent_list(intents))
+        return Prompts(**texts)
     except Exception as exc:
         raise DomainError(f"missing or invalid prompts in {_package(name)}/prompts: {exc}") from exc
 

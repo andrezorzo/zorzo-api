@@ -1,15 +1,18 @@
-"""AC1: the gate's PII pass, front matter parsing and secret scan, each in isolation."""
+"""F01-T02 AC1: the gate's PII pass, front matter parsing and secret scan, each in isolation; F01-T14 AC1 and
+AC3: the kinds and languages a document may declare come from the domain."""
 
 import time
 from pathlib import Path
 
 import pytest
 from rag_core.adapters.gitleaks import GitleaksError, GitleaksScanner
+from rag_core.domain import DomainConfig, load_domain
 from rag_core.ingest.frontmatter import FrontMatterError, parse
 from rag_core.ingest.gate import check, personal_data
 from rag_core.ports import Finding
 
 VALID = "doc_key: d\ntitle: T\nkind: faq\nlang: en\nauthority: 1\nreviewed_by_owner: true\n"
+ZORZO = load_domain("zorzo")
 
 
 @pytest.mark.parametrize(
@@ -165,7 +168,7 @@ class NoSecrets:
 
 async def test_reads_a_file_saved_with_a_byte_order_mark(tmp_path: Path) -> None:
     (tmp_path / "bom.md").write_bytes(("﻿---\r\n" + VALID + "---\r\n# T\r\n\r\ntext\r\n").encode())
-    documents, problems = await check(tmp_path, NoSecrets(), ())
+    documents, problems = await check(tmp_path, NoSecrets(), ZORZO)
     assert problems == [] and documents[0].meta.doc_key == "d"
 
 
@@ -279,3 +282,35 @@ def test_tables_of_small_numbers_are_scanned_quickly() -> None:
     started = time.perf_counter()
     personal_data("1 2 3 4 5 6 7 8 9 10 11 12 x " * 100)  # about 0.7 s on a laptop: room for a slow CI runner
     assert time.perf_counter() - started < 3.0
+
+
+def document(kind: str = "faq", lang: str = "en") -> str:
+    return (
+        "---\n"
+        + VALID.replace("kind: faq", f"kind: {kind}").replace("lang: en", f"lang: {lang}")
+        + "---\n# T\n"
+    )
+
+
+async def test_a_kind_the_domain_doesnt_declare_is_a_front_matter_problem(tmp_path: Path) -> None:
+    (tmp_path / "manual.md").write_text(document(kind="manual"))
+    _, [problem] = await check(tmp_path, NoSecrets(), ZORZO)
+    assert problem.file == "manual.md"
+    # The field and the domain's kinds, never the value: a value could be what the gate protects.
+    assert problem.rule == (
+        "invalid front matter (kind); "
+        "the domain's kinds: resume, narrative, faq, repo, project_doc, site_doc, post"
+    )
+
+
+async def test_a_language_the_domain_doesnt_declare_is_a_front_matter_problem(tmp_path: Path) -> None:
+    (tmp_path / "doc.md").write_text(document(lang="es"))
+    _, [problem] = await check(tmp_path, NoSecrets(), ZORZO)
+    assert problem.rule == "invalid front matter (lang); the domain's languages: en, pt"
+
+
+async def test_the_kinds_and_languages_come_from_the_domain(tmp_path: Path) -> None:
+    (tmp_path / "manual.md").write_text(document(kind="manual", lang="es"))
+    other = DomainConfig(name="other", languages={"es": "spanish"}, document_kinds=("manual",))
+    documents, problems = await check(tmp_path, NoSecrets(), other)
+    assert problems == [] and documents[0].meta.kind == "manual" and documents[0].meta.lang == "es"

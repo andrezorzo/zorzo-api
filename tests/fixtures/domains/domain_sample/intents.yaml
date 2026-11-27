@@ -1,0 +1,6 @@
+product:
+  description: how to use or care for the products in the manual
+  kinds: [manual]
+other:
+  description: anything else
+  action: decline

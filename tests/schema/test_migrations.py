@@ -135,6 +135,27 @@ def test_rejects_an_unknown_outcome(database_url: str) -> None:
         conn.execute("INSERT INTO questions_log (question_scrubbed, outcome) VALUES ('q', 'other')")
 
 
+def test_kinds_and_languages_have_no_check_in_the_database(database_url: str) -> None:
+    # F01-T14 AC4: they are the domain's (domain.yaml), which the database can't know; the writers check them.
+    with psycopg.connect(database_url) as conn:
+        row = conn.execute(
+            "INSERT INTO corpus_versions (embed_model_tag) VALUES ('m') RETURNING version"
+        ).fetchone()
+        assert row is not None
+        conn.execute(
+            "INSERT INTO documents (corpus_version, doc_key, title, kind, lang, authority, hash) "
+            "VALUES (%s, 'guia', 'Guía', 'manual', 'es', 1, 'h')",
+            (row[0],),
+        )
+        checks = conn.execute(
+            "SELECT conrelid::regclass::text, pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE contype = 'c' "
+            "AND conrelid::regclass::text IN ('documents', 'answer_cache', 'eval_results')"
+        ).fetchall()
+        conn.rollback()
+    assert [(table, check) for table, check in checks if "kind" in check or "lang" in check] == []
+
+
 def test_allows_one_active_corpus_version(database_url: str) -> None:
     with psycopg.connect(database_url) as conn:
         conn.execute("INSERT INTO corpus_versions (status, embed_model_tag) VALUES ('active', 'm')")

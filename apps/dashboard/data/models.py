@@ -13,7 +13,6 @@ from django.db.models.functions import Now
 from pgvector.django import HnswIndex, VectorField
 
 OUTCOMES = ("answered", "abstained", "declined", "blocked", "degraded", "cached")
-LANGS = ("en", "pt")
 # Every candidate embedding model has 1024 dimensions (LLD "Open questions"), so a model change is a
 # re-ingest, not a migration.
 EMBEDDING_DIM = 1024
@@ -57,14 +56,9 @@ class Document(models.Model):
 
     class Meta:
         db_table = "documents"
+        # `kind` and `lang` are the domain's (domain.yaml) and have no check here: the database can't know the
+        # domain, so the ingest, the only writer, checks them (LLD "4. Data").
         constraints = [
-            models.CheckConstraint(
-                condition=_in(
-                    "kind", ("resume", "narrative", "faq", "repo", "project_doc", "site_doc", "post")
-                ),
-                name="documents_kind_check",
-            ),
-            models.CheckConstraint(condition=_in("lang", LANGS), name="documents_lang_check"),
             models.CheckConstraint(
                 condition=Q(authority__gte=1, authority__lte=3), name="documents_authority_check"
             ),
@@ -128,7 +122,7 @@ class AnswerCache(models.Model):
 
     class Meta:
         db_table = "answer_cache"
-        constraints = [models.CheckConstraint(condition=_in("lang", LANGS), name="answer_cache_lang_check")]
+        # `lang` is one of the domain's languages, which the writer has already checked (LLD "4. Data").
         indexes = [
             HnswIndex(
                 name="answer_cache_embedding_hnsw", fields=["embedding"], opclasses=["vector_cosine_ops"]
@@ -259,8 +253,8 @@ class EvalResult(models.Model):
 
     class Meta:
         db_table = "eval_results"
+        # `lang` is one of the domain's languages, taken from the dataset (LLD "4. Data").
         constraints = [
-            models.CheckConstraint(condition=_in("lang", LANGS), name="eval_results_lang_check"),
             models.CheckConstraint(
                 condition=_in("layer", ("retrieval", "generation", "end_to_end")),
                 name="eval_results_layer_check",

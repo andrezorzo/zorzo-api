@@ -22,7 +22,7 @@ from pydantic import ValidationError
 from rag_core.adapters.factory import ConfigError, build_embedder
 from rag_core.adapters.gitleaks import GitleaksScanner
 from rag_core.adapters.local_publisher import LocalDataPublisher
-from rag_core.adapters.pgvector_store import PgCorpusStore
+from rag_core.adapters.pgvector_store import PgCorpusStore, TextSearchConfigError, check_text_search
 from rag_core.adapters.postgres import Database
 from rag_core.domain import DomainConfig, DomainError, Example, corpus_dir, load_domain, load_examples
 from rag_core.ingest.pipeline import (
@@ -61,7 +61,7 @@ class _Config:
 
 async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Config) -> int:
     db = Database(settings.database_url)
-    store = PgCorpusStore(db)
+    store = PgCorpusStore(db, config.domain.languages)
     publisher = LocalDataPublisher(settings.data_dir)
 
     async def go_live(version: int) -> None:
@@ -73,6 +73,8 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
     # Only a finished run or a gate rejection prints a summary: after any other failure, what reached the
     # database is uncertain, and the database (corpus_versions) is the record.
     try:
+        # Before the lock and any write: a language Postgres can't index stops the command.
+        await check_text_search(db, config.domain.languages.values())
         async with store.lock() as got:
             if not got:
                 log.error("ingest_busy", reason="another ingest run holds the lock")
@@ -86,7 +88,7 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
                     store=store,
                     embedder=build_embedder(settings),
                     scanner=GitleaksScanner(settings.gitleaks_binary),
-                    allowlist=config.domain.pii_allowlist,
+                    domain=config.domain,
                     limits=config.limits,
                 )
                 log.info("corpus_ingested", **asdict(summary))
@@ -107,7 +109,7 @@ async def _main(args: argparse.Namespace, settings: IngestSettings, config: _Con
         # eval run, then --activate-version; locally, --activate does it in one run.
         log.exception("publish_failed", version=exc.version)
         return 1
-    except ConfigError:
+    except (ConfigError, TextSearchConfigError):
         raise  # reported by main()
     except Exception:
         log.exception("ingest_failed")
@@ -161,8 +163,9 @@ def main() -> None:
         settings = IngestSettings()  # type: ignore[call-arg]
         configure_logging(settings.app_env, settings.log_level)
         # Read before any write: a bad file stops the command before it changes anything.
+        domain = load_domain(settings.domain)
         config = _Config(
-            load_domain(settings.domain), load_examples(settings.domain), load_limits(settings.limits_file)
+            domain, load_examples(settings.domain, domain.languages), load_limits(settings.limits_file)
         )
     except (ValidationError, DomainError, yaml.YAMLError, OSError) as exc:
         print(f"rag-ingest: refusing to start: {exc}", file=sys.stderr)
@@ -171,7 +174,7 @@ def main() -> None:
         sys.exit(asyncio.run(_run(args, settings, config)))
     except KeyboardInterrupt:  # Ctrl-C: the cleanup ran and `ingest_interrupted` was logged
         sys.exit(EXIT_SIGINT)
-    except ConfigError as exc:  # e.g. EMBEDDER=fake outside APP_ENV=local
+    except (ConfigError, TextSearchConfigError) as exc:  # e.g. EMBEDDER=fake outside APP_ENV=local
         print(f"rag-ingest: refusing to run: {exc}", file=sys.stderr)
         sys.exit(1)
 
