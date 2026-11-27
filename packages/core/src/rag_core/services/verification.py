@@ -101,10 +101,12 @@ def draft_text(streamed: str) -> str:
     """The claims' text so far, read from the answer's JSON as it grows; never JSON or passage numbers.
 
     The rule is `read_answer`'s, by position: the object that starts last among those that are the answer
-    so far (a whole one that validates, or an unfinished one holding a `claims` list). A format example or
-    an unreadable object before it is passed over. A known limit: when the model writes more than one
-    answer object, the last one counts, so the draft may have shown an earlier one; the checked claims (or
-    the abstention) replace the draft anyway, and nothing is published unverified.
+    so far (a whole one that validates, or an unfinished one holding a `claims` list). Once the answer
+    streams, a format example or an unreadable object before it is passed over. Known limits, all from a
+    model that writes more than the one object it was asked for: an example still streaming shows as the
+    draft, and the answer's own draft then can't extend it (tokens are never taken back); with several
+    answer objects the last one counts. The checked claims (or the abstention) replace the draft anyway,
+    and nothing is published unverified.
     """
     claims: list[Any] | None = None
     for parsed, complete in _decoded(streamed, allow_unfinished=True):
