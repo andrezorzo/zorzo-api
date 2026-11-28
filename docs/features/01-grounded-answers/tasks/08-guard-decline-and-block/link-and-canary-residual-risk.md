@@ -30,7 +30,7 @@ below was weighed and left, because closing it costs more than the harm it would
 - **Invisible characters other than control and format characters inside a scheme or `www.`**: the
   combining grapheme joiner (U+034F), variation selectors (U+FE00–FE0F, U+180B–180D) and the Hangul fillers
   (U+3164, U+FFA0) break the scheme run, so `https\ufe0f://evil.com` is not read as a link. Control
-  characters (read both kept and removed) and format characters (removed) are handled; this class is not,
+  characters other than a tab, a line break or a space (read both kept and removed) and format characters (removed) are handled; this class is not,
   and the text is shown as text, never as a link.
 - **A control character glued to an allowed link** (`see\x01https://github.com`, `https://github.com\x01.`)
   refuses the claim. The conservative side of reading the text both ways: the claim is shown as

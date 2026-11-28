@@ -41,7 +41,7 @@ def softmax_malicious(logits: Any) -> float:
         other = row[1 - MALICIOUS]
         if row[MALICIOUS] == np.inf:  # even with the other +inf too (undefined): fails closed
             return 1.0
-        if row[MALICIOUS] == other:  # both -inf: undefined, and no score to fail closed on
+        if row[MALICIOUS] == other:  # both -inf: undefined; the error fails open, the other layers stand
             raise ValueError("the classifier's logits are both -inf")
         if row[MALICIOUS] == -np.inf or other == np.inf:
             return 0.0

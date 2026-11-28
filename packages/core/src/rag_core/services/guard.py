@@ -55,8 +55,9 @@ _NESTED_LINK = re.compile(r"://|[,;|\"'(<\[](?:www\.|//)", re.IGNORECASE)
 _SCHEME_SUFFIX = re.compile(r"[^a-z]*(https?)", re.IGNORECASE)
 _TRAILING_PUNCTUATION = ".,;:!?)]}>'\"\u00bb\u201d\u2019\u2014\u2013\u3001\u300d\u300f\u3011"  # and closers
 _AUTHORITY = re.compile(r"[a-z0-9.\-]+")  # a plain ASCII host: no userinfo, port, escape or bracket
-# The whitespace a page shows as a gap; every other control character may be drawn as nothing.
-_HTML_SPACE = " \t\n\r\f"
+# The whitespace a page shows as a gap (CSS Text: not the form feed); any other control character may be drawn
+# as nothing.
+_HTML_SPACE = " \t\n\r"
 
 
 async def check_input(classifier: InjectionClassifier, question: str, threshold: float) -> InputAction:
