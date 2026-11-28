@@ -103,7 +103,7 @@ name = "only core adapters use network clients"
 type = "forbidden"
 source_modules = ["rag_core", "rag_api", "rag_ingest", "domain_zorzo"]
 forbidden_modules = [
-    "sqlalchemy", "psycopg", "httpx", "langchain_ollama", "fastembed", "pgvector", "huggingface_hub", "litellm", "openai",
+    "sqlalchemy", "psycopg", "httpx", "langchain_ollama", "fastembed", "pgvector", "huggingface_hub", "litellm", "openai", "langsmith",
 ]
 ignore_imports = [
     "rag_core.adapters.** -> sqlalchemy",
@@ -115,6 +115,8 @@ ignore_imports = [
     "rag_core.adapters.** -> huggingface_hub",
     "rag_core.adapters.** -> litellm",
     "rag_core.adapters.** -> openai",
+    "rag_core.adapters.** -> langsmith",
+    "rag_api.main -> langsmith",  # turns LangChain's own tracing off at startup
 ]
 # Apps wire adapters at startup, so an app reaching a client through an adapter is allowed.
 allow_indirect_imports = true

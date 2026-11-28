@@ -11,7 +11,7 @@ from typing import Any, cast
 from langgraph.runtime import Runtime
 from pydantic import BaseModel, ConfigDict
 
-from rag_core.agent.context import AgentContext
+from rag_core.agent.context import AgentContext, answer_language
 from rag_core.agent.state import AgentState
 from rag_core.events import Claim, Token
 from rag_core.services import retrieval
@@ -48,8 +48,7 @@ class ReformulateResult(BaseModel):
 
 
 def _language(state: AgentState, ctx: AgentContext) -> str:
-    language = state["route"].language
-    return language if language in ctx.languages else ctx.languages[0]
+    return answer_language(state["route"].language, ctx.languages)
 
 
 def _answer_messages(state: AgentState, ctx: AgentContext) -> list[dict[str, str]]:

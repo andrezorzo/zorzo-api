@@ -25,6 +25,7 @@ budget_paid_cutoff: 0.8  # share of the day's budget at which paid entries stop
 request_cost_cap_usd: 0.01
 breaker_cooldown: 60  # seconds a free entry cools down when the provider sends no Retry-After (LiteLLM)
 alert_repeat_after: 43200  # seconds (12 h)
+retention_public_traces: 2592000  # seconds (30 days); stamped on a trace as its expires_at
 answer_reserve: 12  # seconds left before `answer` starts, or the run goes search-only
 max_reformulate: 1
 max_repair: 1

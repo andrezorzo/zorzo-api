@@ -11,8 +11,9 @@ import asyncio
 import contextlib
 import math
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
+from enum import StrEnum
 
 import structlog
 from langchain_core.utils.json import parse_json_markdown
@@ -31,6 +32,7 @@ from rag_core.ports import (
     EventLog,
     ModelRouter,
     ProviderError,
+    RateLimitedError,
     StoreUnavailableError,
 )
 from rag_core.services.alerts import Alerts
@@ -54,6 +56,28 @@ MAX_COST_OVER_ESTIMATE = 2
 SHUTDOWN_DRAIN_S = 6.0
 
 
+class Why(StrEnum):
+    """Why an entry didn't answer. The first four are what the trace records (`Completion.fallback_reason`);
+    not here: `budget` and `request_cap`, the reasons for skipping the paid entry, which is last in the chain,
+    so no later entry answers with them (see the plan's AC5). `OUT_OF_TIME` ends the walk: nothing answers
+    after it."""
+
+    COOLING_DOWN = "cooling_down"
+    RATE_LIMITED = "rate_limited"
+    TIMEOUT = "timeout"
+    FAILED = "failed"
+    OUT_OF_TIME = "out_of_time"
+
+
+def _reason(exc: BaseException) -> Why:
+    """Why a failed call didn't answer, as the trace names it."""
+    if isinstance(exc, CoolingDownError):
+        return Why.COOLING_DOWN
+    if isinstance(exc, RateLimitedError):
+        return Why.RATE_LIMITED
+    return Why.TIMEOUT if isinstance(exc, TimeoutError) else Why.FAILED
+
+
 class ModelsUnavailableError(Exception):
     """The stage's chain is exhausted: every entry failed or was skipped."""
 
@@ -72,6 +96,9 @@ class Completion:
     cost_usd: float
     provider: str
     model: str
+    # Why the last earlier entry of the stage's chain didn't answer (`FALLBACK_REASONS`); None when the
+    # first entry tried answered.
+    fallback_reason: str | None = None
 
 
 @dataclass
@@ -91,6 +118,7 @@ class _Outcome:
 
     completion: Completion | None = None
     failed: bool = False
+    reason: Why = Why.FAILED  # why this entry didn't answer, when it didn't
 
 
 @dataclass
@@ -145,9 +173,11 @@ class ModelGateway:
         json_schema = schema.model_json_schema() if schema is not None else None
         chain = self.config.stage(stage)
         await self._note_cooldowns()
+        why: Why | None = None
         for entry in chain.free:
             for _ in range(ATTEMPTS_PER_FREE_ENTRY):
-                if not self._callable(stage, entry, deadline_at):
+                if (skip := self._skip(stage, entry, deadline_at)) is not None:
+                    why = skip if skip is Why.COOLING_DOWN else why
                     break
                 try:
                     async with asyncio.timeout_at(deadline_at):
@@ -160,12 +190,15 @@ class ModelGateway:
                         )
                 except (ProviderError, TimeoutError) as exc:
                     self._failed(stage, exc)
+                    why = _reason(exc)
                     break
                 finally:
                     await self._note_cooldowns()
                 completion = self._completion(stage, entry, result, schema, cost=0.0)
                 if completion is not None:
-                    return completion
+                    return replace(completion, fallback_reason=why)
+            else:  # the entry's attempts all ended in the model's miss: that is why the next entry is called
+                why = Why.FAILED
         reservation = await self._paid_reservation(stage, messages, deadline_at, spend)
         if reservation is not None:
             paid_result = await self._paid_call(
@@ -183,7 +216,7 @@ class ModelGateway:
                 cost = await self._settle_success(reservation, paid_result)
                 completion = self._completion(stage, reservation.entry, paid_result, schema, cost)
                 if completion is not None:
-                    return completion
+                    return replace(completion, fallback_reason=why)
         raise ModelsUnavailableError(stage)
 
     async def stream(
@@ -197,9 +230,11 @@ class ModelGateway:
         """
         chain = self.config.stage(stage)
         await self._note_cooldowns()
+        why: Why | None = None
         for entry in chain.free:
             for _ in range(ATTEMPTS_PER_FREE_ENTRY):
-                if not self._callable(stage, entry, deadline_at):
+                if (skip := self._skip(stage, entry, deadline_at)) is not None:
+                    why = skip if skip is Why.COOLING_DOWN else why
                     break
                 chunks = self.models.stream(
                     entry_id(stage, entry),
@@ -216,10 +251,13 @@ class ModelGateway:
                 finally:
                     await self._note_cooldowns()
                 if outcome.completion is not None:
-                    yield outcome.completion
+                    yield replace(outcome.completion, fallback_reason=why)
                     return
                 if outcome.failed:  # the provider's failure: next entry; a model miss gets another try
+                    why = outcome.reason
                     break
+            else:  # the entry's attempts all ended in the model's miss
+                why = Why.FAILED
         reservation = await self._paid_reservation(stage, messages, deadline_at, spend)
         if reservation is not None:
             chunks = self.models.stream(
@@ -237,7 +275,7 @@ class ModelGateway:
             finally:
                 await self._note_cooldowns()
             if outcome.completion is not None:
-                yield outcome.completion
+                yield replace(outcome.completion, fallback_reason=why)
                 return
         raise ModelsUnavailableError(stage)
 
@@ -253,7 +291,7 @@ class ModelGateway:
         window_ends_at: float | None = None
         await self._note_cooldowns()
         for entry in self.config.stage("rerank").free:
-            if not self._callable("rerank", entry, min(deadline_at, window_ends_at or math.inf)):
+            if self._skip("rerank", entry, min(deadline_at, window_ends_at or math.inf)) is not None:
                 continue
             first = window_ends_at is None
             if window_ends_at is None:
@@ -342,9 +380,11 @@ class ModelGateway:
 
     # -- calls --------------------------------------------------------------------------------------------
 
-    def _callable(self, stage: StageName, entry: Entry, deadline_at: float) -> bool:
-        """Time is left and the entry isn't cooling down."""
-        return not self._out_of_time(deadline_at) and entry_id(stage, entry) not in self._cooling
+    def _skip(self, stage: StageName, entry: Entry, deadline_at: float) -> Why | None:
+        """Why the entry isn't called (no time left, or it is cooling down); None when it can be."""
+        if self._out_of_time(deadline_at):
+            return Why.OUT_OF_TIME
+        return Why.COOLING_DOWN if entry_id(stage, entry) in self._cooling else None
 
     async def _relay(
         self,
@@ -387,6 +427,7 @@ class ModelGateway:
                 if wrote:
                     raise ModelsUnavailableError(f"{stage} failed after the first token") from exc
                 outcome.failed = True
+                outcome.reason = _reason(exc)
                 return
             raise
         cost = 0.0 if reservation is None else await self._settle_success(reservation, result)
@@ -403,7 +444,7 @@ class ModelGateway:
     ) -> _Reservation | None:
         """The paid entry's reservation, when the stage has one, time is left and it isn't cooling down."""
         paid = self.config.stage(stage).paid
-        if paid is None or not self._callable(stage, paid, deadline_at):
+        if paid is None or self._skip(stage, paid, deadline_at) is not None:
             return None
         return await self._reserve(stage, paid, _prompt_chars(messages), spend)
 

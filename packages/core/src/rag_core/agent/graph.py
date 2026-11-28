@@ -31,6 +31,8 @@ Agent = CompiledStateGraph[AgentState, AgentContext, AgentState, AgentState]
 class RunResult:
     outcome: Outcome
     public_ok: bool | None  # None when `route` didn't answer
+    intent: str | None  # what `route` decided, for the stored trace; None when it didn't answer
+    language: str | None
 
 
 def _edge(next_step: Callable[[AgentState], str]) -> Callable[[AgentState], str]:
@@ -105,13 +107,13 @@ async def run_agent(question: str, trace_id: UUID, *, agent: Agent, context: Age
             settled = context.settled
         if settled is None:
             end_with_error(context.sink, trace_id)
-            return RunResult("error", _public_ok(state))
+            return _result("error", state)
         outcome = settled
     except Exception:
         log.exception("agent_failed")
         if context.settled is None:
             end_with_error(context.sink, trace_id)
-            return RunResult("error", _public_ok(state))
+            return _result("error", state)
         outcome = context.settled  # the ending already sent stands
     if outcome != "degraded":  # `degraded` may be followed only by its passages and `done`
         context.sink.record(
@@ -123,7 +125,7 @@ async def run_agent(question: str, trace_id: UUID, *, agent: Agent, context: Age
             )
         )
     context.sink.record(Done(trace_id=trace_id, outcome=outcome, cached=False, suggestion=None))
-    return RunResult(outcome, _public_ok(state))
+    return _result(outcome, state)
 
 
 def _on_deadline(context: AgentContext) -> Outcome | None:
@@ -148,6 +150,8 @@ def _elapsed(context: AgentContext) -> float:
     return asyncio.get_running_loop().time() - started
 
 
-def _public_ok(state: dict[str, Any]) -> bool | None:
+def _result(outcome: Outcome, state: dict[str, Any]) -> RunResult:
     route = state.get("route")
-    return route.public_ok if route is not None else None
+    if route is None:
+        return RunResult(outcome, None, None, None)
+    return RunResult(outcome, route.public_ok, route.intent, route.language)

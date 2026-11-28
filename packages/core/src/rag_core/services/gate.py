@@ -16,7 +16,7 @@ import structlog
 
 from rag_core.errors import ApiError, ErrorCode
 from rag_core.limits import Limits
-from rag_core.ports import BotCheck, Bucket, RateLimiter, StoreUnavailableError
+from rag_core.ports import BotCheck, Bucket, EventLog, RateLimiter, StoreUnavailableError
 from rag_core.services.client_ip import hashed_ip, viewer_ip
 from rag_core.services.question import normalize
 
@@ -37,6 +37,7 @@ class Gate:
         self,
         bot_check: BotCheck,
         limiter: RateLimiter,
+        event_log: EventLog,
         limits: Limits,
         salt_seed: bytes,
         app_env: str,
@@ -45,6 +46,7 @@ class Gate:
         self.clock = clock  # the UTC day picks the salt and the day buckets
         self.bot_check = bot_check
         self.limiter = limiter
+        self.event_log = event_log
         self.limits = limits
         self.salt_seed = salt_seed
         self.app_env = app_env
@@ -81,7 +83,11 @@ class Gate:
             raise ApiError(ErrorCode.UNAVAILABLE) from exc
         if refused is not None:
             wait = max((seconds for _, seconds in refused), default=0.0)
-            log.warning("rate_limited", buckets=sorted(b.kind for b, _ in refused))
+            kinds = sorted(b.kind for b, _ in refused)
+            log.warning("rate_limited", buckets=kinds)
+            # A row for the dashboard: the empty buckets' kinds, never a key (they hold the hashed IP and
+            # the session); no trace id, since a refused request has no trace.
+            self.event_log.write("warning", "gate", "rate_limited", {"buckets": kinds})
             # Whole seconds, at least one: a refill that is due now still needs a new request.
             raise ApiError(ErrorCode.RATE_LIMITED, headers={"Retry-After": str(max(1, math.ceil(wait)))})
         return text

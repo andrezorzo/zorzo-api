@@ -79,7 +79,7 @@ means adding `domains/<other>/`, not changing `core`.
 | Language detection (degraded-mode cache lookup) | fast-langdetect, pinned, with its bundled `lite` model (fastText `lid.176.ftz`, 176 languages, CC BY-SA 3.0), always called with `model="lite"` | About 1 MB and under 1 ms a question, offline; tied with lingua on short questions (measured 2026-11-27), where lingua's wheel is 292 MB; the default `auto` model would download 126 MB at the first call |
 | Validation and settings | Pydantic v2 + pydantic-settings | Tool arguments, answer contract, config files, fail-fast settings |
 | Extraction and chunking | LangChain document loaders (Markdown in the MVP; PDF loaders pluggable per domain) + `MarkdownHeaderTextSplitter` / `RecursiveCharacterTextSplitter` | The loader interface makes the PDF library a configuration choice; Docling is too heavy for the VPS. The résumé enters as owner-reviewed Markdown converted once from the PDF |
-| Tracing | langsmith SDK (`Client` and `RunTree`), fed by the TraceSink fan-out | One fan-out of step events feeds the SSE stream, the stored trace and LangSmith; the SDK's background queue posts the runs. LangChain's ambient tracing (`LANGSMITH_TRACING`) is forced off: it would send the graph state unredacted, and misses the LiteLLM calls and the search-only path |
+| Tracing | langsmith SDK (`Client` and `RunTree`), fed by the TraceSink fan-out | One fan-out of step events feeds the SSE stream, the stored trace and LangSmith; after the request, in the background, the LangSmith sink builds the run tree from the events it kept (redacted, with their original times) and the SDK's queue posts it. LangChain's ambient tracing (`LANGSMITH_TRACING`) is turned off at startup (`langsmith.configure(enabled=False)`): it would send the graph state unredacted, and misses the LiteLLM calls and the search-only path |
 | Evals | Plain Python metrics and our per-claim eval judge (section 6.12) | DeepEval's faithfulness re-extracts claims and judges them against every passage, not the ones each claim cites, at three or four judge calls per answer, and its import reads `.env` files and adds pytest plugins; it is evaluated again, isolated, with F03's reference-free metrics (F01-T11) |
 | Logs | structlog | Events with fields, `bind(trace_id=…)`, JSON in production, readable locally |
 | Secret scan | gitleaks + a PII pass: phones by `phonenumbers` (Google's libphonenumber, BR and US plans, pinned), emails by our own extraction, CPF and card numbers by check digits | Ingest gate (HLD flow 6.3); real numbering plans keep year ranges and ports from counting as phones |
@@ -155,7 +155,7 @@ connection; the domain is chosen by `DOMAIN` and loaded by the apps, never by `c
 | BotCheck | `verify` | Token | Pass or fail | Fails closed when the provider errors |
 | InjectionClassifier | `score` (async) | Text | Probability that the text is an attack, 0 to 1 | Runs on CPU in a thread, with no network call; may raise (section 3 "Security", guard layers) |
 | DefenseLog | `record` | Layer, category, action, trace id | — | One `defense_events` row, written in the background; never blocks the caller; never receives the question |
-| TraceSink | `record` | Step event | — | One fan-out per request feeds the SSE stream, the trace recorder and, only with `LANGSMITH_API_KEY`, LangSmith; never blocks: LangSmith runs go on the SDK's in-memory queue, which drops a run when full; a failing extra sink is logged and skipped |
+| TraceSink | `record` (and an optional `finish`) | Step event; after the request, the facts no event carries | — | One fan-out per request feeds the SSE stream, the trace recorder and LangSmith's sink (a no-op without `LANGSMITH_API_KEY`); never blocks: a sink only keeps what it receives, and LangSmith's runs are built and put on the SDK's in-memory queue (which drops a run when full) in the background by `finish`; a failing extra sink is logged and skipped, for `record` and for `finish` |
 | TraceStore | `write` | A finished request's trace: the public trace, its spans and the questions-log row | — | One transaction (section 3 "Transactions"); a store that fails raises "unavailable" |
 | Alerter | `send` | Alert kind, message | — | Delivers one message; the alerts service decides when to send (section 6.10) |
 | EventLog | `write` | Level, component, event, fields | — | One `log_events` row, written in the background; never blocks the caller |
@@ -216,18 +216,46 @@ domain pieces, not ports (section 6.5).
 - **Admin:** the Django admin listens on a local port, reachable only through an SSH tunnel; its views are
   read-only, except the "remove from public view" action on traces, which sets `removed_at` and writes a
   `trace_removals` row.
-- **Trace redaction:** everything the stored trace and LangSmith get passes one redactor first: the scrubbed
-  question, and every string of the stored events (claims, the gap sentence, whatever a later event
-  carries). It removes `Cc` and `Cf` characters (text hidden from a reader), replaces emails, phone numbers,
-  CPFs and card numbers with `[email]`, `[phone]`, `[cpf]` and `[card]` (the detectors of the ingest PII
-  pass, section 6.1; entries of the domain's `pii_allowlist` pass), and replaces with `[secret]` the exact
-  value of every secret the app holds and anything shaped like a key (known key prefixes, a JWT, a private
-  key header, an unbroken run of 32 or more letters, digits, `_`, `-`, `+` and `=` mixing letters and
-  digits). No prompt text reaches a step event, so the domain's instructions never reach a trace. The
-  visitor's own stream is not redacted.
+- **Trace redaction:** everything the stored trace and LangSmith get passes one redactor first (the scrubbed
+  question, and every string of the stored events: claims, the gap sentence, whatever a later event
+  carries). It is one pass over one canonical text, with no rule rewriting what another sees:
+  1. *Canonical text.* Hidden characters (`Cc`, `Cf` and lone surrogates `Cs`, shared with the question's
+     normalization) are removed, the text is put in NFKC, and HTML entities are decoded, repeatedly, up to
+     three layers; this is what a page would show, and what is stored (the trace loses its entities). A text
+     that still decodes after three layers is replaced whole by `[redacted]`.
+  2. *Spans.* Each detector reports where it matched, without changing the text:
+     - the exact value of every secret the app holds, as written, in NFKC and as a page would show it
+       (case-sensitive; a value of 32 or more characters, such as the canary, also in any case; values
+       under 4 characters are not matched), each searched on its own so overlapping secrets are both found;
+     - anything shaped like a key: known provider prefixes, a JWT, a Telegram bot token, a private key
+       header, and a PEM block from BEGIN to END when base64 lines of at least 16 characters lie between
+       them (as in a file, a JSON string or a quote block), else the header alone;
+     - a token: a run of 32 or more letters, digits, `_`, `-` and `+` (with its `=` padding) that mixes
+       letters and digits, in any URL segment or query value too; not a slug (three or more parts joined by
+       `-` or `_`, each all letters, all digits or a short mixed word such as `python3`, the mixed ones a
+       minority);
+     - a base64 run with `/` that mixes letters and digits and is not a path, a path being parts that are
+       all ordinary words (one case, capitalized or CamelCase, fewer than 32 letters), numbers or short
+       mixed words, the mixed ones a minority;
+     - personal data (the detectors of the ingest PII pass, section 6.1): emails, phones, CPFs and card
+       numbers, also a phone that only a tag, an entity layer or an angle bracket hides (number groups
+       apart by ` > ` or ` < ` twice or more are a list, not a phone).
+  3. *Allowlist.* The domain's `pii_allowlist` (NFKC, any case): the personal-data spans inside an occurrence
+     of an entry are dropped; secret and key spans never are.
+  4. *Merge.* Overlapping or adjacent spans become one, with the label of highest priority: `[secret]`,
+     `[email]`, `[phone]`, `[cpf]`, `[card]`. A secret that holds a phone number, an email or a key is
+     replaced whole, so none of it can be read back.
+
+  It fails closed (a phone it can't find again as written replaces the whole text; a long token that isn't a
+  key is replaced too). What it deliberately doesn't catch is in `redaction-residual-risk.md`, in the task
+  folder of F01-T10. No prompt text reaches a step event, so the domain's instructions never reach a trace.
+  The visitor's own stream is not redacted.
 - **Secrets:** read once at startup from settings; never logged, never in a trace. The canary lives in the
-  environment. With `APP_ENV=production` the API refuses to start on Turnstile's test secrets or on the
-  published local `SALT_SEED` (`infra/.env.example`), with which anyone could reverse the hashed IPs.
+  environment. With `APP_ENV=production` the API refuses to start on Turnstile's test secrets, on the
+  published local `SALT_SEED` (`infra/.env.example`), with which anyone could reverse the hashed IPs, or on
+  the published local database password (`POSTGRES_PASSWORD` in `infra/.env.example`, in `DATABASE_URL` as
+  user info or as `?password=`). The redactor is given every secret setting and the database password, as
+  written in the URL and decoded.
 
 ### Concurrency and idempotency
 
@@ -250,9 +278,10 @@ domain pieces, not ports (section 6.5).
 - **Budget reservation:** a single statement.
 - **End of a request:** the public trace, its spans, the questions-log row and the final cost (the request's
   cost on the trace row; the day's spend is settled per call, section 6.2) are written in one transaction
-  after `done`, never while events are still being sent. The stream closes after the write, so the trace
-  `done` names exists once the stream ends. The write is shielded: a visitor who leaves after `done` doesn't
-  cut it. A request that never reached `done` (the visitor left, so the run was cancelled) and a request the
+  after `done`, never while events are still being sent. The redaction (CPU-bound) runs in a thread, and
+  only the database write is on the event loop. The stream closes after the write, so the trace `done` names
+  exists once the stream ends. The write is a task of the app's own, awaited through a shield: a visitor who
+  leaves after `done` doesn't cut it. A request that never reached `done` (the visitor left, so the run was cancelled) and a request the
   gate refused leave no trace. A failed write is logged at `error` with the trace id; the visitor already
   has the answer. A row that names the trace (an answer cache entry with its `trace_id`) is written in this
   transaction, after the trace row, so its foreign key always holds.
@@ -341,10 +370,11 @@ domain pieces, not ports (section 6.5).
   targets, `EVAL_RUN_BUDGET_USD` and `JUDGE_AGREEMENT_MIN`. It is not part of `model_config_version`, so
   changing a target or the judge neither invalidates the answer cache nor counts as a models change
   (section 6.1).
-- **Shutdown:** the gateway drains its background work (reservation releases, alerts, event rows), the API
-  its pending trace writes, the answer cache its pending writes, and the LangSmith client its queue, each
-  within `SHUTDOWN_DRAIN`; what is left is cancelled (or, in LangSmith's queue, dropped) and logged, so a
-  stuck write never holds the process.
+- **Shutdown:** the independent closes run at once, and the database closes last. The gateway drains its
+  background work (reservation releases, alerts, event rows), the API its pending trace writes and then the
+  LangSmith client its queue (which always gets at least one second of the `SHUTDOWN_DRAIN`), the answer
+  cache its pending writes, each within `SHUTDOWN_DRAIN`; what is left is cancelled (or, in LangSmith's
+  queue, dropped) and logged, so a stuck write never holds the process.
 
 ## 4. Data
 
@@ -395,7 +425,7 @@ Columns, types, constraints and indexes live in the migrations. What is still pl
 | `chunks` | existing | `tsv` is built by ingest with the text search configuration the domain maps to the document's language, over heading path and content |
 | `answer_cache` | existing | Looked up by embedding similarity (ADR 0014); `answer` holds the claims as they were sent (section 6.9) |
 | `public_traces` | existing | outcome: `answered`, `abstained`, `declined`, `blocked`, `degraded`, `cached`, `error`; `cached` when `done.cached` is true, otherwise `done.outcome`; `public_ok` defaults to false; `expires_at` is the write time plus `RETENTION_PUBLIC_TRACES`; `cost_usd` and `latency_ms` are the request's; `payload` is the stored trace below |
-| `trace_spans` | existing | One row per step that ended (its `stage` end), with the tokens and cost of its model calls, the model that answered last and its fallback reason (why the last earlier entry of the stage's chain didn't answer: `cooling_down`, `rate_limited`, `timeout`, `failed`, `budget` or `request_cap`; null when the first entry tried answered); feeds the latency and fallback charts |
+| `trace_spans` | existing | One row per step that ended (its `stage` end), with the tokens and cost of its model calls, the model that answered last and its fallback reason (why the last earlier entry of the stage's chain didn't answer: `cooling_down`, `rate_limited`, `timeout` or `failed`; null when the first entry tried answered; the paid entry is last in the chain, so a skipped paid reservation ends the stage with no answer and no span reason); feeds the latency and fallback charts |
 | `trace_removals` | existing | Private record of the owner's manual removals; never shown in public |
 | `questions_log` | existing | For eval curation; outlives its trace (`trace_id` set null); outcome as its trace's |
 | `defense_events` | existing | One row per block or gate refusal (section 3 "Security", defense events) |
@@ -413,7 +443,8 @@ cut, done}`. `question` is the scrubbed question; `events` holds, in stream orde
 "Security"), every stream event except `stage`, `model`, `token`, `usage` and `done`, each as `{kind, …its
 payload}`; `cut` names the steps that started and never ended (a deadline or a failure inside them); `done`
 is `done`'s payload without `trace_id` and `outcome` (which have their columns), redacted, so every optional
-field it carries (`suggestion`, `cached`, `contact`, `notice`) is kept as sent. Steps, models, tokens and
+field it carries (`suggestion`, `cached`, `contact`, `notice`) is kept as sent. Every string is the redactor's
+canonical text, so HTML entities are stored decoded. Steps, models, tokens and
 cost are in `trace_spans`, not in the payload.
 
 Data rules that the schema doesn't show live in section 6 (states, retention) and section 3 (concurrency).
@@ -1077,7 +1108,7 @@ endpoints and per-environment switches.
 | `LOG_LEVEL` | all | Log level | env file |
 | `DOMAIN` | api, ingest, evals | Which `domains/<name>` to load | env file |
 | `EVALS_FILE` | evals | Path of the eval config (section 3 "Configuration") | env file |
-| `DATABASE_URL` | api, dashboard, ingest, evals | Postgres connection | secret |
+| `DATABASE_URL` | api, dashboard, ingest, evals | Postgres connection; in production the API refuses the published local password (section 3 "Security") | secret |
 | `POSTGRES_PASSWORD` | postgres (compose) | Database password; compose refuses to start without it, so no default reaches production | secret |
 | `OLLAMA_URL`, `EMBED_MODEL_TAG` | api, ingest, evals | Ollama endpoint (embeddings, and the local profile's chat models) and the pinned embedding tag | env file |
 | `EMBEDDER`, `RERANKER` | api, ingest, evals | `ollama` / `local`, or `fake` (deterministic, accepted only with `APP_ENV=local`) | env file |

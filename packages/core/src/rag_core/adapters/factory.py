@@ -1,7 +1,7 @@
 """Builds the adapters chosen by settings; the apps call these at startup."""
 
 from collections.abc import Mapping
-from typing import get_args
+from typing import TYPE_CHECKING, get_args
 
 from rag_core.adapters.postgres import Database
 from rag_core.limits import Limits
@@ -9,6 +9,9 @@ from rag_core.models_config import ModelsConfig, StageName
 from rag_core.ports import Alerter, Embedder, Reranker
 from rag_core.services.gateway import ModelGateway
 from rag_core.settings import AppSettings
+
+if TYPE_CHECKING:
+    from rag_core.adapters.langsmith_tracer import LangSmithTracer
 
 
 class ConfigError(RuntimeError):
@@ -95,3 +98,10 @@ def rerank_chain(gateway: ModelGateway, local: list[Reranker]) -> list[Reranker]
 
     remote: list[Reranker] = [GatewayReranker(gateway)] if gateway.config.stage("rerank").chain else []
     return [*remote, *local]
+
+
+def build_tracer(api_key: str | None, project: str | None, endpoint: str | None) -> "LangSmithTracer":
+    """LangSmith's tracer: it sends runs only when `api_key` is set, and is a no-op otherwise."""
+    from rag_core.adapters.langsmith_tracer import LangSmithTracer
+
+    return LangSmithTracer(api_key, project, endpoint)

@@ -16,6 +16,12 @@ from rag_core.services.gateway import Completion, ModelGateway, ModelsUnavailabl
 from rag_core.services.route import RouteResult, route_schema
 
 
+def answer_language(language: str | None, languages: Sequence[str]) -> str:
+    """The language an answer is written in: the route's, when the domain declares it, else the default (the
+    first)."""
+    return language if language is not None and language in languages else languages[0]
+
+
 @dataclass
 class AgentContext:
     gateway: ModelGateway
@@ -61,7 +67,17 @@ class AgentContext:
         self.tokens_in += completion.usage.tokens_in
         self.tokens_out += completion.usage.tokens_out
         self.cost_usd += completion.cost_usd
-        self.sink.record(Model(stage=step, model=completion.model, provider=completion.provider))
+        self.sink.record(
+            Model(
+                stage=step,
+                model=completion.model,
+                provider=completion.provider,
+                tokens_in=completion.usage.tokens_in,
+                tokens_out=completion.usage.tokens_out,
+                cost_usd=completion.cost_usd,
+                fallback_reason=completion.fallback_reason,
+            )
+        )
 
     async def call(
         self,

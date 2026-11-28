@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 from rag_api.main import create_app
-from rag_api.settings import PUBLISHED_LOCAL_SEED
+from rag_api.settings import PUBLISHED_LOCAL_DB_PASSWORD, PUBLISHED_LOCAL_SEED
 from rag_core.adapters.factory import ConfigError
 from rag_core.domain import DomainError
 from rag_core.models_config import config_version, load_models
@@ -134,6 +134,8 @@ def test_refuses_the_published_salt_seed_in_production(database_url: str) -> Non
 ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION: dict[str, Any] = {
     "app_env": "production",
+    # Not the local password; `create_app` never connects, so it needs no database behind it.
+    "database_url": "postgresql://zorzo:a-production-db-password@localhost:5432/zorzo",
     "turnstile_secret": "0x4AAAAAAAreal-looking-secret",
     "salt_seed": "a-production-seed-that-is-long-enough",
     "telegram_bot_token": "123:abc",
@@ -149,6 +151,24 @@ def test_refuses_a_provider_without_its_key_in_production(database_url: str) -> 
     with pytest.raises(ConfigError, match="OPENROUTER_API_KEY"):
         create_app(settings)
     assert create_app(api_settings(database_url, **PRODUCTION)).state.gateway  # with the key, it starts
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql://zorzo:zorzo@localhost:5432/zorzo",
+        "postgresql://localhost:5432/zorzo?password=zorzo",
+        "postgresql://zorzo:z%6Frzo@localhost:5432/zorzo",  # percent-encoded: the password is `zorzo`
+    ],
+)
+def test_refuses_the_published_database_password_in_production(url: str) -> None:
+    with pytest.raises(ValidationError, match="database password"):
+        api_settings(url, **{**PRODUCTION, "database_url": url})
+
+
+def test_the_guarded_database_password_is_the_published_example() -> None:
+    root = Path(__file__).resolve().parents[2]
+    assert f"POSTGRES_PASSWORD={PUBLISHED_LOCAL_DB_PASSWORD}\n" in (root / "infra/.env.example").read_text()
 
 
 def test_refuses_production_without_telegram(database_url: str) -> None:

@@ -135,6 +135,15 @@ def test_rejects_an_unknown_outcome(database_url: str) -> None:
         conn.execute("INSERT INTO questions_log (question_scrubbed, outcome) VALUES ('q', 'other')")
 
 
+def test_accepts_the_error_outcome(database_url: str) -> None:
+    """F01-T10 AC4: a bug ends a stream with `error`, which the trace and the log store as it is."""
+    with psycopg.connect(database_url) as conn:
+        conn.execute(
+            "INSERT INTO public_traces (expires_at, outcome) VALUES (now() + interval '1 day', 'error')"
+        )
+        conn.execute("INSERT INTO questions_log (question_scrubbed, outcome) VALUES ('q', 'error')")
+
+
 def test_kinds_and_languages_have_no_check_in_the_database(database_url: str) -> None:
     # F01-T14 AC4: they are the domain's (domain.yaml), which the database can't know; the writers check them.
     with psycopg.connect(database_url) as conn:

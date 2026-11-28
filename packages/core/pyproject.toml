@@ -25,6 +25,8 @@ dependencies = [
     # Exact pin, a release at least two weeks old (F01-T06); upgrades in a reviewed PR.
     "langgraph==1.2.21",
     "langchain-core>=1.8",
+    # Exact pin, a release at least two weeks old (F01-T10); upgrades in a reviewed PR. Posts the trace runs.
+    "langsmith==0.14.17",
 ]
 
 [build-system]

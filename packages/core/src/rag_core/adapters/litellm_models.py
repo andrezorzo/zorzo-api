@@ -170,8 +170,13 @@ class LiteLLMModels:
             for deployment, value in active or []
         }
 
-    async def close(self) -> None:
+    def discard(self) -> None:
+        """Release what the Router registered in LiteLLM's process-wide callback lists, without awaiting; a
+        Router replaced while the process lives (as the tests do) calls this. `close` does it too."""
         self._router.discard()  # type: ignore[no-untyped-call]
+
+    async def close(self) -> None:
+        self.discard()
         await close_litellm_async_clients()  # type: ignore[no-untyped-call]
 
     async def _stream(

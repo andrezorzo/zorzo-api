@@ -19,6 +19,7 @@ from fastapi import FastAPI
 from rag_api.main import create_app
 from rag_api.settings import ApiSettings
 from rag_core.adapters.factory import build_gateway, rerank_chain
+from rag_core.adapters.litellm_models import LiteLLMModels
 from rag_core.adapters.turnstile import TurnstileBotCheck
 from rag_core.limits import Limits
 from rag_core.models_config import ModelsConfig
@@ -231,6 +232,7 @@ def build_app(
     )
     # The gateway again, wired as the app wires it, with the stand-in's transport and the test limits.
     old: ModelGateway = app.state.gateway
+    discard_models(old)
     app.state.openrouter = fake = openrouter or FakeOpenRouter()
     app.state.alerter = RecordingAlerter()
     config = served(old.config, fake)
@@ -239,6 +241,13 @@ def build_app(
     )
     app.state.rerankers = rerank_chain(app.state.gateway, app.state.local_rerankers)
     return app
+
+
+def discard_models(gateway: ModelGateway) -> None:
+    """Release a replaced gateway's Router: its callbacks would otherwise pile up in LiteLLM's global lists
+    and, with enough apps in one process, break the cooldown tests."""
+    if isinstance(gateway.models, LiteLLMModels):
+        gateway.models.discard()
 
 
 def served(config: ModelsConfig, fake: FakeOpenRouter) -> ModelsConfig:
