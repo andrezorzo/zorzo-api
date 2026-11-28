@@ -1,9 +1,12 @@
 """F01-T10 AC1: the LangSmith run tree, from events with the moments they arrived."""
 
+import threading
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import uuid4
 
-from rag_core.adapters.langsmith_tracer import LangSmithTracer
+import pytest
+from rag_core.adapters.langsmith_tracer import LangSmithTracer, RunSink
 from rag_core.events import Stage
 from rag_core.ports import TraceFacts
 from rag_core.services.redact import Redactor
@@ -11,6 +14,7 @@ from structlog.testing import capture_logs
 
 from tests.fakes.langsmith import FakeLangSmith
 
+TIMEOUT_S = 10
 KEY = "lsv2_pt_" + "0123456789abcdef0123456789abcdef_0123456789"
 
 
@@ -43,6 +47,17 @@ def test_without_a_key_a_sink_posts_nothing() -> None:
     assert langsmith.received == []
 
 
+class _CloseSpy:
+    """The SDK client, noting when it is closed (its own `close` attribute is read-only)."""
+
+    def __init__(self, client: Any, order: list[str]) -> None:
+        self._client, self._order = client, order
+
+    def close(self, timeout: float) -> None:
+        self._order.append("closed")
+        self._client.close(timeout=timeout)
+
+
 def test_a_cancelled_request_is_not_an_error_in_langsmith() -> None:
     langsmith = FakeLangSmith()
     tracer = LangSmithTracer(KEY, None, langsmith.serve())
@@ -57,13 +72,50 @@ def test_a_cancelled_request_is_not_an_error_in_langsmith() -> None:
     assert root["outputs"]["outcome"] == "cancelled"
 
 
-def test_a_run_finished_after_close_is_not_posted() -> None:
+def test_a_run_finished_after_close_is_not_built_or_posted(monkeypatch: pytest.MonkeyPatch) -> None:
     langsmith = FakeLangSmith()
     tracer = LangSmithTracer(KEY, None, langsmith.serve())
     sink = tracer.sink(uuid4(), datetime.now(UTC), Redactor())
     sink.record(Stage(name="route", status="start", ms=None))
     tracer.close(1)  # shutdown, while the request's write was still stuck
+    built: list[str] = []
+    monkeypatch.setattr(RunSink, "_post", lambda *_: built.append("post"))
     with capture_logs() as logs:
         sink.finish(TraceFacts(uuid4(), "q", None, None, None, 1, "v", timedelta(days=1)))
+    assert built == []  # no run tree was begun
     assert langsmith.received == []
     assert [e["event"] for e in logs] == ["langsmith_skipped_closing"]
+
+
+def test_close_waits_for_a_run_tree_being_posted(monkeypatch: pytest.MonkeyPatch) -> None:
+    langsmith = FakeLangSmith()
+    tracer = LangSmithTracer(KEY, None, langsmith.serve())
+    trace_id = uuid4()
+    sink = tracer.sink(trace_id, datetime.now(UTC), Redactor())
+    sink.record(Stage(name="route", status="start", ms=None))
+    order: list[str] = []
+    in_post, release = threading.Event(), threading.Event()
+    real_post = RunSink._post
+
+    def blocked_post(self: RunSink, client: Any, facts: TraceFacts) -> None:
+        in_post.set()
+        assert release.wait(TIMEOUT_S)  # the tree is half-way: the request's thread is stuck here
+        real_post(self, client, facts)
+        order.append("posted")
+
+    monkeypatch.setattr(RunSink, "_post", blocked_post)
+    tracer._client = _CloseSpy(tracer._client, order)  # type: ignore[assignment]
+    facts = TraceFacts(trace_id, "q", None, None, None, 1, "v", timedelta(days=1))
+    finishing = threading.Thread(target=sink.finish, args=(facts,))
+    finishing.start()
+    assert in_post.wait(TIMEOUT_S)
+    closing = threading.Thread(target=tracer.close, args=(TIMEOUT_S,))
+    closing.start()
+    assert tracer._shutdown.closing.wait(TIMEOUT_S)  # close has begun and must now be waiting
+    assert order == []
+    release.set()
+    finishing.join(TIMEOUT_S)
+    closing.join(TIMEOUT_S)
+    assert order == ["posted", "closed"]
+    [root] = [r for r in langsmith.runs() if r["id"] == str(trace_id)]
+    assert root["end_time"]  # the root's patch was sent too

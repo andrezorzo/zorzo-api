@@ -10,7 +10,7 @@ from uuid import UUID
 import structlog
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
-from rag_core.agent.context import AgentContext
+from rag_core.agent.context import AgentContext, answer_language
 from rag_core.agent.graph import RunResult, run_agent
 from rag_core.errors import ApiError, ErrorCode
 from rag_core.events import Done, StreamEvent
@@ -87,12 +87,14 @@ async def _store_trace(state: Any, sink: FanOutSink, recorder: TraceRecorder, fa
         log.error("trace_write_failed", error=type(exc).__name__)  # by type: its text may quote SQL
 
 
-def _declared_language(state: Any, result: RunResult | None) -> str | None:
-    """The route's language for the stored trace, when it is one the domain declares: the model's text is
-    free (an injected question can put anything there), and the trace keeps it as is."""
-    if result is not None and result.language in state.domain.languages:
-        return str(result.language)
-    return None
+def _answer_language(state: Any, result: RunResult | None) -> str | None:
+    """The language the answer used, for the stored trace: the route's text is free (an injected question can
+    put anything there), so an undeclared one is stored as the default `answer` fell back to."""
+    return (
+        answer_language(result.language, tuple(state.domain.languages))
+        if result and result.language
+        else None
+    )
 
 
 @router.post("/api/v1/ask")
@@ -156,7 +158,9 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                         context = _agent_context(state, sink, corpus.version, deadline_at)
                         result = await run_agent(question, UUID(trace_id), agent=state.agent, context=context)
                 except asyncio.CancelledError:
-                    cancelled = True  # the visitor left; `public_traces` isn't written without `done`
+                    cancelled = (
+                        True  # the visitor left or the server stopped; no `done`, so no `public_traces` row
+                    )
                     raise
                 except Exception:
                     # Whatever escaped the service, the visitor's stream still ends with `done`.
@@ -170,7 +174,7 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                     trace_id=UUID(trace_id),
                     question=question,
                     intent=result.intent if result else None,
-                    lang=_declared_language(state, result),
+                    lang=_answer_language(state, result),
                     public_ok=result.public_ok if result else None,
                     corpus_version=corpus.version,
                     model_config_version=state.model_config_version,

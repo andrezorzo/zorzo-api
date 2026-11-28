@@ -13,6 +13,9 @@ log = structlog.get_logger()
 
 # Rows waiting to be inserted; past it a flood (429s, say) is dropped, so it can't pile up tasks and memory.
 MAX_PENDING_ROWS = 1000
+# A burst of drops ends only when the pending rows fall below this, so a flood that frees one slot and
+# fills it again stays one burst (one warning).
+REARM_PENDING_ROWS = MAX_PENDING_ROWS // 2
 
 INSERT = text("""
 INSERT INTO log_events (level, source, component, event, fields)
@@ -24,15 +27,22 @@ class PostgresEventLog:
     def __init__(self, db: Database) -> None:
         self.db = db
         self._background = BackgroundTasks()
-        self._dropping = False  # a burst of drops logs one warning, not one per row
+        self._dropped = 0  # rows dropped in the burst going on; a burst logs one warning and one count
+
+    @property
+    def pending(self) -> int:
+        """Rows waiting to be inserted."""
+        return self._background.pending
 
     def write(self, level: str, component: str, event: str, fields: dict[str, Any]) -> None:
-        if self._background.pending >= MAX_PENDING_ROWS:
-            if not self._dropping:
-                self._dropping = True
-                log.warning("event_log_dropped", max_pending=MAX_PENDING_ROWS)
+        if self.pending >= MAX_PENDING_ROWS:
+            if self._dropped == 0:
+                log.warning("event_log_full", max_pending=MAX_PENDING_ROWS)
+            self._dropped += 1
             return
-        self._dropping = False
+        if self._dropped and self.pending < REARM_PENDING_ROWS:  # the burst is over
+            log.warning("event_log_dropped", dropped=self._dropped)
+            self._dropped = 0
         self._background.spawn(self._insert(level, component, event, fields))
 
     async def _insert(self, level: str, component: str, event: str, fields: dict[str, Any]) -> None:

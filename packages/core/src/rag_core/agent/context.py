@@ -16,6 +16,12 @@ from rag_core.services.gateway import Completion, ModelGateway, ModelsUnavailabl
 from rag_core.services.route import RouteResult, route_schema
 
 
+def answer_language(language: str | None, languages: Sequence[str]) -> str:
+    """The language an answer is written in: the route's, when the domain declares it, else the default (the
+    first)."""
+    return language if language is not None and language in languages else languages[0]
+
+
 @dataclass
 class AgentContext:
     gateway: ModelGateway

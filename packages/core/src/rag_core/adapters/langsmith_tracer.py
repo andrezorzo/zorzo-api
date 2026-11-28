@@ -14,6 +14,7 @@ nothing.
 """
 
 import threading
+import time
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -31,12 +32,41 @@ ROOT_NAME = "ask"
 CLIENT_INFO = {"version": "0.0.0"}
 
 
+class _Shutdown:
+    """Shutdown's hold on the run trees being posted: `close` refuses new ones, then waits for those in
+    flight, so no tree is left half-posted (a root with no patch) when the client closes."""
+
+    def __init__(self) -> None:
+        self.closing = threading.Event()
+        self._idle = threading.Condition()
+        self._active = 0
+
+    def enter(self) -> bool:
+        """Start one post; False once closing (the caller posts nothing)."""
+        with self._idle:
+            if self.closing.is_set():
+                return False
+            self._active += 1
+            return True
+
+    def leave(self) -> None:
+        with self._idle:
+            self._active -= 1
+            self._idle.notify_all()
+
+    def close(self, timeout: float) -> None:
+        """Refuse new posts, then wait up to `timeout` for the ones in flight."""
+        with self._idle:
+            self.closing.set()
+            self._idle.wait_for(lambda: self._active == 0, timeout)
+
+
 class LangSmithTracer:
     """The app's one LangSmith client; without a key there is none, and every sink is a no-op."""
 
     def __init__(self, api_key: str | None, project: str | None, endpoint: str | None) -> None:
         self._project = project
-        self._closing = threading.Event()  # set by `close`: a run tree begun after it is not posted
+        self._shutdown = _Shutdown()
         self._client = (
             Client(
                 api_url=endpoint,
@@ -50,7 +80,7 @@ class LangSmithTracer:
 
     def sink(self, trace_id: UUID, started_at: datetime, redactor: Redactor) -> "RunSink":
         """The sink of one request: its root run is the trace id, so a link to the trace is the trace id."""
-        return RunSink(self._client, self._project, trace_id, started_at, redactor, self._closing)
+        return RunSink(self._client, self._project, trace_id, started_at, redactor, self._shutdown)
 
     def flush(self, timeout: float) -> None:
         """Wait up to `timeout` for the queue to drain (the tests read what the endpoint got)."""
@@ -60,7 +90,9 @@ class LangSmithTracer:
     def close(self, timeout: float) -> None:
         """At shutdown: wait up to `timeout` for the queue to drain, then stop the client's background
         thread and close its session; what is left is dropped."""
-        self._closing.set()  # a thread of a stuck write, cancelled at shutdown, can't post meanwhile
+        started = time.monotonic()
+        self._shutdown.close(timeout)  # in-flight run trees finish, later ones are skipped
+        timeout = max(0.0, timeout - (time.monotonic() - started))
         if self._client is not None:
             self._client.close(timeout=timeout)
 
@@ -76,9 +108,9 @@ class RunSink:
         trace_id: UUID,
         started_at: datetime,
         redactor: Redactor,
-        closing: threading.Event | None = None,
+        shutdown: _Shutdown | None = None,
     ) -> None:
-        self._closing = closing or threading.Event()
+        self._shutdown = shutdown or _Shutdown()
         self._client = client
         self._project = project
         self._trace_id = trace_id
@@ -94,13 +126,15 @@ class RunSink:
         """Post the request's run tree; `facts.question` is already redacted."""
         if self._client is None:
             return
-        if self._closing.is_set():  # shutdown already closes the client; a late post would race it
+        if not self._shutdown.enter():  # shutdown already closes the client; a late post would race it
             log.warning("langsmith_skipped_closing")
             return
         try:
             self._post(self._client, facts)
         except Exception as exc:
             log.warning("langsmith_failed", error=type(exc).__name__)
+        finally:
+            self._shutdown.leave()
 
     def _post(self, client: Client, facts: TraceFacts) -> None:
         root = RunTree(
