@@ -20,7 +20,9 @@ from rag_core.agent import nodes
 from rag_core.agent.context import AgentContext, answer_language
 from rag_core.agent.state import AgentState
 from rag_core.events import NO_USAGE_OUTCOMES, Claim, Done, Outcome, Usage
+from rag_core.limits import Limits
 from rag_core.services.answer_cache import end_with_hit
+from rag_core.services.conversation import Conversation, live
 from rag_core.services.stream import emit_degraded, end_with_error
 from rag_core.units import MS_PER_S
 
@@ -88,6 +90,14 @@ def build_graph(checkpointer: BaseCheckpointSaver[Any] | None = None) -> Agent:
     graph.add_conditional_edges("repair", _to("verify"), ["verify", "search_only", END])
     graph.add_edge("search_only", END)
     return graph.compile(checkpointer=checkpointer)
+
+
+async def load_conversation(agent: Agent, session: UUID, now: float, limits: Limits) -> Conversation:
+    """The session's conversation as the next question sees it: empty when it has no turn or its last turn is
+    older than `SESSION_TTL`. Raises when the store can't be read or holds something unreadable."""
+    snapshot = await agent.aget_state({"configurable": {"thread_id": str(session)}})
+    stored = snapshot.values.get("conversation") if snapshot.values else None
+    return live(Conversation.model_validate(stored or {}), now, limits.session_ttl)
 
 
 async def run_agent(

@@ -181,8 +181,11 @@ async def cache_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any]
             return {}
         ctx.vectors[route.standalone_question] = found.vector  # retrieval and the suggestion reuse it
         return {"query_vector": found.vector}
-    # Not settled here: the claims go out in `finish`, so a cut before it is an honest `error`.
-    return {"cached": True, "outcome": "answered", "hit_claims": found.claims}  # `finish` sends them
+    # Not settled here: the claims go out in `finish`, so a cut before it is an honest `error`. Their text
+    # is remembered as the turn's, as a fresh answer's is.
+    shown = [ctx.redactor.text(c.text) for c in found.claims if c.verdict in REMEMBERED_VERDICTS]
+    remembered = with_claims(_conversation(state), shown).model_dump()
+    return {"cached": True, "outcome": "answered", "hit_claims": found.claims, "conversation": remembered}
 
 
 async def retrieve_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any]:

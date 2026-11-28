@@ -11,7 +11,7 @@ import structlog
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 from rag_core.agent.context import AgentContext, answer_language
-from rag_core.agent.graph import RunResult, run_agent
+from rag_core.agent.graph import RunResult, load_conversation, run_agent
 from rag_core.errors import ApiError, ErrorCode
 from rag_core.events import Done, StreamEvent
 from rag_core.ports import StoredTrace, StoreUnavailableError, TraceFacts, TraceSink
@@ -75,6 +75,19 @@ def _agent_context(
         now=state.clock(),
         redactor=state.redactor,
     )
+
+
+async def _is_first_question(state: Any, session: UUID, deadline_at: float) -> bool:
+    """Whether the session has no live earlier turn (LLD "6.9 Answer cache", in degraded mode). A conversation
+    that can't be read counts as a follow-up: it goes to search-only, never to a hit served without its
+    context."""
+    try:
+        async with asyncio.timeout_at(deadline_at):
+            conversation = await load_conversation(state.agent, session, state.clock(), state.limits)
+    except Exception as exc:
+        log.warning("conversation_load_failed", error=type(exc).__name__)
+        return False
+    return not conversation.turns
 
 
 def _redacted_trace(
@@ -160,8 +173,7 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                             trace_uuid,
                             cache=state.answer_cache,
                             detector=state.language_detector,
-                            # Until the conversation state exists (F01-T07) every question is the first.
-                            first_question=True,
+                            first_question=await _is_first_question(state, body.session, deadline_at),
                             sink=sink,
                             embedder=state.embedder,
                             store=state.vector_store,

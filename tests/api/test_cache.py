@@ -252,9 +252,11 @@ def at_the_cap(corpus_database: str) -> Iterator[None]:
     reset_tables(corpus_database, "budget_daily", "alert_states")
 
 
-def degraded_ask(client: TestClient, corpus_database: str, question: str) -> Stream:
+def degraded_ask(
+    client: TestClient, corpus_database: str, question: str, session: str | None = None
+) -> Stream:
     seed_budget(corpus_database, 0.10, paid_disabled=True, degraded=True)
-    return ask(client, {**QUESTION, "q": question, "session": str(uuid.uuid4())})
+    return ask(client, {**QUESTION, "q": question, "session": session or str(uuid.uuid4())})
 
 
 def test_degraded_mode_serves_a_first_question_from_the_cache(
@@ -372,3 +374,45 @@ def test_a_degraded_miss_embeds_the_question_once(
     stream = degraded_ask(client, corpus_database, "What is his favourite colour?")
     assert stream.names()[-3:] == ["degraded", "retrieval", "done"]
     assert len(calls) == 1
+
+
+def test_a_degraded_follow_up_goes_straight_to_search_only(
+    client: TestClient, fake: FakeOpenRouter, corpus_database: str, at_the_cap: None
+) -> None:
+    session = str(uuid.uuid4())
+    script(fake, route=with_standalone(QUESTION["q"]))
+    ask_and_wait(client, {**QUESTION, "session": session})  # the session's first turn, stored
+    stream = degraded_ask(
+        client, corpus_database, QUESTION["q"], session
+    )  # the same question, now a follow-up
+    assert "cache" not in stages(stream) and stream.only("degraded")
+    assert stream.only("done")[0].data["cached"] is False
+    assert not stream.only("claim")
+
+
+def test_a_session_idle_past_the_ttl_is_a_first_question_in_degraded_mode(
+    client: TestClient, fake: FakeOpenRouter, corpus_database: str, at_the_cap: None
+) -> None:
+    session = str(uuid.uuid4())
+    script(fake, route=with_standalone(QUESTION["q"]))
+    ask_and_wait(client, {**QUESTION, "session": session})
+    app = client.app
+    now = app.state.clock()  # type: ignore[attr-defined]
+    app.state.clock = lambda: now + 2 * app.state.limits.session_ttl  # type: ignore[attr-defined]
+    stream = degraded_ask(client, corpus_database, QUESTION["q"], session)
+    assert stages(stream) == ["cache"] and stream.only("done")[0].data["cached"] is True
+
+
+def test_a_conversation_that_cannot_be_read_goes_to_search_only(
+    client: TestClient, fake: FakeOpenRouter, corpus_database: str, at_the_cap: None
+) -> None:
+    script(fake, route=with_standalone(QUESTION["q"]))
+    ask_and_wait(client)
+
+    async def broken(*_: Any, **__: Any) -> Any:
+        raise RuntimeError("the checkpoint table is gone")
+
+    client.app.state.agent.aget_state = broken  # type: ignore[attr-defined]
+    stream = degraded_ask(client, corpus_database, QUESTION["q"])
+    assert "cache" not in stages(stream) and stream.only("degraded")
+    assert stream.only("done")[0].data["cached"] is False
