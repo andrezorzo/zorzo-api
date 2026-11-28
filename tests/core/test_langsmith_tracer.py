@@ -167,8 +167,9 @@ def test_a_stuck_post_gets_its_wait_and_the_client_its_floor_within_the_timeout(
     # The split, without the wall clock: the client's floor comes out of the timeout, not on top of it, and
     # the wait used all of its share, so the client gets exactly its floor.
     assert waits == [pytest.approx(INFLIGHT_WAIT_MIN_S)]
-    # Exact: `wait_for` never returns before its deadline, so what is left is at most the floor.
-    assert spy.timeout == CLIENT_CLOSE_FLOOR_S
+    # `wait_for` never returns before its deadline, so what is left is at most the floor (approx: a coarse
+    # clock can put the two reads in one tick).
+    assert spy.timeout == pytest.approx(CLIENT_CLOSE_FLOOR_S)
     [timed_out] = [e for e in logs if e["event"] == "langsmith_close_timed_out"]
     assert timed_out["active"] == 1 and timed_out["waited_s"] >= INFLIGHT_WAIT_MIN_S
 
@@ -191,5 +192,6 @@ def test_a_timeout_under_the_minimum_is_raised_to_it(monkeypatch: pytest.MonkeyP
     waits: list[float] = []
     monkeypatch.setattr(tracer._shutdown, "close", waits.append)
     tracer.close(0)
-    assert waits == [pytest.approx(INFLIGHT_WAIT_MIN_S)]  # the in-flight posts still get their wait
-    assert spy.timeout >= CLIENT_CLOSE_FLOOR_S
+    assert waits == [pytest.approx(INFLIGHT_WAIT_MIN_S)]  # the in-flight wait still gets its minimum
+    # With the wait stubbed out, the client gets about the raised timeout.
+    assert spy.timeout == pytest.approx(CLOSE_MIN_S, abs=CLIENT_CLOSE_FLOOR_S / 2)
