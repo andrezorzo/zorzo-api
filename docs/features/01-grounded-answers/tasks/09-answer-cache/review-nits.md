@@ -32,3 +32,16 @@ today. A later cleanup task picks them up.
 ## zorzo-site
 
 - `assets/js/ui/ask.js`: `done?.cached` is read twice in `render`; hoist a `const`.
+
+## From review round 2
+
+- `packages/core/src/rag_core/services/search_only.py` `run_degraded`: the `link_hosts=()` default fails closed
+  silently (no link is allowed, so every row with a link is refused and deleted). Make it a required
+  keyword-only parameter.
+- `packages/core/src/rag_core/services/answer_cache.py` `_discard` runs inside the lookup's deadline: a cut or
+  failed delete leaves the bad row shadowing new ones. Optionally delete outside the timeout or in the
+  background. There is no test for a failing delete.
+- `packages/core/src/rag_core/adapters/answer_cache.py` `LOOKUP` bumps `hits` before the checks run, so a refused
+  row inflates `hits` if its delete fails.
+- `tests/api/test_cache.py` `test_a_stored_claim_with_the_canary_is_a_miss` doesn't assert the row was deleted.
+- `docs/lld.md` 6.9: the "reusing the lookup's vector" line makes the degraded bullet long; split it.
