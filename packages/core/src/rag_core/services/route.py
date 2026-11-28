@@ -1,11 +1,13 @@
 """Routing (LLD "6.3 Agent run"): one structured-output call classifies the question and rewrites it to stand
-on its own."""
+on its own, reading the conversation's earlier turns."""
 
 import functools
 from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, create_model
 
+from rag_core.limits import Limits
+from rag_core.services.conversation import Conversation, route_input
 from rag_core.services.gateway import Completion, ModelGateway, RequestSpend
 
 
@@ -33,17 +35,21 @@ def route_schema(intents: tuple[str, ...]) -> type[RouteResult]:
 
 async def route(
     question: str,
+    conversation: Conversation,
     *,
+    limits: Limits,
     gateway: ModelGateway,
     prompt: str,
     schema: type[RouteResult],
     deadline_at: float,
     spend: RequestSpend,
 ) -> tuple[RouteResult, Completion]:
-    """Raises `ModelsUnavailableError` when the `route` chain can't answer with the schema."""
+    """The user message is the question with the conversation's history, as JSON (`route_input`). Raises
+    `ModelsUnavailableError` when the `route` chain can't answer with the schema."""
+    user = route_input(question, conversation, limits)
     completion = await gateway.complete(
         "route",
-        [{"role": "system", "content": prompt}, {"role": "user", "content": question}],
+        [{"role": "system", "content": prompt}, {"role": "user", "content": user}],
         schema=schema,
         deadline_at=deadline_at,
         spend=spend,

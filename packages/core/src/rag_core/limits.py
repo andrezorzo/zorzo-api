@@ -46,6 +46,13 @@ class Limits(BaseModel):
     max_repair: int = Field(ge=0)
     recursion_limit: int = Field(gt=0)
     context_max_tokens: int = Field(gt=0)
+    answer_words_default: int = Field(gt=0)  # what an answer aims at
+    answer_words_max: int = Field(gt=0)  # how far it goes when the visitor asks for more detail
+    # Conversation (LLD "6.3 Agent run"): what `route` reads of earlier turns, and when it starts over.
+    history_turns: int = Field(gt=0)
+    history_summary_tokens: int = Field(ge=0)
+    history_max_tokens: int = Field(ge=0)
+    session_ttl: float = Field(gt=0)
     # Guard (LLD "Security"): the injection classifier blocks at this score or above; calibrated at M3.
     guard_threshold: float = Field(gt=0, le=1)
     # Off until they are calibrated on the eval set at M3: abstain only on no passage, always assess.

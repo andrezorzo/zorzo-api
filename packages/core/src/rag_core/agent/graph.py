@@ -11,6 +11,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -59,7 +60,9 @@ _after_assess = _edge(lambda s: "reformulate" if s.get("reformulate") else "answ
 _after_verify = _to("repair")
 
 
-def build_graph() -> Agent:
+def build_graph(checkpointer: BaseCheckpointSaver[Any] | None = None) -> Agent:
+    """The graph; with a checkpointer, each run reads and stores its session's conversation (LLD "6.3 Agent
+    run", conversation)."""
     graph = StateGraph(AgentState, context_schema=AgentContext)
     graph.add_node("guard", nodes.guard_step)
     graph.add_node("route", nodes.route_step)
@@ -80,11 +83,15 @@ def build_graph() -> Agent:
     graph.add_conditional_edges("verify", _after_verify, ["repair", "search_only", END])
     graph.add_conditional_edges("repair", _to("verify"), ["verify", "search_only", END])
     graph.add_edge("search_only", END)
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
-async def run_agent(question: str, trace_id: UUID, *, agent: Agent, context: AgentContext) -> RunResult:
-    """Runs the graph for one question and ends the stream with `usage` (unless search-only) and `done`."""
+async def run_agent(
+    question: str, session: UUID, trace_id: UUID, *, agent: Agent, context: AgentContext
+) -> RunResult:
+    """Runs the graph for one question of the session and ends the stream with `usage` (unless search-only)
+    and `done`. With a checkpointer, the session's thread is read before the run and written once at its
+    end, even when a step raises (a run cut by the deadline keeps what it wrote)."""
     state: dict[str, Any] = {}
     deadline = asyncio.timeout_at(context.deadline_at)
     try:
@@ -92,8 +99,12 @@ async def run_agent(question: str, trace_id: UUID, *, agent: Agent, context: Age
             async for chunk in agent.astream(
                 {"question": question},
                 context=context,
-                config={"recursion_limit": context.limits.recursion_limit},
+                config={
+                    "recursion_limit": context.limits.recursion_limit,
+                    "configurable": {"thread_id": str(session)},  # the session's thread
+                },
                 stream_mode="values",
+                durability="exit" if agent.checkpointer else None,  # one write per run
             ):
                 state = chunk
         outcome: Outcome = state["outcome"]
@@ -134,6 +145,7 @@ async def run_agent(question: str, trace_id: UUID, *, agent: Agent, context: Age
             cached=False,
             suggestion=suggestion,
             contact=list(context.contact),
+            notice=state.get("notice"),
         )
     )
     return _result(outcome, state)

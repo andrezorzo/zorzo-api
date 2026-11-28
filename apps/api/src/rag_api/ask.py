@@ -71,6 +71,8 @@ def _agent_context(
         trace_id=trace_id,
         contact=state.domain.contact,
         link_hosts=state.domain.link_hosts,
+        now=state.clock(),
+        redactor=state.redactor,
     )
 
 
@@ -166,7 +168,9 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                         )
                     else:
                         context = _agent_context(state, sink, corpus.version, deadline_at, trace_uuid)
-                        result = await run_agent(question, trace_uuid, agent=state.agent, context=context)
+                        result = await run_agent(
+                            question, body.session, trace_uuid, agent=state.agent, context=context
+                        )
                 except asyncio.CancelledError:
                     # The visitor left or the server stopped: no `done`, so no `public_traces` row.
                     cancelled = True

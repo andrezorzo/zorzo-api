@@ -15,6 +15,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from rag_core.events import ContactOption
 
+# The slots `answer.md` must have: the core fills all four (LLD "6.3 Agent run", length).
+ANSWER_SLOTS = frozenset({"language", "passages", "words_default", "words_max"})
+
 
 class DomainError(RuntimeError):
     """The domain package is missing or its config is invalid."""
@@ -140,7 +143,7 @@ def _intent_list(intents: Mapping[str, Intent]) -> str:
 def load_prompts(name: str, intents: Mapping[str, Intent]) -> Prompts:
     """The prompt templates, with the `route` prompt's `$intents` filled from `intents.yaml` once, so the
     prompt never names an intent. `route.md` has no other slot: it is sent as rendered here. The other
-    prompts keep their `$slot`s for the nodes."""
+    prompts keep their `$slot`s for the nodes; `answer.md` must have the four the core fills."""
     try:
         folder = files(_package(name)).joinpath("prompts")
         texts = {field: folder.joinpath(f"{field}.md").read_text() for field in Prompts.model_fields}
@@ -148,6 +151,9 @@ def load_prompts(name: str, intents: Mapping[str, Intent]) -> Prompts:
         if route.get_identifiers() != ["intents"]:
             raise ValueError(f"route.md must have exactly one slot, $intents (has {route.get_identifiers()})")
         texts["route"] = route.safe_substitute(intents=_intent_list(intents))
+        missing = sorted(ANSWER_SLOTS - set(Template(texts["answer"]).get_identifiers()))
+        if missing:
+            raise ValueError(f"answer.md lacks the slots {missing}")
         return Prompts(**texts)
     except Exception as exc:
         raise DomainError(f"missing or invalid prompts in {_package(name)}/prompts: {exc}") from exc

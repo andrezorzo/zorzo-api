@@ -14,6 +14,7 @@ from rag_core.domain import Intent, load_prompts
 from rag_core.events import Model, StreamEvent
 from rag_core.services.gateway import Completion, RequestSpend, Usage
 from rag_core.services.guard import CanaryWatch
+from rag_core.services.redact import Redactor
 
 from tests.core.test_gateway import LIMITS
 
@@ -58,6 +59,7 @@ async def test_the_answer_calls_usage_is_recorded_when_the_canary_completes_in_t
         suggestions=cast(Any, None),
         canary=CanaryWatch(CANARY),
         trace_id=uuid4(),
+        redactor=Redactor(),
     )
     with pytest.raises(_CanaryLeakError):
         await _stream_draft([], context)

@@ -9,6 +9,9 @@ from rag_core.models_config import config_version, load_models
 
 ROOT = Path(__file__).resolve().parents[2]
 LIMITS = load_limits(ROOT / "config/limits.yaml")
+# Tokens a word of an answer takes at most: Portuguese runs about 1.6, and the contract's JSON adds the rest
+# (F01-T07).
+TOKENS_PER_WORD = 2
 
 VALID = """
 providers:
@@ -52,6 +55,12 @@ def test_loads_stages_chains_and_prices(tmp_path: Path) -> None:
     paid = answer.chain[1]
     assert paid.paid and paid.price is not None and paid.price.output_per_mtok == 0.4
     assert models.stage("rerank").chain == []
+
+
+@pytest.mark.parametrize("name", ["models.yaml", "models.local.yaml"])
+def test_the_answer_stage_has_room_for_the_longest_answer(name: str) -> None:
+    answer = load_models(ROOT / "config" / name).stages.answer
+    assert answer.max_tokens >= TOKENS_PER_WORD * LIMITS.answer_words_max
 
 
 def test_the_shipped_files_load() -> None:

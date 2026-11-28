@@ -1,6 +1,7 @@
 """FastAPI app factory: validates settings, loads the domain and reflects the schema at startup."""
 
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 
@@ -21,10 +22,11 @@ from rag_core.adapters.factory import (
 )
 from rag_core.adapters.langsmith_tracer import CLOSE_MIN_S
 from rag_core.adapters.pgvector_store import PgVectorStore, check_text_search
-from rag_core.adapters.postgres import Database
+from rag_core.adapters.postgres import Database, checkpoint_setup_connection, open_checkpoint_pool
 from rag_core.adapters.rate_limit import PostgresRateLimiter
 from rag_core.adapters.trace_store import PostgresTraceStore
 from rag_core.adapters.turnstile import TurnstileBotCheck
+from rag_core.agent import memory
 from rag_core.agent.graph import build_graph
 from rag_core.background import BackgroundTasks
 from rag_core.domain import check_domain, load_domain, load_examples, load_intents, load_prompts
@@ -123,6 +125,13 @@ def create_app(settings: ApiSettings) -> FastAPI:
             await check_text_search(
                 db, domain.languages.values()
             )  # a language Postgres can't search stops it
+            # The conversation store: its schema and the library's migrations, then the graph over it. A
+            # failure stops the API like a missing table. The saver needs the running loop.
+            async with checkpoint_setup_connection(settings.database_url) as conn:
+                await memory.setup(conn)
+            pool = await open_checkpoint_pool(settings.database_url)
+            shutdown.push_async_callback(pool.close)  # first: the runs that use it ended with the server
+            app.state.agent = build_graph(memory.checkpointer(pool))
             # Together: the models load in threads, the examples embed over the network. Unlike the rerank
             # levels, the classifier has no next level: a guard silently off is worse than a failed deploy, so
             # a file that is missing or doesn't match its hash stops the API.
@@ -141,7 +150,7 @@ def create_app(settings: ApiSettings) -> FastAPI:
     canary = settings.canary.get_secret_value()
     app.state.prompts = with_canary(load_prompts(settings.domain, app.state.intents), canary)
     app.state.canary_watch = CanaryWatch(canary)
-    app.state.agent = build_graph()
+    app.state.clock = time.time  # wall clock for the conversation's idle limit; the tests move it
     app.state.db = db
     app.state.limits = limits
     app.state.embedder = build_embedder(settings)

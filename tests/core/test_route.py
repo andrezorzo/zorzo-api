@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 import pytest
 from rag_core.adapters.postgres import Database
 from rag_core.domain import load_domain, load_intents, load_prompts
+from rag_core.services.conversation import Conversation
 from rag_core.services.gateway import ModelsUnavailableError, RequestSpend
 from rag_core.services.route import route, route_schema
 
@@ -44,6 +45,8 @@ async def run(fake: FakeOpenRouter, db: Database) -> object:
         deadline_at = asyncio.get_running_loop().time() + 10
         result, _ = await route(
             QUESTION,
+            Conversation(),
+            limits=LIMITS,
             gateway=gateway,
             prompt=PROMPTS.route,
             schema=SCHEMA,
@@ -63,7 +66,12 @@ async def test_route_returns_the_five_fields_in_one_call(setup: tuple[FakeOpenRo
     [request] = fake.requests
     assert request.model == ROUTE
     assert request.body["response_format"]["type"] == "json_schema"
-    assert request.body["messages"][-1]["content"] == QUESTION
+    # A new conversation: the question with an empty history, as JSON (F01-T07).
+    assert json.loads(request.body["messages"][-1]["content"]) == {
+        "question": QUESTION,
+        "history": [],
+        "earlier": [],
+    }
 
 
 async def test_route_reads_fenced_json(setup: tuple[FakeOpenRouter, Database]) -> None:

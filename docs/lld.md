@@ -37,9 +37,9 @@ zorzo-api/
   packages/core/        generic core: retrieval, model gateway, agent graph, verification,
                         guard, telemetry, ingest pipeline, eval harness; ports and adapters   (existing: settings,
                         errors, health, events, retrieval, search-only answer, ingest
-                        pipeline, model gateway, budget, alerts, agent graph, verification,
-                        Postgres/Ollama/rerank/gitleaks/publisher/LiteLLM/Telegram
-                        adapters)
+                        pipeline, model gateway, budget, alerts, agent graph, conversation
+                        state, verification, Postgres/Ollama/rerank/gitleaks/publisher/
+                        LiteLLM/Telegram adapters)
   apps/api/             FastAPI: HTTP routes, SSE, gate; wires core + domain at startup      (existing: healthz, ask)
   apps/dashboard/       Django: public /dash pages, the `data` app (schema owner), commands    (existing: schema)
   apps/ingest/          one-shot job: runs the core ingest pipeline for a domain              (existing)
@@ -644,7 +644,9 @@ States of the day's budget row; the day is UTC, so every visitor sees the same "
   last turn. Only `route` reads it, within `HISTORY_MAX_TOKENS`: over that, the summary goes first, then the
   oldest turn, then the last turn's claims from the end; its question always stays. The standalone question
   carries the context to the later steps. A conversation whose last turn is older than `SESSION_TTL` is read
-  as empty, so it starts over even when a client keeps the session id. A turn is remembered once `route`
+  as empty, so it starts over even when a client keeps the session id; so is a stored conversation that no
+  longer validates (logged as `conversation_unreadable`), so the session starts over instead of failing on
+  every question. A turn is remembered once `route`
   answers (its question) and when its claims are published (their text), both through the shared redactor
   of the stored trace; a follow-up with no history, a question `route` didn't answer, a question that is
   search-only from the start and a blocked question (the guard ends the run before `route`) are not

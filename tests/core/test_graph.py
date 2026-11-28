@@ -12,6 +12,7 @@ from rag_core.domain import Intent, load_prompts
 from rag_core.events import StreamEvent
 from rag_core.services.gateway import RequestSpend
 from rag_core.services.guard import CanaryWatch
+from rag_core.services.redact import Redactor
 from structlog.testing import capture_logs
 
 from tests.core.test_gateway import LIMITS
@@ -57,9 +58,10 @@ async def test_the_recursion_backstop_abstains_and_logs() -> None:
         suggestions=cast(Any, None),
         canary=CanaryWatch("canary"),
         trace_id=uuid4(),
+        redactor=Redactor(),
     )
     with capture_logs() as logs:
-        result = await run_agent("q", uuid4(), agent=looping(), context=context)
+        result = await run_agent("q", uuid4(), uuid4(), agent=looping(), context=context)  # no checkpointer
     assert result.outcome == "abstained"
     assert [e.kind for e in sink.events] == ["usage", "done"]
     assert sink.events[-1].model_dump()["outcome"] == "abstained"
