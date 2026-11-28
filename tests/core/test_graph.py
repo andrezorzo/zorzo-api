@@ -59,7 +59,7 @@ async def test_the_recursion_backstop_abstains_and_logs() -> None:
         trace_id=uuid4(),
     )
     with capture_logs() as logs:
-        result = await run_agent("q", uuid4(), agent=looping(), context=context)
+        result = await run_agent("q", uuid4(), uuid4(), agent=looping(), context=context)  # no checkpointer
     assert result.outcome == "abstained"
     assert [e.kind for e in sink.events] == ["usage", "done"]
     assert sink.events[-1].model_dump()["outcome"] == "abstained"

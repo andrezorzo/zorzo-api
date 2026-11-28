@@ -18,7 +18,7 @@ stages:
     chain:
       - {provider: openrouter, model: "nvidia/nemotron-3.5-rerank-8b:free"}
   answer:
-    max_tokens: 700
+    max_tokens: 1000  # room for ANSWER_WORDS_MAX words in Portuguese plus the contract's JSON
     chain:
       - {provider: openrouter, model: "google/gemma-4-31b-it:free"}
       - {provider: openrouter, model: "nvidia/nemotron-3.5-super-vl:free"}

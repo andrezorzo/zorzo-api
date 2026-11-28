@@ -12,15 +12,22 @@ from typing import Any, Literal, cast
 
 import structlog
 from langgraph.runtime import Runtime
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from rag_core.agent.context import AgentContext, answer_language
 from rag_core.agent.state import AgentState
 from rag_core.events import BlockCategory, Blocked, Claim, Guard, GuardLayer, Token
 from rag_core.services import retrieval
+from rag_core.services.conversation import Conversation, begin_turn, live, with_claims
 from rag_core.services.gateway import Completion, ModelsUnavailableError
 from rag_core.services.guard import CanaryScan, check_input
-from rag_core.services.prompts import fit_passages, messages, passages_text
+from rag_core.services.prompts import (
+    answer_messages,
+    fit_passages,
+    messages,
+    passages_text,
+    repair_messages,
+)
 from rag_core.services.route import route
 from rag_core.services.stream import emit_degraded, emit_retrieval, stage
 from rag_core.services.verification import (
@@ -54,6 +61,10 @@ class _CanaryLeakError(Exception):
     """The draft holds the canary: the answer is stopped and the run is blocked (`L5`)."""
 
 
+# The verdicts whose text a remembered turn keeps: what the visitor was shown as checked.
+REMEMBERED_VERDICTS = frozenset({"supported", "partial"})
+
+
 class AssessResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     sufficient: bool
@@ -69,11 +80,12 @@ def _language(state: AgentState, ctx: AgentContext) -> str:
 
 
 def _answer_messages(state: AgentState, ctx: AgentContext) -> list[dict[str, str]]:
-    return messages(
+    return answer_messages(
         ctx.prompts.answer,
         state["query"],
         language=_language(state, ctx),
         passages=passages_text(state["passages"]),
+        limits=ctx.limits,
     )
 
 
@@ -102,12 +114,27 @@ async def guard_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any]
     return {}
 
 
+def _conversation(state: AgentState) -> Conversation:
+    """The stored conversation; one that no longer reads as a conversation is dropped, so the session starts
+    over instead of failing on every question."""
+    try:
+        return Conversation.model_validate(state.get("conversation") or {})
+    except ValidationError:
+        log.warning("conversation_unreadable")
+        return Conversation()
+
+
 async def route_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any]:
+    """Routes the question with the live conversation. A follow-up with no history abstains here
+    (`no_context`) and is not remembered; any other routed question becomes the conversation's new turn."""
     ctx = runtime.context
+    conversation = live(_conversation(state), ctx.now, ctx.limits.session_ttl)
     with stage(ctx.sink, "route"):
         try:
             result, completion = await route(
                 state["question"],
+                conversation,
+                limits=ctx.limits,
                 gateway=ctx.gateway,
                 prompt=ctx.prompts.route,
                 schema=ctx.route_schema,
@@ -117,12 +144,18 @@ async def route_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any]
         except ModelsUnavailableError:
             return {"degraded": ctx.unavailable()}
         ctx.record("route", completion)
+    if result.follow_up and not conversation.turns:
+        return {"route": result, "outcome": "abstained", "notice": "no_context"}
+    turn = begin_turn(conversation, ctx.redactor.text(result.standalone_question), ctx.now, ctx.limits)
+    update: dict[str, Any] = {"route": result, "conversation": turn.model_dump()}
+    if result.language not in ctx.languages:  # answered in the default language, with a line saying so
+        update["notice"] = "other_language"
     action = ctx.intents[result.intent].action
     if action == "decline":
-        return {"route": result, "outcome": "declined"}
+        return {**update, "outcome": "declined"}
     if action == "contact":  # the reply is the contact options `done` carries
-        return {"route": result, "outcome": "answered"}
-    return {"route": result, "query": result.standalone_question}
+        return {**update, "outcome": "answered"}
+    return {**update, "query": result.standalone_question}
 
 
 async def retrieve_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any]:
@@ -263,22 +296,29 @@ async def verify_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any
             if verdicts is None:
                 return {"outcome": "abstained"}  # verification is never skipped
         verdicted = apply_verdicts(cited, verdicts, answer.gap)
-    return publish_claims(verdicted, cited, state.get("repairs", 0), ctx)
+    return publish_claims(verdicted, cited, state.get("repairs", 0), _conversation(state), ctx)
 
 
 def publish_claims(
-    verdicted: Sequence[CheckedClaim], cited: Sequence[CitedClaim], repairs: int, ctx: AgentContext
+    verdicted: Sequence[CheckedClaim],
+    cited: Sequence[CitedClaim],
+    repairs: int,
+    conversation: Conversation,
+    ctx: AgentContext,
 ) -> dict[str, Any]:
     """The one way claims reach the visitor: held to the link allowlist, then to the canary check (the
-    texts joined as the draft's are, so a canary split across two claims is found), then sent; a canary
-    blocks the run (`L5`). Without a claim left to publish, a repair, or the abstention."""
+    texts joined as the draft's are, so a canary split across two claims is found), then sent, and their
+    text remembered as the conversation's last turn; a canary blocks the run (`L5`). Without a claim left to
+    publish, a repair, or the abstention."""
     checked = enforce_links(verdicted, cited, ctx.link_hosts)
     if coherent(checked):
         # What goes out is checked last: the judge's `supported_text` and the gap are model text too.
         if ctx.canary.found(" ".join(c.text for c in checked if c.text)):
             return _block(ctx, "L5", "prompt_leak", LEAK_MESSAGE)
         _send_claims(checked, ctx)
-        return {"claims": checked, "outcome": "answered"}
+        shown = [ctx.redactor.text(c.text) for c in checked if c.verdict in REMEMBERED_VERDICTS]
+        remembered = with_claims(conversation, shown).model_dump()
+        return {"claims": checked, "outcome": "answered", "conversation": remembered}
     if repairs < ctx.limits.max_repair:
         return {"claims": checked}
     return {"claims": checked, "outcome": "abstained"}
@@ -296,8 +336,14 @@ async def repair_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any
     # The question and the claims are text the visitor may have steered: as JSON strings they stay data.
     checked = [{"claim": c.text, "verdict": c.verdict} for c in state["claims"] if c.verdict != "gap"]
     user = json.dumps({"question": state["query"], "checked_claims": checked}, ensure_ascii=False)
-    answer_prompt = _answer_messages(state, ctx)[0]["content"]
-    prompt = messages(ctx.prompts.repair, user, answer_prompt=answer_prompt)
+    prompt = repair_messages(
+        ctx.prompts.repair,
+        ctx.prompts.answer,
+        user,
+        language=_language(state, ctx),
+        passages=passages_text(state["passages"]),
+        limits=ctx.limits,
+    )
     with stage(ctx.sink, "repair"):
         answer = cast(AnswerContract | None, await ctx.call("repair", "answer", prompt, AnswerContract))
     if answer is None:

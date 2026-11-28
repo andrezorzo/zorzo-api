@@ -236,6 +236,23 @@
           "default": null,
           "description": "The domain's contact options, in their order",
           "title": "Contact"
+        },
+        "notice": {
+          "anyOf": [
+            {
+              "enum": [
+                "no_context",
+                "other_language"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "An edge question the front explains in a fixed line: `no_context` (a follow-up with no earlier turn), `other_language` (answered in the domain's first language); null otherwise",
+          "title": "Notice"
         }
       },
       "required": [

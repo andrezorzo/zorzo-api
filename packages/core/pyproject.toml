@@ -27,6 +27,10 @@ dependencies = [
     "langchain-core>=1.8",
     # Exact pin, a release at least two weeks old (F01-T10); upgrades in a reviewed PR. Posts the trace runs.
     "langsmith==0.14.17",
+    # Exact pin, a release at least two weeks old (F01-T07); upgrades in a reviewed PR. The conversation store
+    # (ADR 0001), over a psycopg pool.
+    "langgraph-checkpoint-postgres==3.2.1",
+    "psycopg-pool>=3.2",
 ]
 
 [build-system]

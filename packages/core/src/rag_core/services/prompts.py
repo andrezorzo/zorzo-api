@@ -6,6 +6,7 @@ import re
 from collections.abc import Sequence
 from string import Template
 
+from rag_core.limits import Limits
 from rag_core.ports import SearchHit
 from rag_core.services.gateway import estimate_tokens
 
@@ -19,6 +20,28 @@ def messages(template: str, question: str, /, **slots: str) -> list[dict[str, st
     `$slot`s are replaced; the values are never read as a template."""
     system = Template(template).safe_substitute(slots)
     return [{"role": "system", "content": system}, {"role": "user", "content": question}]
+
+
+def answer_messages(
+    template: str, question: str, /, *, language: str, passages: str, limits: Limits
+) -> list[dict[str, str]]:
+    """The `answer` call's messages: the language, the passages and the length targets in its four slots."""
+    return messages(
+        template,
+        question,
+        language=language,
+        passages=passages,
+        words_default=str(limits.answer_words_default),
+        words_max=str(limits.answer_words_max),
+    )
+
+
+def repair_messages(
+    template: str, answer_template: str, user: str, /, *, language: str, passages: str, limits: Limits
+) -> list[dict[str, str]]:
+    """The `repair` call's messages: its template embeds the filled answer prompt (`$answer_prompt`)."""
+    answer_prompt = answer_messages(answer_template, "", language=language, passages=passages, limits=limits)
+    return messages(template, user, answer_prompt=answer_prompt[0]["content"])
 
 
 def passages_text(passages: Sequence[SearchHit]) -> str:

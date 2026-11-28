@@ -17,11 +17,13 @@ ZORZO = load_domain("zorzo")
 ZORZO_KINDS = ZORZO.document_kinds
 CONTACT = ZORZO.contact
 STAGES = ("route", "assess", "reformulate", "answer", "judge", "repair")
+ANSWER = "Answer in $language, in $words_default words (up to $words_max).\n$passages\n"  # its four slots
 
 
 def prompt_files(route: str) -> dict[str, str]:
     """The six prompt files, keyed for `make_domain`, with the given `route.md`."""
-    return {f"prompts__{stage}.md": f"{stage} prompt\n" for stage in STAGES} | {"prompts__route.md": route}
+    files = {f"prompts__{stage}.md": f"{stage} prompt\n" for stage in STAGES}
+    return files | {"prompts__route.md": route, "prompts__answer.md": ANSWER}
 
 
 def test_the_domain_declares_its_intents_and_their_rules() -> None:

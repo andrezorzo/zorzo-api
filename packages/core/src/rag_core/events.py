@@ -35,6 +35,9 @@ DegradedReason = Literal["models_unavailable", "budget_exhausted", "quota_exhaus
 # The result of a request, named as the stored outcomes are (`questions_log.outcome`); `error` (a bug) is
 # this stream's only (the stored trace keeps it as it is, LLD "4. Data").
 Outcome = Literal["answered", "abstained", "declined", "blocked", "degraded", "error"]
+# An edge question the front explains in a fixed line (LLD "6.3 Agent run", edge questions): a follow-up with
+# no history, or a question in a language the domain doesn't declare.
+Notice = Literal["no_context", "other_language"]
 # Outcomes whose stream sends no `usage`: a search-only run ends with its passages, a block with `done`.
 NO_USAGE_OUTCOMES: frozenset[Outcome] = frozenset({"degraded", "blocked"})
 
@@ -151,6 +154,11 @@ class Done(StreamEvent):
     )
     contact: list[ContactOption] | None = Field(
         default=None, description="The domain's contact options, in their order"
+    )
+    notice: Notice | None = Field(
+        default=None,
+        description="An edge question the front explains in a fixed line: `no_context` (a follow-up with no "
+        "earlier turn), `other_language` (answered in the domain's first language); null otherwise",
     )
 
     @property
