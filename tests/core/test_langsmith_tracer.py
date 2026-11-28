@@ -155,9 +155,9 @@ def test_a_stuck_post_gets_its_wait_and_the_client_its_floor_within_the_timeout(
         tracer.close(CLOSE_MIN_S)  # the post never ends within it
     release.set()
     finishing.join(TIMEOUT_S)
-    waited = spy.closed_at - started
-    # The post got its wait, but not the whole timeout: the client's floor comes out of it, not on top.
-    assert INFLIGHT_WAIT_MIN_S <= waited < CLOSE_MIN_S
-    assert spy.timeout >= CLIENT_CLOSE_FLOOR_S  # and the client its floor
+    assert spy.closed_at - started >= INFLIGHT_WAIT_MIN_S  # the post got its wait
+    # The split, without the wall clock: the wait used all of its share, so the client gets exactly its floor,
+    # out of the timeout and not on top of it.
+    assert spy.timeout == CLIENT_CLOSE_FLOOR_S
     [timed_out] = [e for e in logs if e["event"] == "langsmith_close_timed_out"]
     assert timed_out["active"] == 1 and timed_out["waited_s"] >= INFLIGHT_WAIT_MIN_S

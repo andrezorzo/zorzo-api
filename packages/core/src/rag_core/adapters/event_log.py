@@ -61,6 +61,7 @@ class PostgresEventLog:
 
     async def drain(self, timeout: float | None = None) -> None:
         await self._background.drain(timeout)
-        # Rows dropped after this forced report are logged only if a stuck insert later ends below the
-        # re-arm level: accepted at shutdown, where nothing more is written.
+        # Rows dropped after this forced report are logged only when the pending rows later fall below
+        # the re-arm level (an insert ending, or a new write): accepted at shutdown, where nothing more
+        # is written.
         self._report_dropped(force=True)
