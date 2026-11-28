@@ -375,6 +375,14 @@ def test_a_control_character_inside_a_link_hides_nothing(text: str) -> None:
     assert not links_allowed(text, ["github.com"])
 
 
-def test_a_claim_with_any_other_control_character_is_refused_even_without_a_link() -> None:
-    assert not links_allowed("plain text\x01with no link", ["github.com"])
+@pytest.mark.parametrize(
+    "text", ["Use the regex \x08word\x08", "saved in C:\x0ciles", "plain text\x01with no link"]
+)
+def test_a_control_character_with_no_link_fragment_passes(text: str) -> None:
+    # A JSON backslash the model didn't double (`\b`, `\f`) is a control character in a normal claim.
+    assert links_allowed(text, ["github.com"])
+
+
+def test_a_control_character_beside_an_allowed_link_is_refused() -> None:
+    assert not links_allowed("see\x01https://github.com/andre", ["github.com"])
     assert links_allowed("a tab\tand a line\nbreak, https://github.com/andre", ["github.com"])

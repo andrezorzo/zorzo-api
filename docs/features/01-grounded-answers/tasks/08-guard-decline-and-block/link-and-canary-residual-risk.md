@@ -31,10 +31,15 @@ below was weighed and left, because closing it costs more than the harm it would
   combining grapheme joiner (U+034F), variation selectors (U+FE00–FE0F, U+180B–180D) and the Hangul fillers
   (U+3164, U+FFA0) break the scheme run, so `https\ufe0f://evil.com` is not read as a link. Format
   characters are removed before the check, and a claim holding a control character other than a tab, a line
-  feed or a carriage return is refused outright (how a browser draws one varies); this class is not handled,
-  and the text is shown as text, never as a link.
-- **Any claim with such a control character is refused**, link or not: the conservative side, shown as
-  unsupported. A model writes none in normal text.
+  feed or a carriage return is refused when, with those removed, any link fragment is left (`//`, `www`, a
+  link scheme); this class is not handled, and the text is shown as text, never as a link.
+- **A control character beside an allowed link refuses the claim**: the conservative side, shown as
+  unsupported. A control character with no link fragment (a JSON backslash the model didn't double) passes.
+- **A line feed or carriage return next to a format character, or between full-width characters**
+  (`www\u200b\n.evil.com`): some browsers remove such a line break, so the page may show a joined
+  `www.evil.com` while the check sees a boundary. Shown as text, never as a link.
+- **An unsupported claim keeps its text**: a drafted claim refused for its link is still shown, struck
+  through, with that text. The page never makes it a link.
 
 ## Canary
 

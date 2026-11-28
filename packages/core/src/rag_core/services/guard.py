@@ -58,6 +58,9 @@ _AUTHORITY = re.compile(r"[a-z0-9.\-]+")  # a plain ASCII host: no userinfo, por
 # The control characters a page shows as a gap. Any other one may be drawn as nothing, as a gap or as a glyph,
 # depending on the browser, so no single reading of the text would match what the visitor sees.
 _TEXT_CONTROLS = "\t\n\r"
+# What any link needs. Removing characters never creates one, so the text with every stray control removed
+# holds all the fragments any drawing of it could show.
+_LINK_FRAGMENT = re.compile(r"//|www|(?:java|vb)script:|data:|https?:", re.IGNORECASE)
 
 
 async def check_input(classifier: InjectionClassifier, question: str, threshold: float) -> InputAction:
@@ -177,8 +180,12 @@ def links_allowed(text: str, hosts: Sequence[str]) -> bool:
     `done.contact`, never through a claim."""
     normalized = unicodedata.normalize("NFKC", text).replace("\\", "/").translate(_DOTS)
     # A control character can hide a link as a boundary (`a\x01//evil.com`) or inside a scheme
-    # (`https\x01://evil.com`), and how it is drawn varies: a claim holding one is refused outright.
-    if any(unicodedata.category(c) == "Cc" and c not in _TEXT_CONTROLS for c in normalized):
-        return False
+    # (`https\x01://evil.com`), and how it is drawn varies: with one, any link fragment refuses the claim.
+    # A JSON backslash the model didn't double (`\bword\b` read as U+0008) holds none, so it still passes.
+    stray = {c for c in normalized if unicodedata.category(c) == "Cc" and c not in _TEXT_CONTROLS}
+    if stray:
+        joined = "".join(c for c in normalized if c not in stray and unicodedata.category(c) != "Cf")
+        if _LINK_FRAGMENT.search(joined):
+            return False
     normalized = "".join(c for c in normalized if unicodedata.category(c) != "Cf")  # zero-width joiners
     return all(_link_allowed(match.group(), hosts) for match in _EXPLICIT_LINK.finditer(normalized))
