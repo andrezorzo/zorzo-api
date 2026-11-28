@@ -4,27 +4,19 @@ L2 `check_input` runs the local injection classifier; L5 holds the canary back f
 claims for it, and `links_allowed` keeps a claim from linking outside the domain's hosts.
 """
 
+import math
 import re
 import unicodedata
 from collections.abc import Sequence
+from functools import cache
 from typing import Literal
 from urllib.parse import urlsplit
 
 import structlog
 
 from rag_core.domain import Prompts
-from rag_core.events import BlockCategory, GuardLayer
+from rag_core.hidden import strip_hidden
 from rag_core.ports import InjectionClassifier
-
-__all__ = [
-    "BlockCategory",
-    "CanaryScan",
-    "CanaryWatch",
-    "GuardLayer",
-    "check_input",
-    "links_allowed",
-    "with_canary",
-]
 
 log = structlog.get_logger()
 
@@ -63,6 +55,10 @@ _NESTED_LINK = re.compile(r"://|[,;|\"'(<\[](?:www\.|//)", re.IGNORECASE)
 # The scheme of a link whose run before `://` carries digits or punctuation: `1.https`, `-https`.
 _SCHEME_SUFFIX = re.compile(r"[^a-z]*(https?)", re.IGNORECASE)
 _TRAILING_PUNCTUATION = ".,;:!?)]}>'\"\u00bb\u201d\u2019\u2014\u2013\u3001\u300d\u300f\u3011"  # and closers
+# The control characters that are whitespace (tab, line breaks, separators): they end a link, so they stay.
+_LINK_BOUNDARIES = "".join(
+    c for c in map(chr, range(0x100)) if c.isspace() and unicodedata.category(c) == "Cc"
+)
 _AUTHORITY = re.compile(r"[a-z0-9.\-]+")  # a plain ASCII host: no userinfo, port, escape or bracket
 
 
@@ -75,6 +71,9 @@ async def check_input(classifier: InjectionClassifier, question: str, threshold:
         # The type only: the message may quote the question.
         log.error("guard_classifier_failed", error=type(exc).__name__)
         return "error"
+    if not math.isfinite(score):  # NaN compares false with everything: never a pass
+        log.error("guard_classifier_failed", error="NonFiniteScore")
+        return "error"
     return "block" if score >= threshold else "pass"
 
 
@@ -82,6 +81,12 @@ def with_canary(prompts: Prompts, canary: str) -> Prompts:
     """The prompts with one canary line added to each template, after they are loaded and rendered."""
     line = CANARY_LINE.format(canary=canary)
     return prompts.model_copy(update={name: f"{text}\n\n{line}" for name, text in prompts})
+
+
+@cache
+def _squash_char(char: str) -> int:
+    """How many letters and digits a character stands for (a ligature several, a space none)."""
+    return len(_squash(char))
 
 
 def _squash(text: str) -> str:
@@ -112,7 +117,7 @@ class CanaryWatch:
         held = len(self._canary) - 1
         seen = 0
         for index in range(len(draft) - 1, -1, -1):
-            seen += len(_squash(draft[index]))  # a character may stand for several (a ligature) or none
+            seen += _squash_char(draft[index])  # a character may stand for several (a ligature) or none
             if seen >= held:
                 return draft[:index]
         return ""
@@ -173,5 +178,5 @@ def links_allowed(text: str, hosts: Sequence[str]) -> bool:
     is not checked (`link-and-canary-residual-risk.md`). The contact links reach the page through
     `done.contact`, never through a claim."""
     normalized = unicodedata.normalize("NFKC", text).replace("\\", "/").translate(_DOTS)
-    normalized = "".join(c for c in normalized if unicodedata.category(c) != "Cf")  # zero-width joiners
+    normalized = strip_hidden(normalized, keep=_LINK_BOUNDARIES)  # zero-width joiners, controls
     return all(_link_allowed(match.group(), hosts) for match in _EXPLICIT_LINK.finditer(normalized))

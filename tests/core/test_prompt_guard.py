@@ -48,6 +48,12 @@ def test_the_malicious_probability_is_the_softmax_of_the_two_logits() -> None:
     assert softmax_malicious([[1000.0, 1001.0]]) == pytest.approx(0.7310585786)  # no overflow
 
 
+@pytest.mark.parametrize("logits", [[[float("nan"), 1.0]], [[float("inf"), 1.0]], [[0.0, float("-inf")]]])
+def test_a_non_finite_score_is_an_error_never_a_pass(logits: list[list[float]]) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        softmax_malicious(logits)
+
+
 async def test_a_question_is_tokenized_and_scored_by_the_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

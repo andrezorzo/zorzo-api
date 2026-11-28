@@ -336,3 +336,15 @@ def test_the_canary_is_found_through_case_folding_and_accents() -> None:
     assert not scan.hit("İstanbul mâr") and scan.hit(
         "İstanbul mâr" + "ker 0123456789 abcdefghijklmnopqrstuvwxyz"
     )
+
+
+async def test_a_score_that_is_not_a_number_is_a_classifier_error() -> None:
+    class Broken:
+        def __init__(self, score: float) -> None:
+            self._score = score
+
+        async def score(self, text: str) -> float:
+            return self._score
+
+    for score in (float("nan"), float("inf"), float("-inf")):
+        assert await check_input(Broken(score), "question", 0.5) == "error"  # type: ignore[arg-type]

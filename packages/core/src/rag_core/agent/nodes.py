@@ -8,7 +8,7 @@ import asyncio
 import json
 from collections.abc import Sequence
 from contextlib import aclosing
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import structlog
 from langgraph.runtime import Runtime
@@ -26,6 +26,7 @@ from rag_core.services.stream import emit_degraded, emit_retrieval, stage
 from rag_core.services.verification import (
     AnswerContract,
     CheckedClaim,
+    CitedClaim,
     Verdicts,
     apply_verdicts,
     cite,
@@ -46,6 +47,7 @@ log = structlog.get_logger()
 INPUT_CHECK_LABEL = "Injection classifier"
 INJECTION_MESSAGE = "The question looks like an attempt to steer the assistant."
 LEAK_MESSAGE = "The answer holds the assistant's internal marker."
+LEAKED: Literal["leaked"] = "leaked"  # what `_answer_contract` returns for a draft that held the canary
 
 
 class _CanaryLeakError(Exception):
@@ -181,16 +183,12 @@ async def answer_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any
     if ctx.seconds_left() < ctx.limits.answer_reserve:
         return {"degraded": "deadline"}
     prompt = _answer_messages(state, ctx)
-    leaked = False
-    answer: AnswerContract | None = None
     with stage(ctx.sink, "answer"):
         try:
             answer = await _answer_contract(prompt, ctx)
         except ModelsUnavailableError:
             return _no_answer(ctx)
-        except _CanaryLeakError:
-            leaked = True
-    if leaked:
+    if isinstance(answer, str):  # `LEAKED`
         return _block(ctx, "L5", "prompt_leak", LEAK_MESSAGE)  # after the stage ended: only `done` follows
     if answer is None:
         return _no_answer(ctx)
@@ -199,10 +197,15 @@ async def answer_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any
     return {"answer": answer}
 
 
-async def _answer_contract(prompt: list[dict[str, str]], ctx: AgentContext) -> AnswerContract | None:
+async def _answer_contract(
+    prompt: list[dict[str, str]], ctx: AgentContext
+) -> AnswerContract | Literal["leaked"] | None:
     """The streamed answer; when it isn't the contract, asked again with the contract as output schema (no
-    more tokens). None when the chain can't answer."""
-    answer = read_answer((await _stream_draft(prompt, ctx)).text)
+    more tokens). None when the chain can't answer, `LEAKED` when the draft held the canary."""
+    try:
+        answer = read_answer((await _stream_draft(prompt, ctx)).text)
+    except _CanaryLeakError:
+        return LEAKED
     if answer is None:
         answer = cast(AnswerContract | None, await ctx.call("answer", "answer", prompt, AnswerContract))
     return answer
@@ -219,24 +222,24 @@ async def _stream_draft(prompt: list[dict[str, str]], ctx: AgentContext) -> Comp
     ) as parts:
         async for part in parts:
             if isinstance(part, Completion):
-                draft = draft_text(text)  # what arrived since the last parse
-                _no_leak(scan, draft)
-                _send_draft(draft, sent, ctx)
-                ctx.record("answer", part)
+                ctx.record("answer", part)  # first: a leak in the last chunk still cost what it cost
+                _release(text, sent, scan, ctx, final=True)
                 return part
             text += part
             # Parsing the whole JSON so far on every chunk is quadratic: parse when enough arrived.
             if len(text) - parsed_at >= DRAFT_PARSE_EVERY or '"' in part:
                 parsed_at = len(text)
-                draft = draft_text(text)
-                _no_leak(scan, draft)
-                sent = _send_draft(ctx.canary.safe(draft), sent, ctx)
+                sent = _release(text, sent, scan, ctx, final=False)
     raise ModelsUnavailableError("answer")  # the gateway always ends with its completion or raises
 
 
-def _no_leak(scan: CanaryScan, draft: str) -> None:
+def _release(text: str, sent: str, scan: CanaryScan, ctx: AgentContext, *, final: bool) -> str:
+    """Checks the draft read from `text` for the canary (raising `_CanaryLeakError`) and sends what it gained;
+    unless `final`, less the last characters that could begin the canary. Returns the draft sent so far."""
+    draft = draft_text(text)
     if scan.hit(draft):
         raise _CanaryLeakError
+    return _send_draft(draft if final else ctx.canary.safe(draft), sent, ctx)
 
 
 def _send_draft(draft: str, sent: str, ctx: AgentContext) -> str:
@@ -259,14 +262,24 @@ async def verify_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any
             verdicts = cast(Verdicts | None, await ctx.call("verify", "judge", prompt, Verdicts))
             if verdicts is None:
                 return {"outcome": "abstained"}  # verification is never skipped
-        checked = enforce_links(apply_verdicts(cited, verdicts, answer.gap), cited, ctx.link_hosts)
+        verdicted = apply_verdicts(cited, verdicts, answer.gap)
+    return publish_claims(verdicted, cited, state.get("repairs", 0), ctx)
+
+
+def publish_claims(
+    verdicted: Sequence[CheckedClaim], cited: Sequence[CitedClaim], repairs: int, ctx: AgentContext
+) -> dict[str, Any]:
+    """The one way claims reach the visitor: held to the link allowlist, then to the canary check (the
+    texts joined as the draft's are, so a canary split across two claims is found), then sent; a canary
+    blocks the run (`L5`). Without a claim left to publish, a repair, or the abstention."""
+    checked = enforce_links(verdicted, cited, ctx.link_hosts)
     if coherent(checked):
         # What goes out is checked last: the judge's `supported_text` and the gap are model text too.
-        if any(ctx.canary.found(c.text) for c in checked):
+        if ctx.canary.found(" ".join(c.text for c in checked if c.text)):
             return _block(ctx, "L5", "prompt_leak", LEAK_MESSAGE)
         _send_claims(checked, ctx)
         return {"claims": checked, "outcome": "answered"}
-    if state.get("repairs", 0) < ctx.limits.max_repair:
+    if repairs < ctx.limits.max_repair:
         return {"claims": checked}
     return {"claims": checked, "outcome": "abstained"}
 

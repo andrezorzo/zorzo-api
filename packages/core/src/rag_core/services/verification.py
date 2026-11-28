@@ -181,10 +181,15 @@ def enforce_links(
     `unsupported`."""
     result: list[CheckedClaim] = []
     for i, claim in enumerate(checked):
-        if links_allowed(claim.text, link_hosts) or claim.verdict not in ("partial", "gap"):
+        if claim.verdict == "partial":
+            # The kept text is the judge's own, unless it is the claim as drafted (`cite` checked that one).
+            if claim.text == cited[i].text or links_allowed(claim.text, link_hosts):
+                result.append(claim)
+            else:
+                result.append(CheckedClaim(cited[i].text, claim.sources, "unsupported"))
+        elif claim.verdict != "gap" or links_allowed(claim.text, link_hosts):
             result.append(claim)  # an `unsupported` claim shows struck through, as text, never as a link
-        elif claim.verdict == "partial":
-            result.append(CheckedClaim(cited[i].text, claim.sources, "unsupported"))
+        # a gap with a bad link is dropped
     return result
 
 

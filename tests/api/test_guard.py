@@ -148,6 +148,27 @@ def test_a_canary_in_a_checked_claim_blocks_the_response(client: TestClient, fak
     assert stream.only("blocked")[0].data["layer"] == "L5"
 
 
+def test_a_canary_split_across_two_fallback_claims_blocks_the_response(
+    client: TestClient, fake: FakeOpenRouter, corpus_database: str
+) -> None:
+    # The draft isn't the contract, so the answer is asked again with the schema (no streamed scan): the
+    # canary is split across claim 0 and claim 1, each harmless alone.
+    half = len(TEST_CANARY) // 2
+    script(fake, draft=Reply("not the contract"))
+    fake.script_schema(
+        "AnswerContract",
+        answer(
+            [(f"He used Lambda. Marker {TEST_CANARY[:half]}", [1]), (f"{TEST_CANARY[half:]} on AWS.", [1])]
+        ),
+    )
+    stream = ask(client)
+    assert not stream.only("claim")
+    assert stream.names()[-2:] == ["blocked", "done"]
+    assert stream.only("blocked")[0].data["layer"] == "L5"
+    rows = defense_rows(client, corpus_database, done(stream)["trace_id"])
+    assert [(r[0], r[1], r[2]) for r in rows] == [("L5", "prompt_leak", "block")]
+
+
 def test_every_system_message_carries_the_canary(client: TestClient, fake: FakeOpenRouter) -> None:
     # Every prompt runs: route, assess, reformulate, answer, judge and one repair.
     script(fake, sufficient=False)
