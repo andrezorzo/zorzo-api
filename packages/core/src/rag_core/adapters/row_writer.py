@@ -15,9 +15,6 @@ log = structlog.get_logger()
 # Rows waiting to be inserted; past it a flood is dropped. Each pending row is a task holding a few hundred
 # bytes, so 1000 stay under a megabyte, and a database that keeps up never gets near it.
 MAX_PENDING_ROWS = 1000
-# A burst of drops ends only when the pending rows fall below this, so a flood that frees one slot and
-# fills it again stays one burst (one warning).
-REARM_PENDING_ROWS = MAX_PENDING_ROWS // 2
 
 
 class RowWriter:
@@ -30,8 +27,10 @@ class RowWriter:
         self.db = db
         self._insert = insert
         self._name = name
-        self._max_pending = max_pending
-        self._rearm_pending = max_pending // 2
+        self.max_pending = max_pending
+        # A burst of drops ends only when the pending rows fall below this, so a flood that frees one slot
+        # and fills it again stays one burst (one warning).
+        self.rearm_pending = max_pending // 2
         self._background = BackgroundTasks()
         self._dropped = 0  # rows dropped in the burst going on; a burst logs one warning and one count
 
@@ -42,9 +41,9 @@ class RowWriter:
 
     def write(self, params: dict[str, Any], **context: Any) -> None:
         """`context` is what the failure's log line names (never the row's text)."""
-        if self.pending >= self._max_pending:
+        if self.pending >= self.max_pending:
             if self._dropped == 0:
-                log.warning(f"{self._name}_full", max_pending=self._max_pending)
+                log.warning(f"{self._name}_full", max_pending=self.max_pending)
             self._dropped += 1
             return
         self._report_dropped()
@@ -54,7 +53,7 @@ class RowWriter:
     def _report_dropped(self, *, force: bool = False) -> None:
         """Log how many rows the burst dropped, once, when the pending rows are below the re-arm level (or
         `force`, at the end of a drain: nothing more will be written)."""
-        if self._dropped and (force or self.pending < self._rearm_pending):
+        if self._dropped and (force or self.pending < self.rearm_pending):
             log.warning(f"{self._name}_dropped", dropped=self._dropped, pending=self.pending)
             self._dropped = 0
 

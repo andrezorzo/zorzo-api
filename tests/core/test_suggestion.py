@@ -75,3 +75,19 @@ async def test_a_failed_warm_up_is_retried_on_first_use() -> None:
         await suggestions.warm()
     embedder.fail = False
     assert await suggestions.closest("Which AWS services?", "en", far()) == "en-aws"
+
+
+async def test_concurrent_calls_embed_the_examples_once() -> None:
+    embedder = HashEmbedder()
+    suggestions = Suggestions(EXAMPLES, embedder)
+    batches: list[int] = []
+    real = embedder.embed
+
+    async def slow(texts: list[str]) -> list[list[float]]:
+        batches.append(len(texts))
+        await asyncio.sleep(0.01)  # the others reach `warm` while this embeds
+        return await real(texts)
+
+    embedder.embed = slow  # type: ignore[method-assign]
+    await asyncio.gather(*(suggestions.warm() for _ in range(5)))
+    assert batches == [len(EXAMPLES)]

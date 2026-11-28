@@ -44,8 +44,6 @@ from rag_api.settings import ApiSettings
 
 log = structlog.get_logger()
 
-DEFENSE_DRAIN_S = 5  # at shutdown, how long the pending `defense_events` rows are waited for
-
 
 async def _warm_rerankers(app: FastAPI) -> None:
     """Load rerank models at startup, so the first visitor after a deploy doesn't wait for it."""
@@ -75,7 +73,7 @@ async def _shut_down(app: FastAPI) -> None:
     closing = {
         "bot_check": app.state.gate.bot_check.close(),
         "gateway": app.state.gateway.close(),
-        "defenses": app.state.defenses.drain(DEFENSE_DRAIN_S),
+        "defenses": app.state.defenses.drain(SHUTDOWN_DRAIN_S),
         "traces": _close_traces(app),
     }
     results = await asyncio.gather(*closing.values(), return_exceptions=True)
@@ -140,11 +138,9 @@ def create_app(settings: ApiSettings) -> FastAPI:
     app.state.intents = load_intents(settings.domain, domain.document_kinds)
     check_domain(domain, app.state.intents)
     # The canary goes into the prompts once they are loaded and hashed (cross-task decision X5).
-    app.state.prompts = with_canary(
-        load_prompts(settings.domain, app.state.intents), settings.canary.get_secret_value()
-    )
-    app.state.canary = settings.canary.get_secret_value()
-    app.state.canary_watch = CanaryWatch(app.state.canary)
+    canary = settings.canary.get_secret_value()
+    app.state.prompts = with_canary(load_prompts(settings.domain, app.state.intents), canary)
+    app.state.canary_watch = CanaryWatch(canary)
     app.state.agent = build_graph()
     app.state.db = db
     app.state.limits = limits

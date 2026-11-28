@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from typing import Any, cast
 
 from rag_core.adapters.defense_log import PostgresDefenseLog
-from rag_core.adapters.row_writer import MAX_PENDING_ROWS, REARM_PENDING_ROWS, RowWriter
+from rag_core.adapters.row_writer import MAX_PENDING_ROWS, RowWriter
 from sqlalchemy import text
 from structlog.testing import capture_logs
 
@@ -75,7 +75,6 @@ async def test_the_defense_log_shares_the_cap_and_the_hysteresis() -> None:
         for _ in range(MAX_PENDING_ROWS + 3):
             defenses.record("L1", "rate_limit", "block", cast(Any, TRACE_ID))
     assert [e["event"] for e in logs] == ["defense_log_full"]
-    assert REARM_PENDING_ROWS < MAX_PENDING_ROWS
     db.release.set()
     with capture_logs() as after:
         await defenses.drain(DRAIN_TIMEOUT_S)

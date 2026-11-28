@@ -16,13 +16,17 @@ VALUES (:level, 'app', :component, :event, CAST(:fields AS jsonb))
 
 class PostgresEventLog:
     def __init__(self, db: Database) -> None:
-        self.db = db
         self._writer = RowWriter(db, INSERT, "event_log")
 
     @property
     def pending(self) -> int:
         """Rows waiting to be inserted."""
         return self._writer.pending
+
+    @property
+    def rearm_pending(self) -> int:
+        """A burst of dropped rows ends when the pending rows fall below this."""
+        return self._writer.rearm_pending
 
     def write(self, level: str, component: str, event: str, fields: dict[str, Any]) -> None:
         params = {"level": level, "component": component, "event": event, "fields": json.dumps(fields)}
