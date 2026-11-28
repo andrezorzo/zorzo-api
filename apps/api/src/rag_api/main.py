@@ -70,8 +70,8 @@ async def _close_traces(app: FastAPI) -> None:
 
 async def _shut_down(app: FastAPI) -> None:
     """The independent closes, at once: the bot check's client, the gateway's background work (budget
-    settles, alerts), the pending defense rows and the traces. Each failure is logged, never stops the rest; the whole takes about
-    `SHUTDOWN_DRAIN_S`, within Docker's 10 s."""
+    settles, alerts), the pending defense rows and the traces. Each failure is logged, never stops the
+    rest; the whole takes about `SHUTDOWN_DRAIN_S`, within Docker's 10 s."""
     closing = {
         "bot_check": app.state.gate.bot_check.close(),
         "gateway": app.state.gateway.close(),
@@ -145,7 +145,6 @@ def create_app(settings: ApiSettings) -> FastAPI:
     )
     app.state.canary = settings.canary.get_secret_value()
     app.state.canary_watch = CanaryWatch(app.state.canary)
-    # TODO(T10 rebase): hand `app.state.canary` to the shared redactor, so a stored trace never holds it.
     app.state.agent = build_graph()
     app.state.db = db
     app.state.limits = limits

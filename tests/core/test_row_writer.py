@@ -1,17 +1,19 @@
-"""F01-T08: the background row writer never piles up without end (a flood of refusals)."""
+"""The background row writer is shared by the event log and the defense log: one cap, one re-arm level, one
+count of the dropped rows (F01-T08, F01-T10)."""
 
 import asyncio
-import time
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, cast
 
-import pytest
-from rag_core.adapters import row_writer
-from rag_core.adapters.row_writer import RowWriter
+from rag_core.adapters.defense_log import PostgresDefenseLog
+from rag_core.adapters.row_writer import MAX_PENDING_ROWS, REARM_PENDING_ROWS, RowWriter
 from sqlalchemy import text
 from structlog.testing import capture_logs
 
 INSERT = text("INSERT INTO t VALUES (:n)")
+SMALL_CAP = 4
+DRAIN_TIMEOUT_S = 5
+TRACE_ID = "11111111-1111-1111-1111-111111111111"
 
 
 class SlowDb:
@@ -33,61 +35,48 @@ class SlowDb:
         yield Conn()
 
 
-async def test_rows_beyond_the_cap_are_dropped_with_one_throttled_warning(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(row_writer, "MAX_PENDING_ROWS", 3)
+async def test_rows_beyond_the_cap_are_dropped_and_counted_once_the_burst_ends() -> None:
     db = SlowDb()
-    writer = RowWriter(db, INSERT, "test_row_failed")  # type: ignore[arg-type]
+    writer = RowWriter(cast(Any, db), INSERT, "test_row", max_pending=SMALL_CAP)
     with capture_logs() as logs:
-        for n in range(10):
+        for n in range(SMALL_CAP + 6):
             writer.write({"n": n})
-    dropped = [e for e in logs if e["event"] == "rows_dropped"]
-    assert len(dropped) == 1 and dropped[0]["dropped"] == 1  # the first drop warns at once; the rest wait
+    assert [e["event"] for e in logs] == ["test_row_full"]  # one warning for the whole burst
     db.release.set()
     with capture_logs() as after:
-        await writer.drain()
-    # the tail of the burst is reported in full once it has drained
-    assert [e["dropped"] for e in after if e["event"] == "rows_dropped"] == [6]
-    assert db.rows == [0, 1, 2]  # the rows that fit were written
+        await writer.drain(DRAIN_TIMEOUT_S)
+    assert [e["dropped"] for e in after if e["event"] == "test_row_dropped"] == [6]
+    assert db.rows == list(range(SMALL_CAP))  # the rows that fit were written
     writer.write({"n": 99})  # room again
-    await writer.drain()
-    assert db.rows == [0, 1, 2, 99]
+    await writer.drain(DRAIN_TIMEOUT_S)
+    assert db.rows[-1] == 99
 
 
-async def test_the_warning_comes_again_after_its_interval_with_the_dropped_count(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(row_writer, "MAX_PENDING_ROWS", 1)
-    clock = [1000.0]
-    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
-    db = SlowDb()
-    writer = RowWriter(db, INSERT, "test_row_failed")  # type: ignore[arg-type]
-    writer.write({"n": 0})
+async def test_a_failed_insert_is_logged_with_the_context_and_never_raised() -> None:
+    class Broken:
+        @asynccontextmanager
+        async def short_transaction(self) -> Any:
+            raise RuntimeError("secret detail")
+            yield
+
+    writer = RowWriter(cast(Any, Broken()), INSERT, "test_row")
     with capture_logs() as logs:
-        for _ in range(4):
-            writer.write({"n": 1})  # the first drop warns, three more wait
-        clock[0] += row_writer.DROP_WARNING_EVERY_S
-        writer.write({"n": 1})
-    counts = [e["dropped"] for e in logs if e["event"] == "rows_dropped"]
-    assert counts == [1, 4]
+        writer.write({"n": 1}, layer="L1")
+        await writer.drain(DRAIN_TIMEOUT_S)
+    failed = [e for e in logs if e["event"] == "test_row_failed"]
+    assert failed and failed[0]["error"] == "RuntimeError" and failed[0]["layer"] == "L1"
+    assert "secret detail" not in str(logs)
+
+
+async def test_the_defense_log_shares_the_cap_and_the_hysteresis() -> None:
+    db = SlowDb()
+    defenses = PostgresDefenseLog(cast(Any, db))
+    with capture_logs() as logs:
+        for _ in range(MAX_PENDING_ROWS + 3):
+            defenses.record("L1", "rate_limit", "block", cast(Any, TRACE_ID))
+    assert [e["event"] for e in logs] == ["defense_log_full"]
+    assert REARM_PENDING_ROWS < MAX_PENDING_ROWS
     db.release.set()
-    await writer.drain()
-
-
-async def test_the_throttle_holds_across_bursts(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(row_writer, "MAX_PENDING_ROWS", 1)
-    monkeypatch.setattr(time, "monotonic", lambda: 1000.0)
-    db = SlowDb()
-    writer = RowWriter(db, INSERT, "test_row_failed")  # type: ignore[arg-type]
-    with capture_logs() as logs:
-        for _ in range(3):  # a burst, drained, then another within the interval
-            writer.write({"n": 0})
-            writer.write({"n": 1})
-            writer.write({"n": 2})
-            db.release.set()
-            await writer.drain()
-            db.release.clear()
-    # the first drop warned at once; later bursts only report their tail when they drain, one per burst
-    counts = [e["dropped"] for e in logs if e["event"] == "rows_dropped"]
-    assert counts == [1, 1, 2, 2]
+    with capture_logs() as after:
+        await defenses.drain(DRAIN_TIMEOUT_S)
+    assert [e["dropped"] for e in after if e["event"] == "defense_log_dropped"] == [3]

@@ -89,7 +89,7 @@ class ApiSettings(AppSettings):
 
     def secret_values(self) -> list[str]:
         """Every secret value the app holds, for the trace redactor. A setting that adds a secret (such as
-        the canary of F01-T08) adds it here."""
+        the canary) adds it here."""
         secrets = [
             self.turnstile_secret,
             self.salt_seed,

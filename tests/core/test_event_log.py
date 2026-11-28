@@ -4,7 +4,8 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
-from rag_core.adapters.event_log import MAX_PENDING_ROWS, REARM_PENDING_ROWS, PostgresEventLog
+from rag_core.adapters.event_log import PostgresEventLog
+from rag_core.adapters.row_writer import MAX_PENDING_ROWS, REARM_PENDING_ROWS
 from structlog.testing import capture_logs
 
 SETTLE_TURNS = 5  # turns of the event loop for a task to end

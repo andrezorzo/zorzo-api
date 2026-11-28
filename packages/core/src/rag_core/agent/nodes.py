@@ -15,13 +15,13 @@ from langgraph.runtime import Runtime
 from pydantic import BaseModel, ConfigDict
 
 from rag_core.agent.context import AgentContext, answer_language
-from rag_core.agent.state import AgentState, Block
+from rag_core.agent.state import AgentState
 from rag_core.events import BlockCategory, Blocked, Claim, Guard, GuardLayer, Token
 from rag_core.services import retrieval
 from rag_core.services.gateway import Completion, ModelsUnavailableError
 from rag_core.services.guard import CanaryScan, check_input
 from rag_core.services.prompts import fit_passages, messages, passages_text
-from rag_core.services.route import RouteResult, route
+from rag_core.services.route import route
 from rag_core.services.stream import emit_degraded, emit_retrieval, stage
 from rag_core.services.verification import (
     AnswerContract,

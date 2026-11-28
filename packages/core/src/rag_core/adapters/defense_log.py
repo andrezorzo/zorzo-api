@@ -16,7 +16,7 @@ VALUES (:trace_id, :layer, :category, :action)
 class PostgresDefenseLog:
     def __init__(self, db: Database) -> None:
         self.db = db
-        self._writer = RowWriter(db, INSERT, "defense_log_failed")
+        self._writer = RowWriter(db, INSERT, "defense_log")
 
     def record(self, layer: str, category: str, action: str, trace_id: uuid.UUID) -> None:
         params = {"trace_id": trace_id, "layer": layer, "category": category, "action": action}
