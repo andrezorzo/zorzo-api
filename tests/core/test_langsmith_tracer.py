@@ -147,6 +147,14 @@ def test_a_stuck_post_gets_its_wait_and_the_client_its_floor_within_the_timeout(
     spy = _CloseSpy(tracer._client, [])
     tracer._client = spy  # type: ignore[assignment]
     facts = TraceFacts(uuid4(), "q", None, None, None, 1, "v", timedelta(days=1))
+    waits: list[float] = []
+    wait_for_posts = tracer._shutdown.close
+
+    def recording_wait(timeout: float) -> None:
+        waits.append(timeout)
+        wait_for_posts(timeout)
+
+    monkeypatch.setattr(tracer._shutdown, "close", recording_wait)
     finishing = threading.Thread(target=sink.finish, args=(facts,))
     finishing.start()
     assert in_post.wait(TIMEOUT_S)
@@ -156,8 +164,18 @@ def test_a_stuck_post_gets_its_wait_and_the_client_its_floor_within_the_timeout(
     release.set()
     finishing.join(TIMEOUT_S)
     assert spy.closed_at - started >= INFLIGHT_WAIT_MIN_S  # the post got its wait
-    # The split, without the wall clock: the wait used all of its share, so the client gets exactly its floor,
-    # out of the timeout and not on top of it.
+    # The split, without the wall clock: the client's floor comes out of the timeout, not on top of it, and
+    # the wait used all of its share, so the client gets exactly its floor.
+    assert waits == [CLOSE_MIN_S - CLIENT_CLOSE_FLOOR_S]
     assert spy.timeout == CLIENT_CLOSE_FLOOR_S
     [timed_out] = [e for e in logs if e["event"] == "langsmith_close_timed_out"]
     assert timed_out["active"] == 1 and timed_out["waited_s"] >= INFLIGHT_WAIT_MIN_S
+
+
+def test_with_no_post_in_flight_the_client_gets_the_rest_of_the_timeout() -> None:
+    langsmith = FakeLangSmith()
+    tracer = LangSmithTracer(KEY, None, langsmith.serve())
+    spy = _CloseSpy(tracer._client, [])
+    tracer._client = spy  # type: ignore[assignment]
+    tracer.close(TIMEOUT_S)
+    assert CLIENT_CLOSE_FLOOR_S < spy.timeout <= TIMEOUT_S
