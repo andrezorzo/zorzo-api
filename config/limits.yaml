@@ -39,3 +39,5 @@ history_max_tokens: 800  # everything `route` reads of the conversation
 session_ttl: 1800  # seconds (30 min) idle after which a conversation starts over
 guard_threshold: 0.5  # the L2 classifier's malicious probability at which a question is blocked (calibrated at M3)
 # relevance_floor and assess_skip_score: off until calibrated at M3 (LLD "6.3 Agent run")
+cache_similarity: 0.95  # cosine; a stored answer is reused at or above it (LLD "6.9 Answer cache")
+cache_ttl: 5184000  # seconds (60 days); an entry's expires_at is its write time plus this

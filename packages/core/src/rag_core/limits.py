@@ -53,6 +53,9 @@ class Limits(BaseModel):
     history_summary_tokens: int = Field(ge=0)
     history_max_tokens: int = Field(ge=0)
     session_ttl: float = Field(gt=0)
+    # Answer cache (LLD "6.9 Answer cache"): reused at this cosine similarity or above, for this long.
+    cache_similarity: float = Field(gt=0, le=1)
+    cache_ttl: float = Field(gt=0)
     # Guard (LLD "Security"): the injection classifier blocks at this score or above; calibrated at M3.
     guard_threshold: float = Field(gt=0, le=1)
     # Off until they are calibrated on the eval set at M3: abstain only on no passage, always assess.

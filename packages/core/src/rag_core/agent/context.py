@@ -22,6 +22,7 @@ from rag_core.ports import (
     TraceSink,
     VectorStore,
 )
+from rag_core.services.answer_cache import AnswerCacheService
 from rag_core.services.gateway import Completion, ModelGateway, ModelsUnavailableError, RequestSpend
 from rag_core.services.guard import CanaryWatch
 from rag_core.services.redact import Redactor
@@ -52,6 +53,7 @@ class AgentContext:
     classifier: InjectionClassifier  # guard layer L2
     defenses: DefenseLog  # where a block is counted
     suggestions: Suggestions
+    cache: AnswerCacheService
     canary: CanaryWatch  # the marker in every system prompt: seeing it in an answer is a leak (`L5`)
     trace_id: UUID  # the request's, for the defense row of a block
     # What a remembered turn passes before it is stored: the stored trace's redactor, with the domain's

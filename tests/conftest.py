@@ -186,6 +186,24 @@ def corpus_database(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     drop_database(url)
 
 
+@pytest.fixture(autouse=True)
+def _empty_answer_cache(request: pytest.FixtureRequest) -> Iterator[None]:
+    """The fixture corpus database is shared by the session and its tests reuse the same questions, so an
+    answer one test stored would turn the next one's answer into a hit (F01-T09)."""
+    if "corpus_database" not in request.fixturenames:
+        yield
+        return
+    url = request.getfixturevalue("corpus_database")
+    reset_tables(url, "answer_cache")
+    yield
+    reset_tables(url, "answer_cache")
+
+
+def wait_for_cache_writes(client: Any) -> None:
+    """Returns once the answer cache's background writes of the app under `client` have ended."""
+    client.portal.call(client.app.state.answer_cache.drain)
+
+
 def api_settings(url: str, domain: str = "zorzo", **overrides: object) -> ApiSettings:
     """Settings for an API under test, pointing at the given database; fakes unless overridden."""
     values: dict[str, object] = {

@@ -57,6 +57,7 @@ async def test_the_answer_calls_usage_is_recorded_when_the_canary_completes_in_t
         classifier=cast(Any, None),
         defenses=cast(Any, None),
         suggestions=cast(Any, None),
+        cache=cast(Any, None),
         canary=CanaryWatch(CANARY),
         trace_id=uuid4(),
         redactor=Redactor(),

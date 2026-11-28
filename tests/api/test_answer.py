@@ -131,7 +131,7 @@ def test_verification_out_of_time_abstains_after_the_draft(
 def test_a_covered_question_runs_the_bounded_steps_in_order(client: TestClient, fake: FakeOpenRouter) -> None:
     script(fake)
     stream = ask(client)
-    assert stages(stream) == ["guard", "route", "retrieve", "rerank", "assess", "answer", "verify"]
+    assert stages(stream) == ["guard", "route", "cache", "retrieve", "rerank", "assess", "answer", "verify"]
     starts = [(e.data["name"], e.data["status"]) for e in stream.only("stage")]
     assert all((name, "end") in starts for name in stages(stream))
 
@@ -141,8 +141,8 @@ def test_weak_evidence_gets_one_reformulate(client: TestClient, fake: FakeOpenRo
     fake.script_schema("ReformulateResult", Reply(json.dumps({"query": "AWS Lambda Kinesis serverless"})))
     stream = ask(client)
     assert stages(stream) == [
-        "guard", "route", "retrieve", "rerank", "assess", "reformulate", "retrieve", "rerank", "answer",
-        "verify",
+        "guard", "route", "cache", "retrieve", "rerank", "assess", "reformulate", "retrieve", "rerank",
+        "answer", "verify",
     ]  # fmt: skip
     searched = [r.body for r in fake.requests if r.path == "/rerank"]
     assert searched[-1]["query"] == "AWS Lambda Kinesis serverless"

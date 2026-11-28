@@ -15,8 +15,9 @@ from typing import Any, Literal
 from langchain_core.utils.json import parse_partial_json
 from pydantic import BaseModel, ConfigDict
 
+from rag_core.events import Claim
 from rag_core.ports import SearchHit
-from rag_core.services.guard import links_allowed
+from rag_core.services.guard import CanaryWatch, links_allowed
 
 Verdict = Literal["supported", "partial", "unsupported"]
 CheckedVerdict = Literal[Verdict, "gap"]  # `gap`: the sentence naming what the passages don't cover
@@ -196,3 +197,13 @@ def enforce_links(
 def coherent(claims: Sequence[CheckedClaim]) -> bool:
     """Something is left to publish: at least one claim `supported` or `partial`."""
     return any(c.verdict in ("supported", "partial") for c in claims)
+
+
+def publishable(claims: Sequence[Claim], link_hosts: Sequence[str], canary: CanaryWatch) -> bool:
+    """Whether stored claims may be sent again: the checks `publish_claims` applies to a fresh answer (every
+    text within the link allowlist, no canary in the texts joined as the draft's are), refused as a whole.
+    The allowlist or the canary may have changed since the row was written."""
+    texts = [c.text for c in claims]
+    return all(links_allowed(t, link_hosts) for t in texts) and not canary.found(
+        " ".join(t for t in texts if t)
+    )

@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, Self
 from urllib.parse import urlparse
@@ -15,6 +16,7 @@ from urllib.parse import urlparse
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from rag_core.domain import Intent, Prompts
 from rag_core.limits import Limits
 
 StageName = Literal["route", "rerank", "answer", "judge"]
@@ -137,8 +139,19 @@ def load_models(path: Path) -> ModelsConfig:
     return ModelsConfig.model_validate(yaml.safe_load(path.read_text()))
 
 
-def config_version(models: ModelsConfig, limits: Limits) -> str:
-    """SHA-256 of the canonical JSON of the parsed config: comments, key order and formatting don't count."""
-    content = {"models": models.model_dump(mode="json"), "limits": limits.model_dump(mode="json")}
+def config_version(
+    models: ModelsConfig, limits: Limits, prompts: Prompts, intents: Mapping[str, Intent]
+) -> str:
+    """SHA-256 of the canonical JSON of the parsed config: comments, key order and formatting don't count.
+
+    It covers the models file, the whole limits file, the prompts as the domain package loads them (the
+    `route` prompt as rendered with the intents) and the intents. Pass the prompts before the canary line is
+    added: the canary is a secret and never enters the version (cross-task decision X5)."""
+    content = {
+        "models": models.model_dump(mode="json"),
+        "limits": limits.model_dump(mode="json"),
+        "prompts": prompts.model_dump(mode="json"),
+        "intents": {key: intent.model_dump(mode="json") for key, intent in intents.items()},
+    }
     canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode()).hexdigest()

@@ -7,7 +7,8 @@ past `HISTORY_SUMMARY_TOKENS`. `route` reads them as JSON within `HISTORY_MAX_TO
 """
 
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
 
@@ -30,6 +31,24 @@ class Conversation(BaseModel):
     turns: list[Turn] = []  # oldest first, at most `HISTORY_TURNS`
     earlier: list[str] = []  # the standalone questions of older turns, oldest first
     updated_at: float = 0.0  # when the last turn began, in seconds since the epoch (UTC)
+
+
+# The verdicts whose text a remembered turn keeps: what the visitor was shown as checked.
+REMEMBERED_VERDICTS = frozenset({"supported", "partial"})
+
+
+class _Shown(Protocol):
+    @property
+    def text(self) -> str: ...
+
+    @property
+    def verdict(self) -> str: ...
+
+
+def remembered_text(claims: Sequence[_Shown], redact: Callable[[str], str]) -> list[str]:
+    """The text of the claims a turn remembers, redacted: one rule for a fresh answer, a cache hit and a
+    degraded hit."""
+    return [redact(c.text) for c in claims if c.verdict in REMEMBERED_VERDICTS]
 
 
 def _tokens(texts: Sequence[str]) -> int:

@@ -162,7 +162,7 @@ connection; the domain is chosen by `DOMAIN` and loaded by the apps, never by `c
 | DataPublisher | `publish` | Brain and corpus data for a version | Manifest | S3 adapter writes `data/<hash>/` and invalidates only the manifest; local adapter writes a folder the local Caddy serves |
 | EvalStore (planned) | `record` / `link` | A run with its results; a candidate and a run | Run id | `record` writes the run and all its results in one transaction; `link` sets the candidate's `eval_run_id` only for a passing run of that version (section 6.12) |
 
-Core modules: Retrieval, Ingest pipeline, Model gateway, Gate, Agent graph, Verification and Guard **existing**;
+Core modules: Retrieval, Ingest pipeline, Model gateway, Gate, Agent graph, Verification, Guard and Answer cache **existing**;
 Telemetry and Eval harness **planned**. Responsibilities: HLD section "Architecture" (core and domain). Tools are
 domain pieces, not ports (section 6.5).
 
@@ -648,9 +648,11 @@ States of the day's budget row; the day is UTC, so every visitor sees the same "
   longer validates (logged as `conversation_unreadable`), so the session starts over instead of failing on
   every question. A turn is remembered once `route`
   answers (its question) and when its claims are published (their text), both through the shared redactor
-  of the stored trace; a follow-up with no history, a question `route` didn't answer, a question that is
-  search-only from the start and a blocked question (the guard ends the run before `route`) are not
-  remembered. A run cut by the deadline keeps what it had written; two runs of one session at once keep the
+  of the stored trace; a follow-up with no history, a question `route` didn't answer and a blocked question (the guard ends the run before `route`) are not
+  remembered. A question in a degraded mode (section 6.9) has no `route`: after its ending is sent, a turn is
+  recorded with the redacted raw question and, on a cache hit, the text of its claims, best effort (a failed
+  or slow write is logged with the error type and changes nothing the visitor got); a conversation that
+  couldn't be read is left as it is. A run cut by the deadline keeps what it had written; two runs of one session at once keep the
   last one's write.
 - **Edge questions:** a follow-up with no history is an abstention with a fixed message asking what the
   visitor means (`done.notice: no_context`), with no retrieval and no answer call; a question in a language
@@ -839,12 +841,18 @@ gateway walks the chain.
 
 - **Lookup:** after `guard` and `route` (it uses the standalone question and its language), before `retrieve`,
   as the `cache` step, which sends its `stage` on every lookup, hit or miss. The key is the standalone
-  question's embedding by the pinned embedder; a miss keeps that vector for the row it may store. A question
+  question's embedding by the pinned embedder; a miss keeps that vector for the row it may store, and
+  retrieval and the suggestion reuse it. A question
   whose language isn't one of the domain's is neither looked up nor stored, so its answer keeps the note of
   section 6.3 "Edge questions". Nor is a standalone question in which the ingest's PII pass (section 6.1,
   with the domain's `pii_allowlist`) finds personal data: every stored question then has nothing to scrub.
 - **Hit:** similarity ≥ `CACHE_SIMILARITY` (cosine), same language, same `corpus_version` and
   `model_config_version`, not expired; the nearest such entry is served, and its `hits` count goes up by one.
+- **A hit passes the publish checks:** before anything is sent, the stored claims are held to the link
+  allowlist and the canary check of section 6.4, as a fresh answer is (the allowlist or the canary may have
+  changed since the row was written). A row refused by them, or that no longer reads as the stream's claims,
+  is a miss (normal generation, or search-only in degraded mode) and is deleted, best effort, so it can't
+  shadow the row the next answered run stores; it doesn't count as a hit.
 - **A hit streams** the stored claims as they were first sent (verdicts and the `gap` sentence included),
   then `usage` with what the request spent (`route` only) and `done {outcome: answered, cached: true}`, which
   carries the contact options and a null `suggestion`, with no `token`, no `retrieval` and no `answer` or
@@ -853,8 +861,7 @@ gateway walks the chain.
   abstentions, declines, blocks, contact replies, degraded answers, a hit, or a run cut after its claims were
   sent. The row is
   written in the background after `done`, so it never holds the stream. A lookup or a write that fails is a
-  miss, logged at `warning`, never an error for the visitor; a stored answer that no longer reads as the
-  stream's claims is a miss too.
+  miss, logged at `warning`, never an error for the visitor.
 - **Expiry:** `expires_at` is the write time plus `CACHE_TTL`; lookups ignore expired rows, and the retention
   job deletes them (section 6.11). A new corpus or model version invalidates entries by not matching; since
   the whole limits file is part of `model_config_version` (section 3 "Configuration"), any change to it
@@ -863,7 +870,9 @@ gateway walks the chain.
   idle past `SESSION_TTL` starts over, and a state that can't be read counts as a follow-up) is looked up with
   the raw question and a local language detector (section 1, language detection), without `route`; a language
   that isn't one of the domain's, or personal data in the question, is a miss. A hit streams as above with
-  cost 0 and no `degraded` event; a miss goes on to search-only. Follow-ups go straight to search-only.
+  cost 0 and no `degraded` event; a miss goes on to search-only, reusing the lookup's
+  vector. Follow-ups go straight to search-only. Either way the run records its turn (section 6.3), so the next
+  question of the session is a follow-up.
   Serving a hit without the model-based guard is safe: the stored answer was verified and the question can't
   change it.
 
@@ -1014,6 +1023,7 @@ Behavior only; rendering and the 3D brain are in `zorzo-site`'s LLD.
   | `degraded` | Banner plus up to `DEGRADED_MAX_PASSAGES` passages, each with its source's title and link; with none, "no matching sources for this question", the example questions and the contact options |
   | `done {outcome: abstained}` | The draft is replaced by "not in my sources", with the passages found and the contact link |
   | `done {outcome: declined}` | The decline message |
+  | `done {cached: true}` | The stored claims, drawn as any answer, labeled as reused, and "reused a verified answer to the same question" in the steps list; the stream has no `retrieval`, so a citation takes its passage and title from `corpus.json` |
   | `done {notice: no_context}` | Instead of "not in my sources": "I don't have earlier context in this conversation — what are you asking about?", with the example questions |
   | `done {notice: other_language}` | One line above the answer saying the site answers in English and Portuguese |
   | `done` with `suggestion` | The suggested example question, which asks it when clicked, like an example question on the first screen |

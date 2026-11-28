@@ -18,7 +18,7 @@ from rag_core.agent.context import AgentContext, answer_language
 from rag_core.agent.state import AgentState
 from rag_core.events import BlockCategory, Blocked, Claim, Guard, GuardLayer, Token
 from rag_core.services import retrieval
-from rag_core.services.conversation import Conversation, begin_turn, live, with_claims
+from rag_core.services.conversation import Conversation, begin_turn, live, remembered_text, with_claims
 from rag_core.services.gateway import Completion, ModelsUnavailableError
 from rag_core.services.guard import CanaryScan, check_input
 from rag_core.services.prompts import (
@@ -41,6 +41,7 @@ from rag_core.services.verification import (
     draft_text,
     enforce_links,
     judge_input,
+    publishable,
     read_answer,
 )
 
@@ -59,10 +60,6 @@ LEAKED: Literal["leaked"] = "leaked"  # what `_answer_contract` returns for a dr
 
 class _CanaryLeakError(Exception):
     """The draft holds the canary: the answer is stopped and the run is blocked (`L5`)."""
-
-
-# The verdicts whose text a remembered turn keeps: what the visitor was shown as checked.
-REMEMBERED_VERDICTS = frozenset({"supported", "partial"})
 
 
 class AssessResult(BaseModel):
@@ -156,6 +153,35 @@ async def route_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any]
     if action == "contact":  # the reply is the contact options `done` carries
         return {**update, "outcome": "answered"}
     return {**update, "query": result.standalone_question}
+
+
+async def cache_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any]:
+    """Looks the standalone question up in the answer cache (LLD "6.9 Answer cache"). A hit replays the
+    stored claims and ends the run as answered; a miss keeps the question's vector for the row the run may
+    store. Skipped, with no `stage`, for a language the domain doesn't declare or a question with personal
+    data. A failing lookup is a miss."""
+    ctx = runtime.context
+    route = state["route"]
+    if ctx.cache.skips(route.standalone_question, route.language):
+        return {}
+    with stage(ctx.sink, "cache"):
+        found = await ctx.cache.lookup(
+            route.standalone_question,
+            route.language,
+            ctx.corpus_version,
+            ctx.before_answer,
+            lambda claims: publishable(claims, ctx.link_hosts, ctx.canary),
+        )
+    if found.claims is None:
+        if found.vector is None:
+            return {}
+        ctx.vectors[route.standalone_question] = found.vector  # retrieval and the suggestion reuse it
+        return {"query_vector": found.vector}
+    # Not settled here: `run_agent` sends the claims (`end_with_hit`), so a cut before it is an honest
+    # `error`. Their text is remembered as the turn's, as a fresh answer's is.
+    shown = remembered_text(found.claims, ctx.redactor.text)
+    remembered = with_claims(_conversation(state), shown).model_dump()
+    return {"cached": True, "outcome": "answered", "hit_claims": found.claims, "conversation": remembered}
 
 
 async def retrieve_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any]:
@@ -316,7 +342,7 @@ def publish_claims(
         if ctx.canary.found(" ".join(c.text for c in checked if c.text)):
             return _block(ctx, "L5", "prompt_leak", LEAK_MESSAGE)
         _send_claims(checked, ctx)
-        shown = [ctx.redactor.text(c.text) for c in checked if c.verdict in REMEMBERED_VERDICTS]
+        shown = remembered_text(checked, ctx.redactor.text)
         remembered = with_claims(conversation, shown).model_dump()
         return {"claims": checked, "outcome": "answered", "conversation": remembered}
     if repairs < ctx.limits.max_repair:

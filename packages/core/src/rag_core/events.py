@@ -188,7 +188,8 @@ ORDERING = (
     "are followed only by `done` (an output check's `blocked` may come after `token`s); `degraded` is "
     "followed only by its `retrieval` hits, then `done`; every "
     "`token` comes before the first `claim`; a cached answer sends `stage`, the cached `claim` events, "
-    "`usage` with cost 0 and `done {cached: true}`, with no `token`. v1 freezes at launch."
+    "`usage` and `done {cached: true}`, with no `token` and no `model` event besides `route`'s. "
+    "v1 freezes at launch."
 )
 
 

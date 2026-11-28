@@ -9,10 +9,16 @@ from tests.contract.sse import Event, check_ordering
 DONE: dict[str, Any] = {"trace_id": "t", "outcome": "answered", "cached": False, "suggestion": None}
 
 
-def _events(*names: str, done: dict[str, Any] | None = None, cost: float = 0.0) -> list[Event]:
+def _events(
+    *names: str, done: dict[str, Any] | None = None, cost: float = 0.0, models: tuple[str, ...] = ()
+) -> list[Event]:
+    """`models` names the stage of each `model` event, in the order the `model` entries appear in `names`."""
+    stages = iter(models)
     out = []
     for name in names:
-        if name == "done":
+        if name == "model":
+            out.append(Event("model", {"stage": next(stages)}))
+        elif name == "done":
             out.append(Event("done", done or DONE))
         elif name == "usage":
             out.append(Event("usage", {"cost_usd": cost}))
@@ -59,10 +65,15 @@ def test_rejects_a_broken_rule(names: tuple[str, ...], rule: str) -> None:
         check_ordering(_events(*names))
 
 
-def test_rejects_a_cached_answer_with_tokens_or_cost() -> None:
+def test_rejects_a_cached_answer_with_tokens_or_answer_models() -> None:
     cached = {**DONE, "cached": True}
     with pytest.raises(AssertionError, match="no token"):
         check_ordering(_events("stage", "token", "claim", "usage", "done", done=cached))
-    with pytest.raises(AssertionError, match="costs 0"):
-        check_ordering(_events("stage", "claim", "usage", "done", done=cached, cost=0.001))
-    check_ordering(_events("stage", "claim", "usage", "done", done=cached))
+    for stage in ("answer", "verify"):
+        with pytest.raises(AssertionError, match="besides route"):
+            check_ordering(
+                _events("model", "model", "claim", "usage", "done", done=cached, models=("route", stage))
+            )
+    check_ordering(_events("stage", "model", "claim", "usage", "done", done=cached, models=("route",)))
+    # `route` on the paid entry: the request has a cost, and the answer is still a cached one.
+    check_ordering(_events("model", "claim", "usage", "done", done=cached, cost=0.001, models=("route",)))

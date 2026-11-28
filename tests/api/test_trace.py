@@ -27,7 +27,15 @@ from structlog.testing import capture_logs
 
 from tests.api.test_answer import ANSWER_A, ANSWER_B, CLAIMS, answer, routed, script, stages, verdicts
 from tests.api.test_ask import QUESTION, ask
-from tests.conftest import TEST_CANARY, api_settings, build_app, discard_models, reset_tables, seed_budget
+from tests.conftest import (
+    TEST_CANARY,
+    api_settings,
+    build_app,
+    discard_models,
+    reset_tables,
+    seed_budget,
+    wait_for_cache_writes,
+)
 from tests.contract.sse import Stream
 from tests.fakes.langsmith import FakeLangSmith
 from tests.fakes.openrouter import FakeOpenRouter, Reply
@@ -93,7 +101,12 @@ def test_the_stored_trace_comes_from_the_streams_events(
             assert (span["model"], span["provider"]) == (event["model"], event["provider"])
             assert (span["tokens_in"], span["tokens_out"]) == (event["tokens_in"], event["tokens_out"])
             assert span["cost_usd"] == Decimal(str(event["cost_usd"]))
-    assert {s["step"] for s in trace["spans"] if s["model"] is None} == {"guard", "retrieve", "rerank"}
+    assert {s["step"] for s in trace["spans"] if s["model"] is None} == {
+        "guard",
+        "cache",
+        "retrieve",
+        "rerank",
+    }
 
     spent = sum(e.data["cost_usd"] for e in stream.only("model"))
     assert spent == pytest.approx(PAID_COST) == stream.only("usage")[0].data["cost_usd"]
@@ -273,6 +286,8 @@ def test_a_fallback_is_recorded_in_the_model_event_and_the_span(
             fake.script_schema("RouteResult", "rate_limited")
             script(fake)
             ask(client)
+            wait_for_cache_writes(client)
+            reset_tables(corpus_database, "answer_cache")  # the same question must not hit
         else:
             fake.script_schema("RouteResult", first)
         script(fake)

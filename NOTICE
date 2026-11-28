@@ -4,6 +4,11 @@ This product includes Llama Prompt Guard 2 (86M), exported to ONNX by gravitee-i
 (https://huggingface.co/gravitee-io/Llama-Prompt-Guard-2-86M-onnx, revision
 45a05fbd5337a864edc608f994911f009c37ca57), used as the local injection classifier (guard layer L2).
 
+This product includes the fastText language identification model lid.176.ftz (176 languages), from the
+fastText project (https://fasttext.cc/docs/en/language-identification.html), shipped unmodified inside the
+fast-langdetect package and licensed under CC BY-SA 3.0 (https://creativecommons.org/licenses/by-sa/3.0/),
+used as the local language detector of the answer cache in degraded mode.
+
 Built with Llama.
 
 Llama 4 is licensed under the Llama 4 Community License, Copyright © Meta Platforms, Inc. All Rights Reserved.

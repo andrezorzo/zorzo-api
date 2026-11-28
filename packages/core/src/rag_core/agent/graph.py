@@ -1,11 +1,11 @@
-"""The bounded graph (ADR 0006, LLD "6.3 Agent run"): guard → route → retrieve → rerank → assess → optional
-reformulate → answer → verify → optional repair, with abstain, decline and search-only exits.
+"""The bounded graph (ADR 0006, LLD "6.3 Agent run"): guard → route → cache → retrieve → rerank → assess →
+optional reformulate → answer → verify → optional repair, with abstain, decline and search-only exits.
 
 `run_agent` emits the whole stream after the gate, ending with `done`; it never raises.
 """
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -19,7 +19,10 @@ from langgraph.graph.state import CompiledStateGraph
 from rag_core.agent import nodes
 from rag_core.agent.context import AgentContext, answer_language
 from rag_core.agent.state import AgentState
-from rag_core.events import NO_USAGE_OUTCOMES, Done, Outcome, Usage
+from rag_core.events import NO_USAGE_OUTCOMES, Claim, Done, Outcome, Usage
+from rag_core.limits import Limits
+from rag_core.services.answer_cache import end_with_hit
+from rag_core.services.conversation import Conversation, begin_turn, live, remembered_text, with_claims
 from rag_core.services.stream import emit_degraded, end_with_error
 from rag_core.units import MS_PER_S
 
@@ -34,6 +37,7 @@ class RunResult:
     public_ok: bool | None  # None when `route` didn't answer
     intent: str | None  # what `route` decided, for the stored trace; None when it didn't answer
     language: str | None
+    cached: bool = False  # the answer came from the answer cache
 
 
 def _edge(next_step: Callable[[AgentState], str]) -> Callable[[AgentState], str]:
@@ -66,6 +70,7 @@ def build_graph(checkpointer: BaseCheckpointSaver[Any] | None = None) -> Agent:
     graph = StateGraph(AgentState, context_schema=AgentContext)
     graph.add_node("guard", nodes.guard_step)
     graph.add_node("route", nodes.route_step)
+    graph.add_node("cache", nodes.cache_step)
     graph.add_node("retrieve", nodes.retrieve_step)
     graph.add_node("assess", nodes.assess_step)
     graph.add_node("reformulate", nodes.reformulate_step)
@@ -75,7 +80,8 @@ def build_graph(checkpointer: BaseCheckpointSaver[Any] | None = None) -> Agent:
     graph.add_node("search_only", nodes.search_only_step)
     graph.add_edge(START, "guard")
     graph.add_conditional_edges("guard", _to("route"), ["route", "search_only", END])
-    graph.add_conditional_edges("route", _to("retrieve"), ["retrieve", "search_only", END])
+    graph.add_conditional_edges("route", _to("cache"), ["cache", "search_only", END])
+    graph.add_conditional_edges("cache", _to("retrieve"), ["retrieve", "search_only", END])
     graph.add_conditional_edges("retrieve", _after_retrieve, ["assess", "answer", "search_only", END])
     graph.add_conditional_edges("assess", _after_assess, ["reformulate", "answer", "search_only", END])
     graph.add_conditional_edges("reformulate", _to("retrieve"), ["retrieve", "search_only", END])
@@ -84,6 +90,35 @@ def build_graph(checkpointer: BaseCheckpointSaver[Any] | None = None) -> Agent:
     graph.add_conditional_edges("repair", _to("verify"), ["verify", "search_only", END])
     graph.add_edge("search_only", END)
     return graph.compile(checkpointer=checkpointer)
+
+
+async def load_conversation(agent: Agent, session: UUID, now: float, limits: Limits) -> Conversation:
+    """The session's conversation as the next question sees it: empty when it has no turn or its last turn is
+    older than `SESSION_TTL`. Raises when the store can't be read or holds something unreadable."""
+    snapshot = await agent.aget_state({"configurable": {"thread_id": str(session)}})
+    stored = snapshot.values.get("conversation") if snapshot.values else None
+    return live(Conversation.model_validate(stored or {}), now, limits.session_ttl)
+
+
+async def remember_degraded_turn(
+    agent: Agent,
+    session: UUID,
+    conversation: Conversation,
+    question: str,
+    hit: Sequence[Claim] | None,
+    *,
+    now: float,
+    limits: Limits,
+    redact: Callable[[str], str],
+) -> None:
+    """After a degraded run (no `route`, so no standalone question): the session's next turn is the redacted
+    raw question and, on a cache hit, the text of the claims sent. Writes only the `conversation` channel."""
+    turn = begin_turn(conversation, redact(question), now, limits)
+    if hit:
+        turn = with_claims(turn, remembered_text(hit, redact))
+    await agent.aupdate_state(
+        {"configurable": {"thread_id": str(session)}}, {"conversation": turn.model_dump()}, as_node="guard"
+    )
 
 
 async def run_agent(
@@ -128,27 +163,57 @@ async def run_agent(
             end_with_error(context.sink, trace_id, context.contact)
             return _result("error", state)
         outcome = context.settled  # the ending already sent stands
+    usage = Usage(
+        tokens_in=context.tokens_in,
+        tokens_out=context.tokens_out,
+        cost_usd=context.cost_usd,
+        latency_ms=round(_elapsed(context) * MS_PER_S),
+    )
+    hit_claims = state.get("hit_claims")
+    if state.get("cached") and hit_claims:
+        end_with_hit(context.sink, hit_claims, usage, trace_id, context.contact)
+        return _result(outcome, state)
     if outcome not in NO_USAGE_OUTCOMES:
-        context.sink.record(
-            Usage(
-                tokens_in=context.tokens_in,
-                tokens_out=context.tokens_out,
-                cost_usd=context.cost_usd,
-                latency_ms=round(_elapsed(context) * MS_PER_S),
-            )
-        )
+        context.sink.record(usage)
     suggestion = await _suggestion(state, outcome, context)
+    cached = bool(state.get("cached"))
     context.sink.record(
         Done(
             trace_id=trace_id,
             outcome=outcome,
-            cached=False,
+            cached=cached,
             suggestion=suggestion,
             contact=list(context.contact),
             notice=state.get("notice"),
         )
     )
+    _remember(state, outcome, context)
     return _result(outcome, state)
+
+
+def _remember(state: dict[str, Any], outcome: Outcome, context: AgentContext) -> None:
+    """After `done`, stores a run that ended as answered with the claims `verify` sent, in the background
+    (LLD "6.9 Answer cache"). Nothing else is stored: a hit, a contact reply, an abstention, a decline, a
+    block, a degraded answer, nor a run cut after its claims. The vector is there only when the lookup ran
+    and missed, which is also when the question is storable."""
+    vector, claims, route = state.get("query_vector"), state.get("claims"), state.get("route")
+    # The graph's own ending: after a cut, `claims` may be those of an earlier pass, not the ones sent.
+    if (
+        outcome != "answered"
+        or state.get("outcome") != "answered"
+        or state.get("cached")
+        or vector is None
+        or not claims
+        or route is None
+    ):
+        return
+    context.cache.remember(
+        route.standalone_question,
+        route.language,
+        context.corpus_version,
+        vector,
+        [Claim(i=i, text=c.text, sources=list(c.sources), verdict=c.verdict) for i, c in enumerate(claims)],
+    )
 
 
 async def _suggestion(state: dict[str, Any], outcome: Outcome, context: AgentContext) -> str | None:
@@ -195,4 +260,4 @@ def _result(outcome: Outcome, state: dict[str, Any]) -> RunResult:
     route = state.get("route")
     if route is None:
         return RunResult(outcome, None, None, None)
-    return RunResult(outcome, route.public_ok, route.intent, route.language)
+    return RunResult(outcome, route.public_ok, route.intent, route.language, bool(state.get("cached")))
