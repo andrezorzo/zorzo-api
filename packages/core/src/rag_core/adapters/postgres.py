@@ -31,6 +31,16 @@ KEEPALIVE_IDLE_S = 5
 KEEPALIVE_INTERVAL_S = 2
 KEEPALIVE_PROBES = 2
 POOL_WAIT_S = 5
+# libpq's dead-socket bounds, shared by the engine and the checkpointer's connections: a connection that stops
+# answering (a half-open socket, a partition) fails in seconds instead of hanging a statement for good.
+DEAD_SOCKET_ARGS = {
+    "connect_timeout": CONNECT_TIMEOUT_S,
+    "keepalives": 1,
+    "keepalives_idle": KEEPALIVE_IDLE_S,
+    "keepalives_interval": KEEPALIVE_INTERVAL_S,
+    "keepalives_count": KEEPALIVE_PROBES,
+    "tcp_user_timeout": DEAD_SOCKET_MS,
+}
 PROBE_TIMEOUT_S = 2.0
 # A short statement (a budget row, an alert row, a log row) that takes seconds is stuck: Postgres ends a
 # statement or lock wait past this. No client-side timeout: one could cut a COMMIT the server already did.
@@ -65,17 +75,8 @@ class Database:
             pool_pre_ping=True,
             # Errors would otherwise quote bound values, such as the visitor's question, into the logs.
             hide_parameters=True,
-            # A connection that stops answering (a half-open socket, a partition) fails in seconds instead of
-            # hanging a statement for good: TCP keepalives and libpq's user timeout. Waiting for a pooled
-            # connection is bounded too.
-            connect_args={
-                "connect_timeout": CONNECT_TIMEOUT_S,
-                "keepalives": 1,
-                "keepalives_idle": KEEPALIVE_IDLE_S,
-                "keepalives_interval": KEEPALIVE_INTERVAL_S,
-                "keepalives_count": KEEPALIVE_PROBES,
-                "tcp_user_timeout": DEAD_SOCKET_MS,
-            },
+            # TCP keepalives and libpq's user timeout; waiting for a pooled connection is bounded too.
+            connect_args=dict(DEAD_SOCKET_ARGS),
             pool_timeout=POOL_WAIT_S,
         )
         self.metadata = MetaData()
@@ -115,12 +116,7 @@ def _checkpoint_kwargs(options: str) -> dict[str, Any]:
         "autocommit": True,
         "row_factory": dict_row,
         "prepare_threshold": 0,
-        "connect_timeout": CONNECT_TIMEOUT_S,
-        "keepalives": 1,
-        "keepalives_idle": KEEPALIVE_IDLE_S,
-        "keepalives_interval": KEEPALIVE_INTERVAL_S,
-        "keepalives_count": KEEPALIVE_PROBES,
-        "tcp_user_timeout": DEAD_SOCKET_MS,
+        **DEAD_SOCKET_ARGS,
         "options": options,
     }
 

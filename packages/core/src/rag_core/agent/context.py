@@ -54,13 +54,14 @@ class AgentContext:
     suggestions: Suggestions
     canary: CanaryWatch  # the marker in every system prompt: seeing it in an answer is a leak (`L5`)
     trace_id: UUID  # the request's, for the defense row of a block
+    # What a remembered turn passes before it is stored: the stored trace's redactor, with the domain's
+    # allowlist and the app's secrets (LLD "6.3 Agent run"). Required: a default would drop both silently.
+    redactor: Redactor
     contact: Sequence[ContactOption] = ()  # the domain's contact options, sent on every `done`
     link_hosts: Sequence[str] = ()  # the hosts a claim may link to; with none, no link is allowed
     # Wall clock at the request's start (seconds since the epoch): a conversation idle past `SESSION_TTL`
     # by then starts over.
     now: float = field(default_factory=time.time)
-    # What a remembered turn passes before it is stored: the stored trace's redactor (LLD "6.3 Agent run").
-    redactor: Redactor = field(default_factory=Redactor)
     tokens_in: int = 0
     tokens_out: int = 0
     cost_usd: float = 0.0
