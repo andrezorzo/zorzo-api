@@ -53,10 +53,13 @@ def test_a_nan_logit_is_an_error_never_a_pass() -> None:
         softmax_malicious([[float("nan"), 1.0]])
 
 
-@pytest.mark.parametrize("logit", [float("inf"), float("-inf")])
-def test_both_logits_infinite_with_one_sign_is_an_error(logit: float) -> None:
-    with pytest.raises(ValueError, match="both infinite"):
-        softmax_malicious([[logit, logit]])
+def test_both_logits_minus_infinite_is_an_error() -> None:
+    with pytest.raises(ValueError, match="both -inf"):
+        softmax_malicious([[float("-inf"), float("-inf")]])
+
+
+def test_both_logits_plus_infinite_fails_closed() -> None:
+    assert softmax_malicious([[float("inf"), float("inf")]]) == 1.0
 
 
 @pytest.mark.parametrize(
