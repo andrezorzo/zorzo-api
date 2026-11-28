@@ -30,9 +30,11 @@ log = structlog.get_logger()
 ROOT_NAME = "ask"
 # Passing `info` spares the client its lazy `GET /info`; a version is all it needs from it.
 CLIENT_INFO = {"version": "0.0.0"}
-# What `close` always leaves the client to drain its queue (the other requests' runs), however long a stuck
-# post kept the wait; a shorter timeout is the floor itself.
-CLIENT_CLOSE_FLOOR_S = 1.0
+# `close` splits its time in two: the wait for the run trees being posted, then the client draining its queue
+# (the other requests' runs). A stuck post can't take the second part: the client always gets its floor.
+INFLIGHT_WAIT_MIN_S = 0.5
+CLIENT_CLOSE_FLOOR_S = 0.5
+CLOSE_MIN_S = INFLIGHT_WAIT_MIN_S + CLIENT_CLOSE_FLOOR_S  # the least a caller should give `close`
 
 
 class _Shutdown:
@@ -60,10 +62,15 @@ class _Shutdown:
     def close(self, timeout: float) -> None:
         """Refuse new posts, then wait up to `timeout` for the ones in flight (best effort: a post still
         running after it is left to finish on its own, and its tree may be incomplete)."""
+        started = time.monotonic()
         with self._idle:
             self.closing.set()
-            if not self._idle.wait_for(lambda: self._active == 0, timeout):
-                log.warning("langsmith_close_timed_out", active=self._active)
+            finished = self._idle.wait_for(lambda: self._active == 0, timeout)
+            active = self._active
+        if not finished:
+            log.warning(
+                "langsmith_close_timed_out", active=active, waited_s=round(time.monotonic() - started, 2)
+            )
 
 
 class LangSmithTracer:
@@ -95,12 +102,14 @@ class LangSmithTracer:
     def close(self, timeout: float) -> None:
         """At shutdown: wait up to `timeout` for the queue to drain, then stop the client's background
         thread and close its session; what is left is dropped."""
-        floor = min(CLIENT_CLOSE_FLOOR_S, timeout)
+        # `timeout` is at least `CLOSE_MIN_S`: the wait gets all but the client's floor.
         started = time.monotonic()
-        self._shutdown.close(timeout - floor)  # in-flight run trees finish, later ones are skipped
+        self._shutdown.close(
+            timeout - CLIENT_CLOSE_FLOOR_S
+        )  # in-flight run trees finish, later ones are skipped
         left = timeout - (time.monotonic() - started)
         if self._client is not None:
-            self._client.close(timeout=max(floor, left))
+            self._client.close(timeout=max(CLIENT_CLOSE_FLOOR_S, left))
 
 
 class RunSink:

@@ -17,6 +17,7 @@ from rag_core.adapters.factory import (
     provider_keys,
     rerank_chain,
 )
+from rag_core.adapters.langsmith_tracer import CLOSE_MIN_S
 from rag_core.adapters.pgvector_store import PgVectorStore, check_text_search
 from rag_core.adapters.postgres import Database
 from rag_core.adapters.rate_limit import PostgresRateLimiter
@@ -39,8 +40,6 @@ from rag_api.settings import ApiSettings
 
 log = structlog.get_logger()
 
-TRACER_CLOSE_MIN_S = 1.0  # of `SHUTDOWN_DRAIN_S`, what LangSmith's queue gets at least
-
 
 async def _warm_rerankers(app: FastAPI) -> None:
     """Load rerank models at startup, so the first visitor after a deploy doesn't wait for it."""
@@ -55,11 +54,11 @@ async def _warm_rerankers(app: FastAPI) -> None:
 async def _close_traces(app: FastAPI) -> None:
     """The trace writes first (they end LangSmith's last runs), then LangSmith's queue, within one
     `SHUTDOWN_DRAIN_S` in all (and `CANCEL_WAIT_S` for what a stuck write cancels). The queue always gets
-    `TRACER_CLOSE_MIN_S`, so a stuck write can't leave it none."""
+    `CLOSE_MIN_S`, so a stuck write can't leave it none."""
     loop = asyncio.get_running_loop()
     ends_at = loop.time() + SHUTDOWN_DRAIN_S
-    await app.state.trace_writes.drain(SHUTDOWN_DRAIN_S - TRACER_CLOSE_MIN_S)
-    await anyio.to_thread.run_sync(app.state.tracer.close, max(TRACER_CLOSE_MIN_S, ends_at - loop.time()))
+    await app.state.trace_writes.drain(SHUTDOWN_DRAIN_S - CLOSE_MIN_S)
+    await anyio.to_thread.run_sync(app.state.tracer.close, max(CLOSE_MIN_S, ends_at - loop.time()))
 
 
 async def _shut_down(app: FastAPI) -> None:

@@ -9,6 +9,7 @@ from structlog.testing import capture_logs
 
 SETTLE_TURNS = 5  # turns of the event loop for a task to end
 DRAIN_TIMEOUT_S = 5
+STUCK_DRAIN_S = 0.1  # a drain that gives up on inserts that never end
 HOVER_ROUNDS = 20  # a flood that frees one slot, and fills it again, this many times
 
 
@@ -18,12 +19,18 @@ class _BlockedDatabase:
     def __init__(self) -> None:
         self.gates: list[asyncio.Event] = []
         self.finished = 0
+        self.ignores_cancel = False
 
     @asynccontextmanager
     async def short_transaction(self) -> Any:
         gate = asyncio.Event()
         self.gates.append(gate)
-        await gate.wait()
+        try:
+            await gate.wait()
+        except asyncio.CancelledError:
+            if not self.ignores_cancel:
+                raise
+            await gate.wait()  # stuck for good: a drain's cancel doesn't end it
         self.finished += 1
         yield self
 
@@ -86,9 +93,10 @@ async def test_the_count_is_logged_when_the_flood_stops_with_no_further_write() 
         _write(event_log)
     await asyncio.sleep(0)
     with capture_logs() as logs:
-        while event_log.pending >= REARM_PENDING_ROWS:
+        while (
+            event_log.pending >= REARM_PENDING_ROWS
+        ):  # the last insert to end brings it below; no write follows
             await db.let_one_end()
-        await db.let_one_end()  # an insert ends below the re-arm level, and no write follows
     assert [e["dropped"] for e in logs if e["event"] == "event_log_dropped"] == [7]
     await asyncio.sleep(0)
     for gate in db.gates:
@@ -98,14 +106,17 @@ async def test_the_count_is_logged_when_the_flood_stops_with_no_further_write() 
     assert not [e for e in later if e["event"] == "event_log_dropped"]  # once, and the count was reset
 
 
-async def test_drain_logs_the_count_of_a_flood_still_unreported() -> None:
+async def test_drain_logs_the_count_even_when_inserts_are_stuck() -> None:
     db = _BlockedDatabase()
+    db.ignores_cancel = True
     event_log = PostgresEventLog(cast(Any, db))
     for _ in range(MAX_PENDING_ROWS + 3):
         _write(event_log)
     await asyncio.sleep(0)
+    with capture_logs() as logs:
+        await event_log.drain(timeout=STUCK_DRAIN_S)  # nothing ends: pending stays at the cap
+    assert [e["dropped"] for e in logs if e["event"] == "event_log_dropped"] == [3]
+    assert event_log.pending >= REARM_PENDING_ROWS  # no done callback can have reported it
     for gate in db.gates:
         gate.set()
-    with capture_logs() as logs:
-        await event_log.drain(timeout=DRAIN_TIMEOUT_S)
-    assert [e["dropped"] for e in logs if e["event"] == "event_log_dropped"] == [3]
+    await event_log.drain(timeout=DRAIN_TIMEOUT_S)

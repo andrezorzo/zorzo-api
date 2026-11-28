@@ -1,12 +1,19 @@
 """F01-T10 AC1: the LangSmith run tree, from events with the moments they arrived."""
 
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
 import pytest
-from rag_core.adapters.langsmith_tracer import CLIENT_CLOSE_FLOOR_S, LangSmithTracer, RunSink
+from rag_core.adapters.langsmith_tracer import (
+    CLIENT_CLOSE_FLOOR_S,
+    CLOSE_MIN_S,
+    INFLIGHT_WAIT_MIN_S,
+    LangSmithTracer,
+    RunSink,
+)
 from rag_core.events import Stage
 from rag_core.ports import TraceFacts
 from rag_core.services.redact import Redactor
@@ -15,7 +22,7 @@ from structlog.testing import capture_logs
 from tests.fakes.langsmith import FakeLangSmith
 
 TIMEOUT_S = 10
-CLOSE_TIMEOUT_S = CLIENT_CLOSE_FLOOR_S + 0.5  # the wait for a stuck post gets only the 0.5 above the floor
+TOLERANCE_S = 0.3  # of scheduling, on top of a timeout
 KEY = "lsv2_pt_" + "0123456789abcdef0123456789abcdef_0123456789"
 
 
@@ -56,6 +63,7 @@ class _CloseSpy:
 
     def close(self, timeout: float) -> None:
         self.timeout = timeout
+        self.closed_at = time.monotonic()
         self._order.append("closed")
         self._client.close(timeout=timeout)
 
@@ -111,7 +119,7 @@ def test_close_waits_for_a_run_tree_being_posted(monkeypatch: pytest.MonkeyPatch
     finishing = threading.Thread(target=sink.finish, args=(facts,))
     finishing.start()
     assert in_post.wait(TIMEOUT_S)
-    closing = threading.Thread(target=tracer.close, args=(TIMEOUT_S,))
+    closing = threading.Thread(target=tracer.close, args=(CLOSE_MIN_S,))
     closing.start()
     assert tracer._shutdown.closing.wait(TIMEOUT_S)  # close has begun and must now be waiting
     assert order == []
@@ -123,7 +131,9 @@ def test_close_waits_for_a_run_tree_being_posted(monkeypatch: pytest.MonkeyPatch
     assert root["end_time"]  # the root's patch was sent too
 
 
-def test_a_stuck_post_leaves_the_client_its_close_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_stuck_post_gets_its_wait_and_the_client_its_floor_within_the_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     langsmith = FakeLangSmith()
     tracer = LangSmithTracer(KEY, None, langsmith.serve())
     sink = tracer.sink(uuid4(), datetime.now(UTC), Redactor())
@@ -141,10 +151,14 @@ def test_a_stuck_post_leaves_the_client_its_close_floor(monkeypatch: pytest.Monk
     finishing = threading.Thread(target=sink.finish, args=(facts,))
     finishing.start()
     assert in_post.wait(TIMEOUT_S)
+    started = time.monotonic()
     with capture_logs() as logs:
-        tracer.close(CLOSE_TIMEOUT_S)  # the post never ends within it
+        tracer.close(CLOSE_MIN_S)  # the post never ends within it
+    total = time.monotonic() - started
     release.set()
     finishing.join(TIMEOUT_S)
-    assert spy.timeout >= CLIENT_CLOSE_FLOOR_S  # the queued runs of other requests still get their time
+    assert spy.closed_at - started >= INFLIGHT_WAIT_MIN_S  # the post got its wait
+    assert spy.timeout >= CLIENT_CLOSE_FLOOR_S  # and the client its floor
+    assert total <= CLOSE_MIN_S + TOLERANCE_S
     [timed_out] = [e for e in logs if e["event"] == "langsmith_close_timed_out"]
-    assert timed_out["active"] == 1
+    assert timed_out["active"] == 1 and timed_out["waited_s"] >= INFLIGHT_WAIT_MIN_S
