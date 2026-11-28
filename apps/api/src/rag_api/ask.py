@@ -88,13 +88,12 @@ async def _store_trace(state: Any, sink: FanOutSink, recorder: TraceRecorder, fa
 
 
 def _answer_language(state: Any, result: RunResult | None) -> str | None:
-    """The language the answer used, for the stored trace: the route's text is free (an injected question can
-    put anything there), so an undeclared one is stored as the default `answer` fell back to."""
-    return (
-        answer_language(result.language, tuple(state.domain.languages))
-        if result and result.language
-        else None
-    )
+    """The stored trace's `lang`: the language the run answers in, which is the route's normalized to a code
+    the domain declares (the route's text is free, and an injected question can put anything there). None
+    when `route` didn't answer."""
+    if result is None or result.language is None:
+        return None
+    return answer_language(result.language, tuple(state.domain.languages))
 
 
 @router.post("/api/v1/ask")
@@ -158,9 +157,8 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                         context = _agent_context(state, sink, corpus.version, deadline_at)
                         result = await run_agent(question, UUID(trace_id), agent=state.agent, context=context)
                 except asyncio.CancelledError:
-                    cancelled = (
-                        True  # the visitor left or the server stopped; no `done`, so no `public_traces` row
-                    )
+                    # The visitor left or the server stopped: no `done`, so no `public_traces` row.
+                    cancelled = True
                     raise
                 except Exception:
                     # Whatever escaped the service, the visitor's stream still ends with `done`.

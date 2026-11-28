@@ -327,14 +327,13 @@ class TraceFacts:
     trace_id: UUID
     question: str  # scrubbed (the redactor's `text`), as the trace and LangSmith store it
     intent: str | None  # from `route`, None when it didn't answer
-    lang: str | None
+    lang: str | None  # the language the run answers in (the route's, normalized to a declared code)
     public_ok: bool | None
     corpus_version: int | None
     model_config_version: str | None
     retention: timedelta  # how long the trace lives (`RETENTION_PUBLIC_TRACES`)
-    cancelled: bool = (
-        False  # cancelled: the visitor left or the server stopped; LangSmith shows it apart from an error
-    )
+    # Cancelled: the visitor left or the server stopped. LangSmith shows it apart from an error.
+    cancelled: bool = False
 
 
 @dataclass(frozen=True)

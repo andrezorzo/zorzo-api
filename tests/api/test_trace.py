@@ -414,3 +414,11 @@ def test_a_language_the_domain_doesnt_declare_is_stored_as_the_default_the_answe
     assert trace["lang"] == next(
         iter(cast(FastAPI, client.app).state.domain.languages)
     )  # the language `answer` fell back to
+
+
+def test_an_empty_language_is_stored_as_the_default_too(
+    client: TestClient, fake: FakeOpenRouter, corpus_database: str
+) -> None:
+    script(fake, route=Reply(json.dumps({**json.loads(routed().text), "language": ""})))
+    trace = trace_of(corpus_database, ask(client))
+    assert trace["lang"] == next(iter(cast(FastAPI, client.app).state.domain.languages))

@@ -6,7 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-from rag_core.adapters.langsmith_tracer import LangSmithTracer, RunSink
+from rag_core.adapters.langsmith_tracer import CLIENT_CLOSE_FLOOR_S, LangSmithTracer, RunSink
 from rag_core.events import Stage
 from rag_core.ports import TraceFacts
 from rag_core.services.redact import Redactor
@@ -15,6 +15,7 @@ from structlog.testing import capture_logs
 from tests.fakes.langsmith import FakeLangSmith
 
 TIMEOUT_S = 10
+CLOSE_TIMEOUT_S = CLIENT_CLOSE_FLOOR_S + 0.5  # the wait for a stuck post gets only the 0.5 above the floor
 KEY = "lsv2_pt_" + "0123456789abcdef0123456789abcdef_0123456789"
 
 
@@ -54,6 +55,7 @@ class _CloseSpy:
         self._client, self._order = client, order
 
     def close(self, timeout: float) -> None:
+        self.timeout = timeout
         self._order.append("closed")
         self._client.close(timeout=timeout)
 
@@ -119,3 +121,30 @@ def test_close_waits_for_a_run_tree_being_posted(monkeypatch: pytest.MonkeyPatch
     assert order == ["posted", "closed"]
     [root] = [r for r in langsmith.runs() if r["id"] == str(trace_id)]
     assert root["end_time"]  # the root's patch was sent too
+
+
+def test_a_stuck_post_leaves_the_client_its_close_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+    langsmith = FakeLangSmith()
+    tracer = LangSmithTracer(KEY, None, langsmith.serve())
+    sink = tracer.sink(uuid4(), datetime.now(UTC), Redactor())
+    sink.record(Stage(name="route", status="start", ms=None))
+    in_post, release = threading.Event(), threading.Event()
+
+    def stuck_post(self: RunSink, client: Any, facts: TraceFacts) -> None:
+        in_post.set()
+        release.wait(TIMEOUT_S)
+
+    monkeypatch.setattr(RunSink, "_post", stuck_post)
+    spy = _CloseSpy(tracer._client, [])
+    tracer._client = spy  # type: ignore[assignment]
+    facts = TraceFacts(uuid4(), "q", None, None, None, 1, "v", timedelta(days=1))
+    finishing = threading.Thread(target=sink.finish, args=(facts,))
+    finishing.start()
+    assert in_post.wait(TIMEOUT_S)
+    with capture_logs() as logs:
+        tracer.close(CLOSE_TIMEOUT_S)  # the post never ends within it
+    release.set()
+    finishing.join(TIMEOUT_S)
+    assert spy.timeout >= CLIENT_CLOSE_FLOOR_S  # the queued runs of other requests still get their time
+    [timed_out] = [e for e in logs if e["event"] == "langsmith_close_timed_out"]
+    assert timed_out["active"] == 1

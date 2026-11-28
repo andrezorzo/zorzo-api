@@ -30,6 +30,9 @@ log = structlog.get_logger()
 ROOT_NAME = "ask"
 # Passing `info` spares the client its lazy `GET /info`; a version is all it needs from it.
 CLIENT_INFO = {"version": "0.0.0"}
+# What `close` always leaves the client to drain its queue (the other requests' runs), however long a stuck
+# post kept the wait; a shorter timeout is the floor itself.
+CLIENT_CLOSE_FLOOR_S = 1.0
 
 
 class _Shutdown:
@@ -55,10 +58,12 @@ class _Shutdown:
             self._idle.notify_all()
 
     def close(self, timeout: float) -> None:
-        """Refuse new posts, then wait up to `timeout` for the ones in flight."""
+        """Refuse new posts, then wait up to `timeout` for the ones in flight (best effort: a post still
+        running after it is left to finish on its own, and its tree may be incomplete)."""
         with self._idle:
             self.closing.set()
-            self._idle.wait_for(lambda: self._active == 0, timeout)
+            if not self._idle.wait_for(lambda: self._active == 0, timeout):
+                log.warning("langsmith_close_timed_out", active=self._active)
 
 
 class LangSmithTracer:
@@ -90,11 +95,12 @@ class LangSmithTracer:
     def close(self, timeout: float) -> None:
         """At shutdown: wait up to `timeout` for the queue to drain, then stop the client's background
         thread and close its session; what is left is dropped."""
+        floor = min(CLIENT_CLOSE_FLOOR_S, timeout)
         started = time.monotonic()
-        self._shutdown.close(timeout)  # in-flight run trees finish, later ones are skipped
-        timeout = max(0.0, timeout - (time.monotonic() - started))
+        self._shutdown.close(timeout - floor)  # in-flight run trees finish, later ones are skipped
+        left = timeout - (time.monotonic() - started)
         if self._client is not None:
-            self._client.close(timeout=timeout)
+            self._client.close(timeout=max(floor, left))
 
 
 class RunSink:

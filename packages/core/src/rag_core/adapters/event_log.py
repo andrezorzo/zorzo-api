@@ -40,10 +40,15 @@ class PostgresEventLog:
                 log.warning("event_log_full", max_pending=MAX_PENDING_ROWS)
             self._dropped += 1
             return
-        if self._dropped and self.pending < REARM_PENDING_ROWS:  # the burst is over
+        self._report_dropped()
+        task = self._background.spawn(self._insert(level, component, event, fields))
+        task.add_done_callback(lambda _: self._report_dropped())  # a flood that stops still gets its count
+
+    def _report_dropped(self) -> None:
+        """Log how many rows the burst dropped, once, when the pending rows are below the re-arm level."""
+        if self._dropped and self.pending < REARM_PENDING_ROWS:
             log.warning("event_log_dropped", dropped=self._dropped)
             self._dropped = 0
-        self._background.spawn(self._insert(level, component, event, fields))
 
     async def _insert(self, level: str, component: str, event: str, fields: dict[str, Any]) -> None:
         params = {"level": level, "component": component, "event": event, "fields": json.dumps(fields)}
@@ -55,3 +60,4 @@ class PostgresEventLog:
 
     async def drain(self, timeout: float | None = None) -> None:
         await self._background.drain(timeout)
+        self._report_dropped()
