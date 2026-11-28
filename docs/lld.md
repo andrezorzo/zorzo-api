@@ -1,6 +1,6 @@
 # LLD — zorzo.dev.br (zorzo-api)
 
-2026-11-27 · André de Castro Zorzo · Status: draft · HLD: [hld.md](hld.md)
+2026-11-28 · André de Castro Zorzo · Status: draft · HLD: [hld.md](hld.md)
 
 Scope: the `zorzo-api` repository. The front (`zorzo-site`) keeps its own LLD for rendering and the 3D brain;
 section 8 here covers only how the front behaves against the API, plus the dashboard pages.
@@ -162,7 +162,7 @@ connection; the domain is chosen by `DOMAIN` and loaded by the apps, never by `c
 | DataPublisher | `publish` | Brain and corpus data for a version | Manifest | S3 adapter writes `data/<hash>/` and invalidates only the manifest; local adapter writes a folder the local Caddy serves |
 | EvalStore (planned) | `record` / `link` | A run with its results; a candidate and a run | Run id | `record` writes the run and all its results in one transaction; `link` sets the candidate's `eval_run_id` only for a passing run of that version (section 6.12) |
 
-Core modules: Retrieval, Ingest pipeline, Model gateway, Gate, Agent graph and Verification **existing**; Guard,
+Core modules: Retrieval, Ingest pipeline, Model gateway, Gate, Agent graph, Verification and Guard **existing**;
 Telemetry and Eval harness **planned**. Responsibilities: HLD section "Architecture" (core and domain). Tools are
 domain pieces, not ports (section 6.5).
 
@@ -207,11 +207,16 @@ domain pieces, not ports (section 6.5).
   after any draft already sent. Categories: `injection` (`L2`, which doesn't tell a jailbreak from a prompt
   extraction) and `prompt_leak` (the `L5` canary). A passing `L2` check sends `guard {layer: L2, action:
   pass}`. A classifier that raises lets the question through, with `guard {layer: L2, action: error}` and an
-  `error` log: the other layers still stand, and a guard bug must not refuse every visitor.
+  `error` log: the other layers still stand, and a guard bug must not refuse every visitor. A score that is
+  NaN is an error too, never a pass; an infinite one is compared like any other. Only a file that is missing
+  or fails its hash at startup stops the API. Measured memory, latency and verdicts of the classifier: the
+  task record `guard-check.md` (F01-T08).
 - **Defense events:** each block writes one `defense_events` row through the DefenseLog: the layer, the
   category, action `block` and the trace id. A gate refusal writes one too: `bot_check_failed` as `L0`
   `bot`, `rate_limited` as `L1` `rate_limit`. The question is never stored there: `example_scrubbed` is
-  left null, since `/dash/defenses` shows examples only from the `adversarial` dataset (section 8).
+  left null, since `/dash/defenses` shows examples only from the `adversarial` dataset (section 8). The
+  DefenseLog and the EventLog write through one `RowWriter` class (one background insert, a failure only
+  logged), each with its own cap on pending rows: a flood past it is dropped, with one warning and one count.
 - **CORS:** one origin; the allowlist holds `https://zorzo.dev.br`, plus localhost when `APP_ENV=local`.
 - **Admin:** the Django admin listens on a local port, reachable only through an SSH tunnel; its views are
   read-only, except the "remove from public view" action on traces, which sets `removed_at` and writes a
@@ -251,7 +256,7 @@ domain pieces, not ports (section 6.5).
   folder of F01-T10. No prompt text reaches a step event, so the domain's instructions never reach a trace.
   The visitor's own stream is not redacted.
 - **Secrets:** read once at startup from settings; never logged, never in a trace. The canary lives in the
-  environment. With `APP_ENV=production` the API refuses to start on Turnstile's test secrets, on the
+  environment and is in `ApiSettings.secret_values()`, so the redactor strips it from a stored trace. With `APP_ENV=production` the API refuses to start on Turnstile's test secrets, on the
   published local `SALT_SEED` (`infra/.env.example`), with which anyone could reverse the hashed IPs, or on
   the published local database password (`POSTGRES_PASSWORD` in `infra/.env.example`, in `DATABASE_URL` as
   user info or as `?password=`). The redactor is given every secret setting and the database password, as
@@ -736,12 +741,16 @@ States of the day's budget row; the day is UTC, so every visitor sees the same "
   breaks one is `unsupported`, even when its passage says it. Each passage carries its source's
   `authority`, so the judge can tell where a superlative may come from.
 - **Links** (`L5`): a claim with a URL whose host is not in the domain's `link_hosts` (or a subdomain of
-  one) is removed with no judge vote, like a citation outside the retrieval set.
+  one) is removed with no judge vote, like a citation outside the retrieval set. A claim holding a control
+  character (other than tab, newline and carriage return) is refused when it also holds a link fragment (`//`, `www`, a
+  `scheme:`), since the link could be read with the character kept or removed; with no fragment it passes.
+  What the rule leaves open, and why: `link-and-canary-residual-risk.md` in the task folder (F01-T08).
 - **Canary** (`L5`): `CANARY` is appended by the core to the system message of every model call, with the
   instruction never to write it. Every text bound for the visitor (each `token`, each claim and the `gap`)
   is checked for it first, ignoring case and every character but letters and digits. The draft holds back
   its last characters (the canary's length minus one) until more text arrives or the answer ends, so not
-  even part of the canary is sent. A hit stops the answer stage and blocks the response (`prompt_leak`,
+  even part of the canary is sent. A `CanaryScan` carries the check across the claims of a fallback answer,
+  so a canary split between two claims is found. A hit stops the answer stage and blocks the response (`prompt_leak`,
   section 3 "Security", guard layers).
 
 ### 6.5 Tools
