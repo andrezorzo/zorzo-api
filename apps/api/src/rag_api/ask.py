@@ -47,7 +47,9 @@ class QueueSink:
         self.queue.put_nowait(event)
 
 
-def _agent_context(state: Any, sink: TraceSink, corpus_version: int, deadline_at: float) -> AgentContext:
+def _agent_context(
+    state: Any, sink: TraceSink, corpus_version: int, deadline_at: float, trace_id: UUID
+) -> AgentContext:
     """The graph's services and this request's limits, from what the app wired at startup."""
     return AgentContext(
         gateway=state.gateway,
@@ -62,6 +64,13 @@ def _agent_context(state: Any, sink: TraceSink, corpus_version: int, deadline_at
         corpus_version=corpus_version,
         deadline_at=deadline_at,
         spend=RequestSpend(state.limits.request_cost_cap_usd),
+        classifier=state.classifier,
+        defenses=state.defenses,
+        suggestions=state.suggestions,
+        canary=state.canary_watch,
+        trace_id=trace_id,
+        contact=state.domain.contact,
+        link_hosts=state.domain.link_hosts,
     )
 
 
@@ -105,7 +114,9 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
     # One deadline for the whole request: the gate, the corpus check and the stream share it.
     loop = asyncio.get_running_loop()
     deadline_at = loop.time() + state.limits.request_deadline
-    question = await state.gate.check(body.q, body.turnstile, asker, deadline_at)
+    trace_id: str = request.state.trace_id  # as the log context binds it
+    trace_uuid = UUID(trace_id)
+    question = await state.gate.check(body.q, body.turnstile, asker, deadline_at, trace_uuid)
     if deadline_at - loop.time() <= 0:  # the gate finished on the deadline: nothing left for the answer
         log.warning("deadline_exceeded", stage="after_gate")
         raise ApiError(ErrorCode.UNAVAILABLE)
@@ -126,11 +137,10 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
         log.warning("deadline_exceeded", stage="mode")
         raise ApiError(ErrorCode.UNAVAILABLE)
     corpus = await corpus_service.servable(state.vector_store, state.embedder.tag, left)
-    trace_id: str = request.state.trace_id
     stream = QueueSink()
     recorder = TraceRecorder(started_at)
     # In order: the visitor's stream, the stored trace, LangSmith (a no-op without a key), the tests' extras.
-    langsmith = state.tracer.sink(UUID(trace_id), started_at, state.redactor)
+    langsmith = state.tracer.sink(trace_uuid, started_at, state.redactor)
     sink = FanOutSink([stream, recorder, langsmith, *state.trace_sinks])
 
     async def run() -> None:
@@ -144,7 +154,7 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                         await run_search_only(
                             question,
                             corpus,
-                            UUID(trace_id),
+                            trace_uuid,
                             sink=sink,
                             embedder=state.embedder,
                             store=state.vector_store,
@@ -152,10 +162,11 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                             limits=state.limits,
                             reason=reason,
                             deadline_at=deadline_at,
+                            contact=state.domain.contact,
                         )
                     else:
-                        context = _agent_context(state, sink, corpus.version, deadline_at)
-                        result = await run_agent(question, UUID(trace_id), agent=state.agent, context=context)
+                        context = _agent_context(state, sink, corpus.version, deadline_at, trace_uuid)
+                        result = await run_agent(question, trace_uuid, agent=state.agent, context=context)
                 except asyncio.CancelledError:
                     # The visitor left or the server stopped: no `done`, so no `public_traces` row.
                     cancelled = True
@@ -163,13 +174,15 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                 except Exception:
                     # Whatever escaped the service, the visitor's stream still ends with `done`.
                     log.exception("stream_failed")
-                    end_with_error(sink, UUID(trace_id))  # every sink, so a stored trace ends too
+                    end_with_error(
+                        sink, trace_uuid, state.domain.contact
+                    )  # every sink, so a stored trace ends too
             finally:
                 # However the run ended (a visitor who left included), LangSmith's root run is ended. A
                 # task of the app's own, so a visitor who leaves doesn't cancel it and shutdown drains it;
                 # spawned with no `await` since `done` was sent, so nothing can cancel the run before it.
                 facts = TraceFacts(
-                    trace_id=UUID(trace_id),
+                    trace_id=trace_uuid,
                     question=question,
                     intent=result.intent if result else None,
                     lang=_answer_language(state, result),

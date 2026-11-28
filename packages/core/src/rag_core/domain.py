@@ -13,6 +13,8 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
+from rag_core.events import ContactOption
+
 
 class DomainError(RuntimeError):
     """The domain package is missing or its config is invalid."""
@@ -27,6 +29,10 @@ class DomainConfig(BaseModel):
     document_kinds: tuple[str, ...] = Field(min_length=1)  # the `kind`s a corpus document may have
     # Exact strings the PII pass lets through, e.g. the owner's public email (LLD "6.1 Corpus version").
     pii_allowlist: tuple[str, ...] = ()
+    # How to reach the owner, in order: sent on every `done` and as the `contact` intent's reply (LLD "6.5").
+    contact: tuple[ContactOption, ...] = ()
+    # Hosts (and their subdomains) a claim may link to; a claim with any other link is removed (LLD "6.4").
+    link_hosts: tuple[str, ...] = ()
 
 
 class Example(BaseModel):
@@ -85,7 +91,7 @@ class Intent(BaseModel):
 
     description: str = Field(min_length=1)  # what `route` is told the intent covers
     kinds: tuple[str, ...] = ()  # document kinds its retrieval reads; empty means every kind
-    action: Literal["answer", "decline"] = "answer"
+    action: Literal["answer", "decline", "contact"] = "answer"
 
 
 def load_intents(name: str, kinds: Collection[str]) -> dict[str, Intent]:
@@ -106,6 +112,12 @@ def load_intents(name: str, kinds: Collection[str]) -> dict[str, Intent]:
         return intents
     except Exception as exc:
         raise DomainError(f"invalid intents in {_package(name)}/intents.yaml: {exc}") from exc
+
+
+def check_domain(domain: DomainConfig, intents: Mapping[str, Intent]) -> None:
+    """What spans the domain's files: an intent that sends the contact options needs some to send."""
+    if not domain.contact and any(intent.action == "contact" for intent in intents.values()):
+        raise DomainError(f"domain {domain.name}: an intent with action contact needs contact options")
 
 
 class Prompts(BaseModel):

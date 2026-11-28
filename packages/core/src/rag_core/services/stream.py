@@ -7,7 +7,17 @@ from contextlib import contextmanager
 from uuid import UUID
 
 from rag_core.errors import DEFAULT_MESSAGE, ErrorCode
-from rag_core.events import Degraded, DegradedReason, Done, Error, Hit, Retrieval, Stage, StageName
+from rag_core.events import (
+    ContactOption,
+    Degraded,
+    DegradedReason,
+    Done,
+    Error,
+    Hit,
+    Retrieval,
+    Stage,
+    StageName,
+)
 from rag_core.ports import SearchHit, TraceSink
 from rag_core.units import MS_PER_S
 
@@ -37,8 +47,8 @@ def emit_degraded(
     emit_retrieval(sink, hits[:shown], corpus_version)
 
 
-def end_with_error(sink: TraceSink, trace_id: UUID) -> None:
+def end_with_error(sink: TraceSink, trace_id: UUID, contact: Sequence[ContactOption] = ()) -> None:
     """The end of a stream that hit a bug: `error` then `done`, never an open stream."""
     code = ErrorCode.INTERNAL
     sink.record(Error(code=code.value, message=DEFAULT_MESSAGE[code]))
-    sink.record(Done(trace_id=trace_id, outcome="error", cached=False, suggestion=None))
+    sink.record(Done(trace_id=trace_id, outcome="error", cached=False, contact=list(contact)))

@@ -1,5 +1,6 @@
 """API settings, validated at startup (LLD "Configuration")."""
 
+import re
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -8,6 +9,10 @@ from rag_core.settings import AppSettings
 
 PUBLISHED_LOCAL_SEED = "local-salt-seed-change-me-0123456789"  # infra/.env.example, apps/api/AGENTS.md
 PUBLISHED_LOCAL_DB_PASSWORD = "zorzo"  # POSTGRES_PASSWORD in infra/.env.example
+PUBLISHED_LOCAL_CANARY = "local-canary-change-me-0123456789abcdef"  # infra/.env.example, apps/api/AGENTS.md
+CANARY_MIN_CHARS = 32  # the canary is at least this long, and this many of them letters or digits
+CANARY_PATTERN = re.compile(rf"[A-Za-z0-9_-]{{{CANARY_MIN_CHARS},}}")
+_CANARY_SEPARATORS = re.compile(r"[-_]")
 
 
 class ApiSettings(AppSettings):
@@ -17,6 +22,10 @@ class ApiSettings(AppSettings):
     # test secret.
     turnstile_secret: SecretStr = Field(min_length=1)
     salt_seed: SecretStr = Field(min_length=32, description="Seed of the daily IP salt")
+    # The marker in every system prompt: seeing it in an answer means the prompt leaked (LLD "Security").
+    canary: SecretStr = Field(
+        min_length=CANARY_MIN_CHARS, description=f"Letters, digits, - and _, {CANARY_MIN_CHARS} or more"
+    )
     # Models config; unset: config/models.yaml, or config/models.local.yaml with APP_ENV=local.
     models_file: Path | None = None
     # Model providers: required in production by the providers a chain uses (checked when they are built).
@@ -32,6 +41,18 @@ class ApiSettings(AppSettings):
     langsmith_api_key: SecretStr | None = None
     langsmith_project: str | None = None
     langsmith_endpoint: str | None = None
+
+    @field_validator("canary")
+    @classmethod
+    def _canary_format(cls, value: SecretStr) -> SecretStr:
+        canary = value.get_secret_value()
+        # `-` and `_` count toward the length but not toward being unguessable: a run of them is no marker.
+        if not CANARY_PATTERN.fullmatch(canary) or len(_CANARY_SEPARATORS.sub("", canary)) < CANARY_MIN_CHARS:
+            raise ValueError(
+                f"CANARY must be {CANARY_MIN_CHARS} or more letters, digits, - or _, "
+                f"with {CANARY_MIN_CHARS} or more of them letters or digits"
+            )
+        return value
 
     @field_validator(
         "openrouter_api_key",
@@ -68,10 +89,11 @@ class ApiSettings(AppSettings):
 
     def secret_values(self) -> list[str]:
         """Every secret value the app holds, for the trace redactor. A setting that adds a secret (such as
-        the canary of F01-T08) adds it here."""
+        the canary) adds it here."""
         secrets = [
             self.turnstile_secret,
             self.salt_seed,
+            self.canary,
             self.openrouter_api_key,
             self.groq_api_key,
             self.nvidia_api_key,
@@ -103,6 +125,8 @@ class ApiSettings(AppSettings):
         # The published local seed would let anyone with the repository reverse the hashed IPs.
         if self.salt_seed.get_secret_value().strip() == PUBLISHED_LOCAL_SEED:
             raise ValueError("SALT_SEED is the published local example; production needs its own secret")
+        if self.canary.get_secret_value() == PUBLISHED_LOCAL_CANARY:
+            raise ValueError("CANARY is the published local example; production needs its own secret")
         # The compose file's database password, published in the repository, is no password in production.
         if PUBLISHED_LOCAL_DB_PASSWORD in self._database_passwords():
             raise ValueError(

@@ -10,7 +10,7 @@ from uuid import UUID
 
 import structlog
 
-from rag_core.events import DegradedReason, Done
+from rag_core.events import ContactOption, DegradedReason, Done
 from rag_core.limits import Limits
 from rag_core.ports import ActiveCorpus, Embedder, Reranker, TraceSink, VectorStore
 from rag_core.services import retrieval
@@ -31,6 +31,7 @@ async def run_search_only(
     limits: Limits,
     reason: DegradedReason = "models_unavailable",
     deadline_at: float | None = None,
+    contact: Sequence[ContactOption] = (),
 ) -> None:
     """Emits the whole stream, ending with `done`; a bug becomes `error` then `done`, never an exception."""
     try:
@@ -46,6 +47,6 @@ async def run_search_only(
         emit_degraded(sink, hits, corpus.version, reason, limits.degraded_max_passages)
     except Exception:
         log.exception("search_only_failed")
-        end_with_error(sink, trace_id)
+        end_with_error(sink, trace_id, contact)
         return
-    sink.record(Done(trace_id=trace_id, outcome="degraded", cached=False, suggestion=None))
+    sink.record(Done(trace_id=trace_id, outcome="degraded", cached=False, contact=list(contact)))

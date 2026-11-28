@@ -76,6 +76,14 @@ async def test_searches_only_the_given_version(store: tuple[PgVectorStore, str])
     assert old[1] not in [h.id for h in hits]
 
 
+async def test_a_hit_carries_its_documents_authority(store: tuple[PgVectorStore, str]) -> None:
+    vs, url = store
+    with psycopg.connect(url) as conn:
+        version = add_version(conn, [("serverless pipelines on aws", unit((0, 1)))])
+    hits = await vs.search(unit((0, 1)), "serverless", k=20, version=version[0])
+    assert [h.authority for h in hits] == [3]  # the fixture document's authority
+
+
 async def test_fuses_vector_and_full_text_hits_with_rrf(store: tuple[PgVectorStore, str]) -> None:
     vs, url = store
     query = unit((0, 1))

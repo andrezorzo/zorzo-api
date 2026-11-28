@@ -11,6 +11,7 @@ from rag_core.agent.state import AgentState
 from rag_core.domain import Intent, load_prompts
 from rag_core.events import StreamEvent
 from rag_core.services.gateway import RequestSpend
+from rag_core.services.guard import CanaryWatch
 from structlog.testing import capture_logs
 
 from tests.core.test_gateway import LIMITS
@@ -51,6 +52,11 @@ async def test_the_recursion_backstop_abstains_and_logs() -> None:
         corpus_version=1,
         deadline_at=asyncio.get_running_loop().time() + 10,
         spend=RequestSpend(LIMITS.request_cost_cap_usd),
+        classifier=cast(Any, None),
+        defenses=cast(Any, None),
+        suggestions=cast(Any, None),
+        canary=CanaryWatch("canary"),
+        trace_id=uuid4(),
     )
     with capture_logs() as logs:
         result = await run_agent("q", uuid4(), agent=looping(), context=context)

@@ -5,17 +5,17 @@ repository (Apache-2.0). The API image bakes the files into `RERANK_CACHE_DIR` a
 """
 
 import functools
-import hashlib
-import os
-import threading
-import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import anyio
 
+from rag_core.adapters import onnx_model as shared
+from rag_core.adapters.onnx_model import ModelIntegrityError
 from rag_core.ports import SearchHit
+
+__all__ = ["LocalReranker", "ModelIntegrityError", "verify_model_files"]
 
 MODEL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
 MODEL_FILE = "onnx/model_quint8_avx2.onnx"
@@ -34,93 +34,35 @@ MODEL_FILES_SHA256 = {
 }
 
 
-RETRY_AFTER_S = 60
-LOCK_WAIT_S = 0.5
 RERANK_SLOTS = 2
-
-
-class ModelIntegrityError(RuntimeError):
-    pass
 
 
 def verify_model_files(snapshot: Path) -> None:
     """Raise unless this exact snapshot folder holds the expected files."""
-    for name, digest in MODEL_FILES_SHA256.items():
-        path = snapshot / name
-        if not path.is_file():
-            raise ModelIntegrityError(f"rerank model file {name} is missing from {snapshot}")
-        with path.open("rb") as f:
-            actual = hashlib.file_digest(f, "sha256").hexdigest()  # in chunks: the ONNX file is 130 MB
-        if actual != digest:
-            raise ModelIntegrityError(f"rerank model file {name} in {snapshot} doesn't match its pinned hash")
-
-
-def _download(cache_dir: Path) -> Path:
-    """The pinned revision's files, from the cache when present (the image loads offline)."""
-    from huggingface_hub import snapshot_download
-
-    return Path(
-        snapshot_download(
-            MODEL, revision=MODEL_REVISION, allow_patterns=list(MODEL_FILES_SHA256), cache_dir=str(cache_dir)
-        )
-    )
+    shared.verify_model_files(snapshot, MODEL_FILES_SHA256, "rerank")
 
 
 @functools.cache
 def _cross_encoder_class() -> Any:
-    """Imports onnxruntime with its telemetry off and registers the model, once.
-
-    onnxruntime sends usage telemetry to Microsoft by default; nothing about a visitor's question may leave
-    the VPS through it. The variable is read when onnxruntime starts, so the import happens here, after it
-    is set (the image and the CI set it too).
-    """
-    os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
-    import onnxruntime
+    """fastembed's cross-encoder with this model registered as a custom one, once."""
+    shared.import_onnxruntime()
     from fastembed.common.model_description import ModelSource
     from fastembed.rerank.cross_encoder import TextCrossEncoder
 
-    onnxruntime.disable_telemetry_events()
     TextCrossEncoder.add_custom_model(
         model=MODEL, model_file=MODEL_FILE, sources=ModelSource(hf=MODEL), size_in_gb=0.13
     )
     return TextCrossEncoder
 
 
-class LocalReranker:
+class LocalReranker(shared.LazyModel[Any]):
     def __init__(self, cache_dir: Path) -> None:
-        self.cache_dir = cache_dir
-        self._model: Any = None
-        self._load = threading.Lock()
-        self._failed_at: float | None = None
-        # Rerank threads the request deadline abandoned keep running; this cap still counts them, so they
-        # can't pile up and starve the CPU. A question finding no free slot falls to the next level.
-        self._slots = threading.BoundedSemaphore(RERANK_SLOTS)
+        super().__init__(cache_dir, RERANK_SLOTS)
 
-    def model(self) -> Any:
-        # Another thread loading the model means this question falls to the next level now, not later.
-        if not self._load.acquire(timeout=LOCK_WAIT_S):
-            raise RuntimeError("the rerank model is still loading")
-        try:
-            if self._model is None:
-                # After a failed load, questions fall to the next level at once instead of queueing behind a
-                # new download attempt; it is tried again after a cooldown.
-                if self._failed_at is not None and time.monotonic() - self._failed_at < RETRY_AFTER_S:
-                    raise RuntimeError("the rerank model failed to load recently")
-                try:
-                    snapshot = _download(self.cache_dir)
-                    verify_model_files(snapshot)
-                    self._model = _cross_encoder_class()(
-                        MODEL, cache_dir=str(self.cache_dir), specific_model_path=str(snapshot)
-                    )
-                except Exception:
-                    self._failed_at = time.monotonic()
-                    raise
-            return self._model
-        finally:
-            self._load.release()
-
-    def warm(self) -> None:
-        self.model()
+    def _build(self) -> Any:
+        snapshot = shared.download_snapshot(MODEL, MODEL_REVISION, list(MODEL_FILES_SHA256), self.cache_dir)
+        verify_model_files(snapshot)
+        return _cross_encoder_class()(MODEL, cache_dir=str(self.cache_dir), specific_model_path=str(snapshot))
 
     async def rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
         # The cross-encoder is CPU-bound: keep it off the event loop (LLD "Process model").
@@ -128,11 +70,7 @@ class LocalReranker:
         return await anyio.to_thread.run_sync(self._rerank, query, hits, abandon_on_cancel=True)
 
     def _rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
-        if not self._slots.acquire(timeout=LOCK_WAIT_S):
-            raise RuntimeError("every rerank slot is busy")
-        try:
+        with self.slot():
             scores = list(self.model().rerank(query, [h.content for h in hits]))
-        finally:
-            self._slots.release()
         scored = [replace(h, score=float(s)) for h, s in zip(hits, scores, strict=True)]
         return sorted(scored, key=lambda h: h.score, reverse=True)

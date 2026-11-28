@@ -78,6 +78,7 @@ class SearchHit:
     title: str
     content: str
     score: float
+    authority: int = 1  # of the source document, 1 (lowest) to 3; the default allows no superlative
 
 
 @dataclass(frozen=True)
@@ -252,6 +253,26 @@ class EventLog(Protocol):
 
     async def drain(self, timeout: float | None = None) -> None:
         """Wait for the pending writes, at shutdown and in tests; with `timeout`, cancel what still runs."""
+
+
+class InjectionClassifier(Protocol):
+    """The guard's L2 layer: how likely a question is an injection attempt."""
+
+    async def score(self, text: str) -> float:
+        """The probability, 0 to 1, that the text is malicious; may raise (the run goes on, fail open)."""
+
+    def warm(self) -> None:
+        """Load what the classifier needs, at startup; raises when it can't (the API doesn't start)."""
+
+
+class DefenseLog(Protocol):
+    """`defense_events` rows: a request the guard or the gate refused. Never holds the question's text."""
+
+    def record(self, layer: str, category: str, action: str, trace_id: UUID) -> None:
+        """Never blocks: the row is written in the background, and a failure is only logged."""
+
+    async def drain(self, timeout: float | None = None) -> None:
+        """Wait for the pending writes, at shutdown and in tests."""
 
 
 @dataclass(frozen=True)

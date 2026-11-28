@@ -4,7 +4,8 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
-from rag_core.adapters.event_log import MAX_PENDING_ROWS, REARM_PENDING_ROWS, PostgresEventLog
+from rag_core.adapters.event_log import PostgresEventLog
+from rag_core.adapters.row_writer import MAX_PENDING_ROWS
 from structlog.testing import capture_logs
 
 SETTLE_TURNS = 5  # turns of the event loop for a task to end
@@ -74,7 +75,7 @@ async def test_a_flood_hovering_at_the_cap_logs_once_and_the_count_when_it_ends(
             await db.let_one_end()  # a slot frees up...
             _write(event_log)  # ...and the flood takes it
         assert [e["event"] for e in logs] == ["event_log_full"]  # one warning, not one per freed slot
-        while event_log.pending >= REARM_PENDING_ROWS:  # the burst is over
+        while event_log.pending >= event_log.rearm_pending:  # the burst is over
             await db.let_one_end()
         _write(event_log)
     counted = [e for e in logs if e["event"] == "event_log_dropped"]
@@ -94,7 +95,7 @@ async def test_the_count_is_logged_when_the_flood_stops_with_no_further_write() 
     await asyncio.sleep(0)
     with capture_logs() as logs:
         while (
-            event_log.pending >= REARM_PENDING_ROWS
+            event_log.pending >= event_log.rearm_pending
         ):  # the last insert to end brings it below; no write follows
             await db.let_one_end()
     assert [e["dropped"] for e in logs if e["event"] == "event_log_dropped"] == [7]
@@ -116,7 +117,7 @@ async def test_drain_logs_the_count_even_when_inserts_are_stuck() -> None:
     with capture_logs() as logs:
         await event_log.drain(timeout=STUCK_DRAIN_S)  # nothing ends: pending stays at the cap
     assert [e["dropped"] for e in logs if e["event"] == "event_log_dropped"] == [3]
-    assert event_log.pending >= REARM_PENDING_ROWS  # no done callback can have reported it
+    assert event_log.pending >= event_log.rearm_pending  # no done callback can have reported it
     for gate in db.gates:
         gate.set()
     await event_log.drain(timeout=DRAIN_TIMEOUT_S)

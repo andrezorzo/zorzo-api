@@ -1,6 +1,7 @@
 # The intents `route` classifies a question into (LLD "6.3 Agent run"). `description`: what the route prompt
 # is told the intent covers (its `$intents` slot). `kinds`: the document kinds the intent's retrieval reads
-# (all when absent). `action`: `answer` (default, the RAG path) or `decline` (no answer call).
+# (all when absent). `action`: `answer` (default, the RAG path), `decline` (no answer call) or `contact`
+# (no answer call: the reply is the domain's contact options).
 career_fact:
   description: salary or rates, availability, visa or work authorization, time zone or working hours
   kinds: [faq]
@@ -12,6 +13,7 @@ projects_live:
   description: what he is working on now, or a specific project of his
 contact:
   description: how to reach or hire him
+  action: contact
 off_topic:
   description: >-
     anything else (general-purpose requests, other people, his personal life, opinions about former

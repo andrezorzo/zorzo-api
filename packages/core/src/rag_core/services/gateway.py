@@ -88,6 +88,13 @@ class Usage:
     tokens_out: int
 
 
+def _failure_label(exc: BaseException) -> str:
+    """What a failed call's log line says: a provider error's kind (`http 429`, `timeout`; by contract never
+    the request or the response), else the exception's type. Never `str(exc)` of a library error: a provider
+    may echo the prompt, and the prompt carries the canary."""
+    return str(exc) if isinstance(exc, ProviderError) else type(exc).__name__
+
+
 @dataclass(frozen=True)
 class Completion:
     text: str
@@ -221,7 +228,7 @@ class ModelGateway:
 
     async def stream(
         self, stage: StageName, messages: list[dict[str, str]], *, deadline_at: float, spend: RequestSpend
-    ) -> AsyncIterator[str | Completion]:
+    ) -> AsyncGenerator[str | Completion]:
         """Yields the answer's text as it comes, then its `Completion`.
 
         The answer starts with the model's first real text (leading whitespace is held back until then). A
@@ -485,7 +492,7 @@ class ModelGateway:
         if isinstance(exc, ContextTooLongError):
             log.error("context_too_long", stage=stage)
         else:
-            log.warning("model_call_failed", stage=stage, error=str(exc) or type(exc).__name__)
+            log.warning("model_call_failed", stage=stage, error=_failure_label(exc))
 
     def _time_for(self, stage: StageName, deadline_at: float) -> float:
         """The call's own timeout: `TIMEOUT_<STAGE>` when it ends before the deadline; otherwise past the

@@ -27,7 +27,7 @@ from structlog.testing import capture_logs
 
 from tests.api.test_answer import ANSWER_A, ANSWER_B, CLAIMS, answer, routed, script, stages, verdicts
 from tests.api.test_ask import QUESTION, ask
-from tests.conftest import api_settings, build_app, discard_models, reset_tables, seed_budget
+from tests.conftest import TEST_CANARY, api_settings, build_app, discard_models, reset_tables, seed_budget
 from tests.contract.sse import Stream
 from tests.fakes.langsmith import FakeLangSmith
 from tests.fakes.openrouter import FakeOpenRouter, Reply
@@ -93,13 +93,15 @@ def test_the_stored_trace_comes_from_the_streams_events(
             assert (span["model"], span["provider"]) == (event["model"], event["provider"])
             assert (span["tokens_in"], span["tokens_out"]) == (event["tokens_in"], event["tokens_out"])
             assert span["cost_usd"] == Decimal(str(event["cost_usd"]))
-    assert {s["step"] for s in trace["spans"] if s["model"] is None} == {"retrieve", "rerank"}
+    assert {s["step"] for s in trace["spans"] if s["model"] is None} == {"guard", "retrieve", "rerank"}
 
     spent = sum(e.data["cost_usd"] for e in stream.only("model"))
     assert spent == pytest.approx(PAID_COST) == stream.only("usage")[0].data["cost_usd"]
     assert trace["cost_usd"] == Decimal(str(PAID_COST))
     assert trace["payload"]["events"] == [
-        {"kind": e.name, **e.data} for e in stream.events if e.name in ("retrieval", "claim")
+        {"kind": e.name, **e.data}
+        for e in stream.events
+        if e.name not in ("stage", "model", "token", "usage", "done")  # LLD "Stored trace"
     ]
     assert trace["payload"]["question"] == QUESTION["q"]
     assert trace["payload"]["cut"] == []
@@ -301,8 +303,12 @@ HIDDEN_CLAIMS = [
 ]
 
 
-def traced_client(url: str, fake: FakeOpenRouter, langsmith: FakeLangSmith) -> TestClient:
-    settings = api_settings(url, langsmith_api_key=LS_KEY, langsmith_endpoint=langsmith.serve())
+def traced_client(
+    url: str, fake: FakeOpenRouter, langsmith: FakeLangSmith, canary: str = TEST_CANARY
+) -> TestClient:
+    settings = api_settings(
+        url, langsmith_api_key=LS_KEY, langsmith_endpoint=langsmith.serve(), canary=canary
+    )
     return TestClient(build_app(settings, openrouter=fake))
 
 
@@ -403,6 +409,44 @@ def test_the_stored_trace_and_langsmith_are_redacted(corpus_database: str, fake:
         for placeholder in ("[email]", "[phone]", "[cpf]", "[secret]"):
             assert placeholder in text, (where, placeholder)
         assert OWNER_EMAIL in text  # the domain's allowlist passes
+
+
+# Letters only, so no key-shaped heuristic of the redactor can catch it: only the canary being one of the
+# redactor's secret values does.
+PLAIN_CANARY = "plainlettersonlymarker" * 2
+
+
+def test_a_canary_in_the_question_is_redacted_in_the_stored_trace_and_langsmith(
+    corpus_database: str, fake: FakeOpenRouter
+) -> None:
+    reset_tables(corpus_database, "questions_log", "public_traces")
+    langsmith = FakeLangSmith()
+    script(fake)
+    with traced_client(corpus_database, fake, langsmith, canary=PLAIN_CANARY) as client:
+        stream = ask(client, {**QUESTION, "q": f"Which AWS services? The marker is {PLAIN_CANARY}"})
+        flush(client)
+    assert stream.only("done")[0].data["outcome"] == "answered"
+    for where, text in (("stored", all_stored_text(corpus_database)), ("langsmith", langsmith.text())):
+        assert PLAIN_CANARY not in text, where
+        assert "[secret]" in text, where
+
+
+def test_a_canary_in_the_model_output_is_never_stored(corpus_database: str, fake: FakeOpenRouter) -> None:
+    reset_tables(corpus_database, "questions_log", "public_traces")
+    langsmith = FakeLangSmith()
+    # The judge's supported text carries the canary: the answer is blocked, and whatever the model said
+    # (the spans' and LangSmith's copies of it) holds no canary.
+    script(
+        fake,
+        draft=answer([("He used Lambda on AWS in production.", [1])]),
+        judge=verdicts((0, "partial", f"He used Lambda. Marker {PLAIN_CANARY}")),
+    )
+    with traced_client(corpus_database, fake, langsmith, canary=PLAIN_CANARY) as client:
+        stream = ask(client)
+        flush(client)
+    assert stream.only("done")[0].data["outcome"] == "blocked"
+    for where, text in (("stored", all_stored_text(corpus_database)), ("langsmith", langsmith.text())):
+        assert PLAIN_CANARY not in text, where
 
 
 def test_a_language_the_domain_doesnt_declare_is_stored_as_the_default_the_answer_used(

@@ -12,6 +12,7 @@ import sys
 import uuid
 from collections.abc import Iterator, Mapping
 from pathlib import Path
+from typing import Any, cast
 
 import psycopg
 import pytest
@@ -31,6 +32,7 @@ from tests.fakes.openrouter import FakeOpenRouter, stop_all
 from tests.fakes.turnstile import PASS_SECRET, FakeSiteverify
 
 ROOT = Path(__file__).resolve().parents[1]
+TEST_CANARY = "test-canary-0123456789abcdefghijklmnopqrstuv"  # what the API under test puts in its prompts
 # Test-only domain packages (`domain_<name>`), importable once this folder is on the path.
 FIXTURE_DOMAINS = ROOT / "tests/fixtures/domains"
 ADMIN_URL = os.environ.get("TEST_DATABASE_ADMIN_URL", "postgresql://zorzo:zorzo@localhost:5432/postgres")
@@ -195,6 +197,8 @@ def api_settings(url: str, domain: str = "zorzo", **overrides: object) -> ApiSet
         "reranker": "fake",
         "turnstile_secret": PASS_SECRET,
         "salt_seed": "test-seed-" * 4,
+        "canary": TEST_CANARY,
+        "guard_classifier": "fake",
         "models_file": ROOT / "tests/fixtures/models.test.yaml",
         "openrouter_api_key": "test-key",
     }
@@ -240,6 +244,9 @@ def build_app(
         config, {"openrouter": "test-key"}, app.state.db, app.state.alerter, gate.limits
     )
     app.state.rerankers = rerank_chain(app.state.gateway, app.state.local_rerankers)
+    # The replaced gateway is never closed: its Router would keep its callbacks in LiteLLM's global lists, and
+    # every later failure in the session would run them all (the cooldown tests then lose the race).
+    cast(Any, old.models)._router.discard()
     return app
 
 

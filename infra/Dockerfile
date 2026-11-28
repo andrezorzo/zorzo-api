@@ -19,13 +19,16 @@ USER app
 CMD ["python", "apps/dashboard/manage.py", "migrate", "--noinput"]
 
 FROM base AS api
-# The local rerank model is baked in and loaded offline (LLD "Libraries": local rerank).
-ENV RERANK_CACHE_DIR=/app/models/rerank ORT_DISABLE_TELEMETRY=1
+# The local rerank and injection classifier models are baked in and loaded offline (LLD "Libraries"). They stay
+# owned by root and read-only: a bug or an attacker in the app user can't swap a model file at runtime.
+ENV RERANK_CACHE_DIR=/app/models/rerank GUARD_CACHE_DIR=/app/models/guard ORT_DISABLE_TELEMETRY=1
 # LiteLLM fetches its model cost map from GitHub at import unless told to use the bundled one (ADR 0016).
 ENV LITELLM_LOCAL_MODEL_COST_MAP=True
 RUN python -c "from pathlib import Path; from rag_core.adapters.local_reranker import LocalReranker; \
 LocalReranker(Path('/app/models/rerank')).model()" \
- && chown -R app /app/models
+ && python -c "from pathlib import Path; from rag_core.adapters.prompt_guard import PromptGuardClassifier; \
+PromptGuardClassifier(Path('/app/models/guard')).model()" \
+ && chmod -R a-w,a+rX /app/models
 ENV HF_HUB_OFFLINE=1
 USER app
 EXPOSE 8000

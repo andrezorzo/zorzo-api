@@ -16,6 +16,7 @@ from langchain_core.utils.json import parse_partial_json
 from pydantic import BaseModel, ConfigDict
 
 from rag_core.ports import SearchHit
+from rag_core.services.guard import links_allowed
 
 Verdict = Literal["supported", "partial", "unsupported"]
 CheckedVerdict = Literal[Verdict, "gap"]  # `gap`: the sentence naming what the passages don't cover
@@ -117,11 +118,18 @@ def draft_text(streamed: str) -> str:
     return " ".join(t for t in texts if t)
 
 
-def cite(answer: AnswerContract, passages: Sequence[SearchHit]) -> list[CitedClaim]:
-    """Each claim with its cited passages; any number outside 1..n voids all of the claim's citations."""
+def cite(
+    answer: AnswerContract, passages: Sequence[SearchHit], link_hosts: Sequence[str]
+) -> list[CitedClaim]:
+    """Each claim with its cited passages; any number outside 1..n voids all of the claim's citations, and so
+    does a link to a host outside `link_hosts` (the claim is then `unsupported`, with no judge vote)."""
     cited: list[CitedClaim] = []
     for claim in answer.claims:
-        valid = bool(claim.sources) and all(1 <= n <= len(passages) for n in claim.sources)
+        valid = (
+            bool(claim.sources)
+            and all(1 <= n <= len(passages) for n in claim.sources)
+            and links_allowed(claim.text, link_hosts)
+        )
         hits = tuple(passages[n - 1] for n in dict.fromkeys(claim.sources)) if valid else ()
         cited.append(CitedClaim(claim.text, hits))
     return cited
@@ -132,7 +140,11 @@ def judge_input(claims: Sequence[CitedClaim]) -> str:
     out). A claim is model text the visitor may have steered; inside a JSON string it can't pose as
     structure or instructions."""
     rows = [
-        {"i": i, "claim": claim.text, "cited_passages": [hit.content for hit in claim.passages]}
+        {
+            "i": i,
+            "claim": claim.text,
+            "cited_passages": [{"authority": hit.authority, "text": hit.content} for hit in claim.passages],
+        }
         for i, claim in enumerate(claims)
         if claim.passages
     ]
@@ -159,6 +171,26 @@ def apply_verdicts(
     if gap and gap.strip():
         checked.append(CheckedClaim(gap.strip(), (), "gap"))
     return checked
+
+
+def enforce_links(
+    checked: Sequence[CheckedClaim], cited: Sequence[CitedClaim], link_hosts: Sequence[str]
+) -> list[CheckedClaim]:
+    """The published texts held to the link allowlist (the citation check saw only the claims as drafted): a
+    gap with a bad link is dropped, and a `partial` claim whose kept text has one goes back to its own text,
+    `unsupported`."""
+    result: list[CheckedClaim] = []
+    for i, claim in enumerate(checked):
+        if claim.verdict == "partial":
+            # The kept text is the judge's own, unless it is the claim as drafted (`cite` checked that one).
+            if claim.text == cited[i].text or links_allowed(claim.text, link_hosts):
+                result.append(claim)
+            else:
+                result.append(CheckedClaim(cited[i].text, claim.sources, "unsupported"))
+        elif claim.verdict != "gap" or links_allowed(claim.text, link_hosts):
+            result.append(claim)  # an `unsupported` claim shows struck through, as text, never as a link
+        # a gap with a bad link is dropped
+    return result
 
 
 def coherent(claims: Sequence[CheckedClaim]) -> bool:

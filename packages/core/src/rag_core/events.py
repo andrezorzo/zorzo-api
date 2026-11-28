@@ -27,10 +27,16 @@ StageName = Literal[
     "repair",
     "finish",
 ]
+# The guard layers of LLD "Security": L0 bot check, L1 rate limit, L2 input classifier, L3 untrusted-content
+# marking, L4 prompt rules, L5 output checks, L6 verification.
+GuardLayer = Literal["L0", "L1", "L2", "L3", "L4", "L5", "L6"]
+BlockCategory = Literal["injection", "prompt_leak"]
 DegradedReason = Literal["models_unavailable", "budget_exhausted", "quota_exhausted", "deadline"]
 # The result of a request, named as the stored outcomes are (`questions_log.outcome`); `error` (a bug) is
 # this stream's only (the stored trace keeps it as it is, LLD "4. Data").
 Outcome = Literal["answered", "abstained", "declined", "blocked", "degraded", "error"]
+# Outcomes whose stream sends no `usage`: a search-only run ends with its passages, a block with `done`.
+NO_USAGE_OUTCOMES: frozenset[Outcome] = frozenset({"degraded", "blocked"})
 
 
 class StreamEvent(BaseModel):
@@ -52,9 +58,9 @@ class Stage(StreamEvent):
 
 class Guard(StreamEvent):
     kind = "guard"
-    layer: str
-    label: str
-    action: str
+    layer: GuardLayer
+    label: str = Field(description="English, for the trace")
+    action: Literal["pass", "block", "error"]
 
 
 class Hit(BaseModel):
@@ -112,9 +118,9 @@ class Usage(StreamEvent):
 
 class Blocked(StreamEvent):
     kind = "blocked"
-    layer: str
-    category: str
-    message: str
+    layer: GuardLayer
+    category: BlockCategory
+    message: str = Field(description="English, for the trace; the front words it from `layer` and `category`")
 
 
 class Degraded(StreamEvent):
@@ -129,13 +135,22 @@ class Error(StreamEvent):
     message: str
 
 
+class ContactOption(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    label: str
+    url: str
+
+
 class Done(StreamEvent):
     kind = "done"
     trace_id: UUID
     outcome: Outcome
     cached: bool
     suggestion: str | None = Field(
-        description="Id of the closest example question, on an abstention or decline"
+        default=None, description="Id of the closest example question, on an abstention or decline"
+    )
+    contact: list[ContactOption] | None = Field(
+        default=None, description="The domain's contact options, in their order"
     )
 
     @property
@@ -162,7 +177,8 @@ EVENTS: tuple[type[StreamEvent], ...] = (
 ORDERING = (
     "SSE frames `event: <name>` and `data: <JSON>`; `: ping` comments keep the connection alive. "
     "Ordering: `done` is always last, sent exactly once unless the connection drops; `blocked` and `error` "
-    "are followed only by `done`; `degraded` is followed only by its `retrieval` hits, then `done`; every "
+    "are followed only by `done` (an output check's `blocked` may come after `token`s); `degraded` is "
+    "followed only by its `retrieval` hits, then `done`; every "
     "`token` comes before the first `claim`; a cached answer sends `stage`, the cached `claim` events, "
     "`usage` with cost 0 and `done {cached: true}`, with no `token`. v1 freezes at launch."
 )

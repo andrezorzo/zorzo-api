@@ -16,7 +16,7 @@ import structlog
 
 from rag_core.errors import ApiError, ErrorCode
 from rag_core.limits import Limits
-from rag_core.ports import BotCheck, Bucket, EventLog, RateLimiter, StoreUnavailableError
+from rag_core.ports import BotCheck, Bucket, DefenseLog, EventLog, RateLimiter, StoreUnavailableError
 from rag_core.services.client_ip import hashed_ip, viewer_ip
 from rag_core.services.question import normalize
 
@@ -41,6 +41,7 @@ class Gate:
         limits: Limits,
         salt_seed: bytes,
         app_env: str,
+        defenses: DefenseLog,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.clock = clock  # the UTC day picks the salt and the day buckets
@@ -50,8 +51,9 @@ class Gate:
         self.limits = limits
         self.salt_seed = salt_seed
         self.app_env = app_env
+        self.defenses = defenses  # a refusal here is a defense event (LLD "Defense events")
 
-    async def check(self, question: str, token: str, asker: Asker, deadline_at: float) -> str:
+    async def check(self, question: str, token: str, asker: Asker, deadline_at: float, trace_id: UUID) -> str:
         """The normalized question, or `ApiError`: 403, 422, 429, or 503 (no viewer address in production, the
         database down, or the deadline reached).
 
@@ -60,7 +62,7 @@ class Gate:
         step = ["bot_check"]  # the step running, for the log line when the deadline cuts it
         try:
             async with asyncio.timeout_at(deadline_at) as scope:
-                return await self._check(question, token, asker, step)
+                return await self._check(question, token, asker, step, trace_id)
         except TimeoutError as exc:
             if not scope.expired():
                 raise  # a timeout of some step's own, not the request's deadline
@@ -68,8 +70,11 @@ class Gate:
             (log.error if step[0] == "rate_limit" else log.warning)("deadline_exceeded", stage=step[0])
             raise ApiError(ErrorCode.UNAVAILABLE) from exc
 
-    async def _check(self, question: str, token: str, asker: Asker, step: list[str]) -> str:
+    async def _check(self, question: str, token: str, asker: Asker, step: list[str], trace_id: UUID) -> str:
         if not await self.bot_check.verify(token):
+            self.defenses.record(
+                "L0", "bot", "block", trace_id
+            )  # in the background: the refusal doesn't wait
             raise ApiError(ErrorCode.BOT_CHECK_FAILED)
         text = normalize(question, self.limits)
         now = self.clock()
@@ -88,6 +93,7 @@ class Gate:
             # A row for the dashboard: the empty buckets' kinds, never a key (they hold the hashed IP and
             # the session); no trace id, since a refused request has no trace.
             self.event_log.write("warning", "gate", "rate_limited", {"buckets": kinds})
+            self.defenses.record("L1", "rate_limit", "block", trace_id)
             # Whole seconds, at least one: a refill that is due now still needs a new request.
             raise ApiError(ErrorCode.RATE_LIMITED, headers={"Retry-After": str(max(1, math.ceil(wait)))})
         return text

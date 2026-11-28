@@ -1,6 +1,6 @@
 """Retrieval (ADR 0001, ADR 0009): hybrid search over one corpus version, then the rerank chain."""
 
-from collections.abc import Sequence
+from collections.abc import MutableMapping, Sequence
 
 import structlog
 
@@ -19,8 +19,14 @@ async def search(
     store: VectorStore,
     limits: Limits,
     kinds: Sequence[str] | None = None,
+    vectors: MutableMapping[str, list[float]] | None = None,
 ) -> list[SearchHit]:
-    [vector] = await embedder.embed([question])
+    """`vectors`, when given, holds the texts embedded so far: the question's is read from it or added."""
+    vector = vectors.get(question) if vectors is not None else None
+    if vector is None:
+        [vector] = await embedder.embed([question])
+        if vectors is not None:
+            vectors[question] = vector
     return await store.search(vector, question, limits.retrieval_top_k, version, kinds)
 
 
@@ -48,11 +54,18 @@ async def retrieve(
     rerankers: Sequence[Reranker],
     limits: Limits,
     kinds: Sequence[str] | None = None,
+    vectors: MutableMapping[str, list[float]] | None = None,
 ) -> list[SearchHit]:
     """Search, then rerank, each as a step of the stream."""
     with stage(sink, "retrieve"):
         hits = await search(
-            question, corpus_version, embedder=embedder, store=store, limits=limits, kinds=kinds
+            question,
+            corpus_version,
+            embedder=embedder,
+            store=store,
+            limits=limits,
+            kinds=kinds,
+            vectors=vectors,
         )
     with stage(sink, "rerank"):
         return await rerank(question, hits, rerankers=rerankers, limits=limits)

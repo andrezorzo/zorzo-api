@@ -52,7 +52,7 @@ def test_streams_search_only_passages(client: TestClient, corpus_database: str) 
     assert stream.names()[-3:] == ["degraded", "retrieval", "done"]
     stages = [(e.data["name"], e.data["status"]) for e in stream.only("stage")]
     assert stages == [
-        ("route", "start"), ("route", "end"),
+        ("guard", "start"), ("guard", "end"), ("route", "start"), ("route", "end"),
         ("retrieve", "start"), ("retrieve", "end"), ("rerank", "start"), ("rerank", "end"),
     ]  # fmt: skip
     assert stream.only("degraded")[0].data == {"mode": "search_only", "reason": "models_unavailable"}
@@ -64,6 +64,7 @@ def test_streams_search_only_passages(client: TestClient, corpus_database: str) 
 
     done = stream.only("done")[0].data
     assert done["cached"] is False and done["outcome"] == "degraded" and done["suggestion"] is None
+    assert [o["label"] for o in done["contact"]] == ["LinkedIn", "GitHub", "Email"]  # every `done` carries it
 
 
 def test_streams_no_hits_when_nothing_matches(client: TestClient) -> None:
