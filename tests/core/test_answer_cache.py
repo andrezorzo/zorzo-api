@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncIterator
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -9,12 +10,15 @@ import pytest
 from rag_core.adapters.answer_cache import PgAnswerCache
 from rag_core.adapters.fake_embedder import HashEmbedder
 from rag_core.adapters.postgres import Database
+from rag_core.limits import load_limits
 from rag_core.ports import CacheEntry
+from rag_core.services.answer_cache import AnswerCacheService
 
 from tests.conftest import reset_tables
 
 CLAIMS: list[dict[str, Any]] = [{"i": 0, "text": "He used EC2.", "sources": [1], "verdict": "supported"}]
 SIMILARITY = 0.95
+LIMITS = Path(__file__).parents[2] / "config" / "limits.yaml"
 TTL_S = 3600.0
 VERSION = "cfg-1"
 QUESTION = "Which AWS services has he used"
@@ -121,3 +125,21 @@ async def test_a_stored_row_has_what_the_writer_sets(cache: PgAnswerCache, corpu
     assert row is not None
     assert row[:4] == (QUESTION, "en", VERSION, {"claims": CLAIMS})
     assert row[4] == timedelta(seconds=TTL_S) and row[5] is None and row[6] == 0
+
+
+async def test_a_row_the_service_refuses_is_deleted_and_never_shadows_a_new_one(
+    cache: PgAnswerCache, corpus_database: str
+) -> None:
+    service = AnswerCacheService(cache, HashEmbedder(), load_limits(LIMITS), VERSION, ["en"])
+    version = active_version(corpus_database)
+    # An unreadable row (a claim without its `verdict`), then a good one for the same question.
+    await cache.store(await entry(corpus_database, claims=[{"i": 0, "text": "x", "sources": []}]), TTL_S)
+    found = await service.lookup(QUESTION, "en", version, 1e12, lambda _: True)
+    assert found.claims is None and found.vector is not None
+    assert hits(corpus_database) == []  # deleted: it never counts as a hit
+    await cache.store(await entry(corpus_database), TTL_S)
+    found = await service.lookup(QUESTION, "en", version, 1e12, lambda _: False)  # refused by the checks
+    assert found.claims is None and hits(corpus_database) == []
+    await cache.store(await entry(corpus_database), TTL_S)
+    found = await service.lookup(QUESTION, "en", version, 1e12, lambda _: True)
+    assert found.claims is not None and hits(corpus_database) == [1]

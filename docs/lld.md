@@ -846,6 +846,11 @@ gateway walks the chain.
   with the domain's `pii_allowlist`) finds personal data: every stored question then has nothing to scrub.
 - **Hit:** similarity ≥ `CACHE_SIMILARITY` (cosine), same language, same `corpus_version` and
   `model_config_version`, not expired; the nearest such entry is served, and its `hits` count goes up by one.
+- **A hit passes the publish checks:** before anything is sent, the stored claims are held to the link
+  allowlist and the canary check of section 6.4, as a fresh answer is (the allowlist or the canary may have
+  changed since the row was written). A row refused by them, or that no longer reads as the stream's claims,
+  is a miss (normal generation, or search-only in degraded mode) and is deleted, best effort, so it can't
+  shadow the row the next answered run stores; it doesn't count as a hit.
 - **A hit streams** the stored claims as they were first sent (verdicts and the `gap` sentence included),
   then `usage` with what the request spent (`route` only) and `done {outcome: answered, cached: true}`, which
   carries the contact options and a null `suggestion`, with no `token`, no `retrieval` and no `answer` or
@@ -854,8 +859,7 @@ gateway walks the chain.
   abstentions, declines, blocks, contact replies, degraded answers, a hit, or a run cut after its claims were
   sent. The row is
   written in the background after `done`, so it never holds the stream. A lookup or a write that fails is a
-  miss, logged at `warning`, never an error for the visitor; a stored answer that no longer reads as the
-  stream's claims is a miss too.
+  miss, logged at `warning`, never an error for the visitor.
 - **Expiry:** `expires_at` is the write time plus `CACHE_TTL`; lookups ignore expired rows, and the retention
   job deletes them (section 6.11). A new corpus or model version invalidates entries by not matching; since
   the whole limits file is part of `model_config_version` (section 3 "Configuration"), any change to it
@@ -864,7 +868,7 @@ gateway walks the chain.
   idle past `SESSION_TTL` starts over, and a state that can't be read counts as a follow-up) is looked up with
   the raw question and a local language detector (section 1, language detection), without `route`; a language
   that isn't one of the domain's, or personal data in the question, is a miss. A hit streams as above with
-  cost 0 and no `degraded` event; a miss goes on to search-only. Follow-ups go straight to search-only.
+  cost 0 and no `degraded` event; a miss goes on to search-only, reusing the lookup's vector. Follow-ups go straight to search-only.
   Serving a hit without the model-based guard is safe: the stored answer was verified and the question can't
   change it.
 

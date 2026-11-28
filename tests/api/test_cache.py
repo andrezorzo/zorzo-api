@@ -303,3 +303,72 @@ def test_degraded_mode_skips_a_language_the_domain_doesnt_declare(
 ) -> None:
     stream = degraded_ask(client, corpus_database, SPANISH)
     assert "cache" not in stages(stream) and stream.only("degraded")
+
+
+# -- review fixes: a replay passes the publish checks ----------------------------------------
+
+BAD_LINK = "https://evil.example/leak"
+
+
+def poison_stored_claim(url: str, text: str) -> None:
+    """Rewrites the stored row's first claim, as a row written before the link allowlist changed would be."""
+    with psycopg.connect(url) as conn:
+        conn.execute(
+            "UPDATE answer_cache SET answer = "
+            "jsonb_set(answer, '{claims,0,text}', to_jsonb(CAST(%s AS text)))",
+            (text,),
+        )
+
+
+def test_a_stored_claim_linking_outside_the_allowlist_is_a_miss(
+    client: TestClient, fake: FakeOpenRouter, corpus_database: str
+) -> None:
+    stored_run(client, fake)
+    poison_stored_claim(corpus_database, f"See {BAD_LINK}")
+    script(fake)
+    stream = ask_and_wait(client)
+    assert BAD_LINK not in str(stream.names()) + str([e.data for e in stream.events])
+    assert stream.only("done")[0].data["cached"] is False and stream.only("token")
+    [row] = rows(corpus_database)  # the refused row is gone; the new run stored a servable one
+    assert BAD_LINK not in json.dumps(row["answer"])
+
+
+def test_a_stored_claim_with_the_canary_is_a_miss(
+    client: TestClient, fake: FakeOpenRouter, corpus_database: str
+) -> None:
+    stored_run(client, fake)
+    poison_stored_claim(corpus_database, f"Secret {TEST_CANARY}")
+    script(fake)
+    stream = ask_and_wait(client)
+    assert TEST_CANARY not in str([e.data for e in stream.events])
+    assert stream.only("done")[0].data["cached"] is False
+
+
+def test_degraded_mode_does_not_serve_a_claim_linking_outside_the_allowlist(
+    client: TestClient, fake: FakeOpenRouter, corpus_database: str, at_the_cap: None
+) -> None:
+    script(fake, route=with_standalone(QUESTION["q"]))
+    ask_and_wait(client)
+    poison_stored_claim(corpus_database, f"See {BAD_LINK}")
+    stream = degraded_ask(client, corpus_database, QUESTION["q"])
+    assert BAD_LINK not in str([e.data for e in stream.events])
+    assert stream.names()[-3:] == ["degraded", "retrieval", "done"]
+    assert stream.only("done")[0].data["cached"] is False
+    assert rows(corpus_database) == []  # deleted
+
+
+def test_a_degraded_miss_embeds_the_question_once(
+    client: TestClient, corpus_database: str, at_the_cap: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    embedder = client.app.state.embedder  # type: ignore[attr-defined]
+    real = embedder.embed
+    calls: list[list[str]] = []
+
+    async def counting(texts: list[str]) -> Any:
+        calls.append(list(texts))
+        return await real(texts)
+
+    monkeypatch.setattr(embedder, "embed", counting)
+    stream = degraded_ask(client, corpus_database, "What is his favourite colour?")
+    assert stream.names()[-3:] == ["degraded", "retrieval", "done"]
+    assert len(calls) == 1

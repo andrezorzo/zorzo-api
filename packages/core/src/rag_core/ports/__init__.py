@@ -76,6 +76,7 @@ class Embedder(Protocol):
 class CachedAnswer:
     """A stored answer a lookup found: the claims as they were first sent, and how close the question was."""
 
+    id: int
     claims: list[dict[str, Any]]
     similarity: float
 
@@ -108,6 +109,9 @@ class AnswerCache(Protocol):
 
     async def store(self, entry: CacheEntry, ttl_s: float) -> None:
         """One row; `expires_at` is `ttl_s` after now, by the database clock."""
+
+    async def delete(self, entry_id: int) -> None:
+        """The row, so a row that can't be served stops shadowing the one stored after it."""
 
 
 class LanguageDetector(Protocol):

@@ -41,6 +41,7 @@ from rag_core.services.verification import (
     draft_text,
     enforce_links,
     judge_input,
+    publishable,
     read_answer,
 )
 
@@ -169,16 +170,19 @@ async def cache_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any]
         return {}
     with stage(ctx.sink, "cache"):
         found = await ctx.cache.lookup(
-            route.standalone_question, route.language, ctx.corpus_version, ctx.before_answer
+            route.standalone_question,
+            route.language,
+            ctx.corpus_version,
+            ctx.before_answer,
+            lambda claims: publishable(claims, ctx.link_hosts, ctx.canary),
         )
     if found.claims is None:
         if found.vector is None:
             return {}
         ctx.vectors[route.standalone_question] = found.vector  # retrieval and the suggestion reuse it
         return {"query_vector": found.vector}
-    ctx.settled = "answered"  # first: a failure halfway must not add `error` after claims the visitor has
-    ctx.cache.replay(ctx.sink, found.claims)
-    return {"cached": True, "outcome": "answered"}
+    ctx.settled = "answered"
+    return {"cached": True, "outcome": "answered", "hit_claims": found.claims}  # `finish` sends them
 
 
 async def retrieve_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any]:

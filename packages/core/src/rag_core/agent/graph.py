@@ -20,6 +20,7 @@ from rag_core.agent import nodes
 from rag_core.agent.context import AgentContext, answer_language
 from rag_core.agent.state import AgentState
 from rag_core.events import NO_USAGE_OUTCOMES, Claim, Done, Outcome, Usage
+from rag_core.services.answer_cache import end_with_hit
 from rag_core.services.stream import emit_degraded, end_with_error
 from rag_core.units import MS_PER_S
 
@@ -131,15 +132,18 @@ async def run_agent(
             end_with_error(context.sink, trace_id, context.contact)
             return _result("error", state)
         outcome = context.settled  # the ending already sent stands
+    usage = Usage(
+        tokens_in=context.tokens_in,
+        tokens_out=context.tokens_out,
+        cost_usd=context.cost_usd,
+        latency_ms=round(_elapsed(context) * MS_PER_S),
+    )
+    hit_claims = state.get("hit_claims")
+    if state.get("cached") and hit_claims:
+        end_with_hit(context.sink, hit_claims, usage, trace_id, context.contact)
+        return _result(outcome, state)
     if outcome not in NO_USAGE_OUTCOMES:
-        context.sink.record(
-            Usage(
-                tokens_in=context.tokens_in,
-                tokens_out=context.tokens_out,
-                cost_usd=context.cost_usd,
-                latency_ms=round(_elapsed(context) * MS_PER_S),
-            )
-        )
+        context.sink.record(usage)
     suggestion = await _suggestion(state, outcome, context)
     cached = bool(state.get("cached"))
     context.sink.record(

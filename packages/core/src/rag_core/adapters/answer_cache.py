@@ -23,7 +23,7 @@ WITH nearest AS (
 UPDATE answer_cache SET hits = hits + 1
 FROM nearest
 WHERE answer_cache.id = nearest.id AND nearest.similarity >= :min_similarity
-RETURNING answer_cache.answer, nearest.similarity
+RETURNING answer_cache.id, answer_cache.answer, nearest.similarity
 """)
 
 # `statement_timestamp()`, the clock of `created_at`'s default, so `expires_at` is exactly the TTL after it.
@@ -33,6 +33,8 @@ INSERT INTO answer_cache (question_scrubbed, lang, corpus_version, model_config_
 VALUES (:question, :lang, :corpus_version, :model_config_version, CAST(:answer AS jsonb),
         CAST(:vector AS vector), statement_timestamp() + make_interval(secs => :ttl_s))
 """)
+
+DELETE = text("DELETE FROM answer_cache WHERE id = :id")
 
 
 class PgAnswerCache:
@@ -65,7 +67,11 @@ class PgAnswerCache:
             ).first()
         if row is None:
             return None
-        return CachedAnswer(claims=_claims(row.answer), similarity=float(row.similarity))
+        return CachedAnswer(id=int(row.id), claims=_claims(row.answer), similarity=float(row.similarity))
+
+    async def delete(self, entry_id: int) -> None:
+        async with self.db.short_transaction() as conn:
+            await conn.execute(DELETE, {"id": entry_id})
 
     async def store(self, entry: CacheEntry, ttl_s: float) -> None:
         async with self.db.short_transaction() as conn:

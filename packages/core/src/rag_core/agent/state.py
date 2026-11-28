@@ -9,7 +9,7 @@ from typing import Annotated, Any, TypedDict
 
 from langgraph.channels.untracked_value import UntrackedValue
 
-from rag_core.events import DegradedReason, Notice, Outcome
+from rag_core.events import Claim, DegradedReason, Notice, Outcome
 from rag_core.ports import SearchHit
 from rag_core.services.route import RouteResult
 from rag_core.services.verification import AnswerContract, CheckedClaim
@@ -34,7 +34,9 @@ class AgentState(TypedDict, total=False):
     # The standalone question's embedding, kept by a cache miss for the row it may store. The key says the
     # lookup ran and missed.
     query_vector: Annotated[list[float], UntrackedValue]
-    cached: Annotated[bool, UntrackedValue]  # the run is a cache hit: its claims were replayed
+    cached: Annotated[bool, UntrackedValue]  # the run is a cache hit: `finish` sends its claims
+    # What the hit found, already held to the publish checks.
+    hit_claims: Annotated[list[Claim], UntrackedValue]
     notice: Annotated[Notice, UntrackedValue]  # an edge question, sent in `done`
     # The session's conversation (`rag_core.services.conversation.Conversation` as plain types): stored.
     conversation: dict[str, Any]

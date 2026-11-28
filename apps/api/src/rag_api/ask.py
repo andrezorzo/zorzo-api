@@ -169,6 +169,8 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                             limits=state.limits,
                             reason=reason,
                             deadline_at=deadline_at,
+                            link_hosts=state.domain.link_hosts,
+                            canary=state.canary_watch,
                             contact=state.domain.contact,
                         )
                     else:
