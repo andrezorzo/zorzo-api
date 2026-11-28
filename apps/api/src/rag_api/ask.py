@@ -185,6 +185,7 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
         with structlog.contextvars.bound_contextvars(trace_id=trace_id):
             result: RunResult | None = None
             cancelled = False
+            degraded_turn: tuple[Conversation, list[Claim] | None] | None = None
             try:
                 try:
                     if reason is not None:  # a degraded mode: the cache or search-only, with no model call
@@ -208,7 +209,7 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                             contact=state.domain.contact,
                         )
                         if conversation is not None:  # unreadable: the turns are unknown, nothing is written
-                            await _remember_degraded(state, body.session, conversation, question, hit)
+                            degraded_turn = (conversation, hit)  # written after the trace, in the background
                     else:
                         context = _agent_context(state, sink, corpus.version, deadline_at, trace_uuid)
                         result = await run_agent(
@@ -240,6 +241,10 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                     cancelled=cancelled,
                 )
                 write = state.trace_writes.spawn(_store_trace(state, sink, recorder, facts))
+                if degraded_turn is not None:  # after the trace: the visitor leaving never cancels it
+                    state.trace_writes.spawn(
+                        _remember_degraded(state, body.session, degraded_turn[0], question, degraded_turn[1])
+                    )
             # The stream closes once the trace exists (the trace `done` names is there when the visitor
             # follows it); never while events are still being sent. Shielded: a visitor who leaves now
             # doesn't cancel the write. Not reached when the run was cancelled.

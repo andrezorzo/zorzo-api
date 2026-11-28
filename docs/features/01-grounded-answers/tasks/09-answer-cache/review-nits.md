@@ -49,3 +49,5 @@ today. A later cleanup task picks them up.
 ## From review round 3
 
 - `packages/core/src/rag_core/agent/graph.py` (`run_agent` tail): pre-existing, an exception raised by `sink.record` inside `end_with_hit` escapes `run_agent`, which is documented as never raising. Consider guarding the tail.
+- `apps/api/src/rag_api/ask.py` `_remember_degraded`: it reuses `limits.timeout_route` (documented as the route
+  model call's timeout) for a database write; a named limit would be cleaner.
