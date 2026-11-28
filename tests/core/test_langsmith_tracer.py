@@ -153,11 +153,11 @@ def test_a_stuck_post_gets_its_wait_and_the_client_its_floor_within_the_timeout(
     started = time.monotonic()
     with capture_logs() as logs:
         tracer.close(CLOSE_MIN_S)  # the post never ends within it
-    total = time.monotonic() - started
     release.set()
     finishing.join(TIMEOUT_S)
-    assert spy.closed_at - started >= INFLIGHT_WAIT_MIN_S  # the post got its wait
+    waited = spy.closed_at - started
+    # The post got its wait, but not the whole timeout: the client's floor comes out of it, not on top.
+    assert INFLIGHT_WAIT_MIN_S <= waited < CLOSE_MIN_S
     assert spy.timeout >= CLIENT_CLOSE_FLOOR_S  # and the client its floor
-    assert total <= CLOSE_MIN_S + TIMEOUT_S  # only a loose bound: a slow runner must not fail it
     [timed_out] = [e for e in logs if e["event"] == "langsmith_close_timed_out"]
     assert timed_out["active"] == 1 and timed_out["waited_s"] >= INFLIGHT_WAIT_MIN_S

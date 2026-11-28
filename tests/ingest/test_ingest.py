@@ -88,8 +88,8 @@ def test_rejects_an_unreviewed_document(db: str, source: Path, tmp_path: Path) -
 
 
 def test_rejects_a_document_with_a_secret(db: str, source: Path, tmp_path: Path) -> None:
-    # A made-up key, never a real one, built in two parts. Fixed: a random one escaped gitleaks' entropy
-    # check now and then, and this one is flagged every time.
+    # A made-up key, never a real one, built in two parts. Fixed, with digits: gitleaks' generic rule skips
+    # a key with none, which a random one sometimes was.
     key = "sk-proj-" + "aB3dE5gH7jK9mN1pQ3sT5vW7yZ2bD4fH6jL8nP0r"
     write_doc(source, "leak.md", f'config: openai_api_key = "{key}"')
     run = ingest(db, tmp_path / "data", "--source", str(source))

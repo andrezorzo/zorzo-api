@@ -34,7 +34,7 @@ CLIENT_INFO = {"version": "0.0.0"}
 # (the other requests' runs). A stuck post can't take the second part: the client always gets its floor.
 INFLIGHT_WAIT_MIN_S = 0.5
 CLIENT_CLOSE_FLOOR_S = 1.0  # one HTTPS batch post needs about this
-WAITED_DIGITS = 2  # decimals of the seconds `langsmith_close_timed_out` logs
+WAITED_S_DECIMALS = 2  # decimals of the seconds `langsmith_close_timed_out` logs
 CLOSE_MIN_S = INFLIGHT_WAIT_MIN_S + CLIENT_CLOSE_FLOOR_S  # the least a caller should give `close`
 
 
@@ -72,7 +72,7 @@ class _Shutdown:
             log.warning(
                 "langsmith_close_timed_out",
                 active=active,
-                waited_s=round(time.monotonic() - started, WAITED_DIGITS),
+                waited_s=round(time.monotonic() - started, WAITED_S_DECIMALS),
             )
 
 
