@@ -369,7 +369,12 @@ def test_a_control_character_stays_a_link_boundary(text: str) -> None:
     ["https\x01://evil.com", "www\x01.evil.com", "ww\x01w.evil.com", "javascript\x01:alert(1)",
      "http\x01:evil.com", "data\x01:text/html,x", "see www\x7f.evil.com", "https\x1f://evil.com",
      "www\x0b.evil.com", "https\x85://evil.com", "www\x1c.evil.com", "https\x0c://evil.com",
-     "www\x0c.evil.com"],
+     "www\x0c.evil.com", "see\x0c/\x01/evil.com", "a\x0cjava\x01script:alert(1)", "see\x0cht\x01tp:evil.com"],
 )  # fmt: skip
 def test_a_control_character_inside_a_link_hides_nothing(text: str) -> None:
     assert not links_allowed(text, ["github.com"])
+
+
+def test_a_claim_with_any_other_control_character_is_refused_even_without_a_link() -> None:
+    assert not links_allowed("plain text\x01with no link", ["github.com"])
+    assert links_allowed("a tab\tand a line\nbreak, https://github.com/andre", ["github.com"])

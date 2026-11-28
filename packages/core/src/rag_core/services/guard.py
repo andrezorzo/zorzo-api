@@ -55,9 +55,9 @@ _NESTED_LINK = re.compile(r"://|[,;|\"'(<\[](?:www\.|//)", re.IGNORECASE)
 _SCHEME_SUFFIX = re.compile(r"[^a-z]*(https?)", re.IGNORECASE)
 _TRAILING_PUNCTUATION = ".,;:!?)]}>'\"\u00bb\u201d\u2019\u2014\u2013\u3001\u300d\u300f\u3011"  # and closers
 _AUTHORITY = re.compile(r"[a-z0-9.\-]+")  # a plain ASCII host: no userinfo, port, escape or bracket
-# The whitespace a page shows as a gap (CSS Text: not the form feed); any other control character may be drawn
-# as nothing.
-_HTML_SPACE = " \t\n\r"
+# The control characters a page shows as a gap. Any other one may be drawn as nothing, as a gap or as a glyph,
+# depending on the browser, so no single reading of the text would match what the visitor sees.
+_TEXT_CONTROLS = "\t\n\r"
 
 
 async def check_input(classifier: InjectionClassifier, question: str, threshold: float) -> InputAction:
@@ -176,12 +176,9 @@ def links_allowed(text: str, hosts: Sequence[str]) -> bool:
     is not checked (`link-and-canary-residual-risk.md`). The contact links reach the page through
     `done.contact`, never through a claim."""
     normalized = unicodedata.normalize("NFKC", text).replace("\\", "/").translate(_DOTS)
+    # A control character can hide a link as a boundary (`a\x01//evil.com`) or inside a scheme
+    # (`https\x01://evil.com`), and how it is drawn varies: a claim holding one is refused outright.
+    if any(unicodedata.category(c) == "Cc" and c not in _TEXT_CONTROLS for c in normalized):
+        return False
     normalized = "".join(c for c in normalized if unicodedata.category(c) != "Cf")  # zero-width joiners
-    # A control character drawn as nothing can hide a link two ways: as a boundary kept (`a\x01//evil.com`)
-    # or inside the scheme (`https\x01://evil.com`). Both readings must pass.
-    joined = "".join(c for c in normalized if c in _HTML_SPACE or unicodedata.category(c) != "Cc")
-    return all(
-        _link_allowed(match.group(), hosts)
-        for form in (normalized, joined)
-        for match in _EXPLICIT_LINK.finditer(form)
-    )
+    return all(_link_allowed(match.group(), hosts) for match in _EXPLICIT_LINK.finditer(normalized))
