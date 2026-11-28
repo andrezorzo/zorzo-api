@@ -23,6 +23,7 @@ from tests.api.test_answer import (
     verdicts,
 )
 from tests.api.test_ask import QUESTION, ask
+from tests.api.test_conversation import FOLLOW_UP, follow_up, route_inputs
 from tests.conftest import (
     TEST_CANARY,
     api_settings,
@@ -416,3 +417,78 @@ def test_a_conversation_that_cannot_be_read_goes_to_search_only(
     stream = degraded_ask(client, corpus_database, QUESTION["q"])
     assert "cache" not in stages(stream) and stream.only("degraded")
     assert stream.only("done")[0].data["cached"] is False
+
+
+# -- review round 4: degraded runs record a minimal turn ---------------------------------------------------
+
+
+def checkpoint(url: str, session: str) -> dict[str, Any]:
+    """The channels the session's thread stores, by name."""
+    with psycopg.connect(url) as conn:
+        blobs = conn.execute(
+            "SELECT channel, blob FROM langgraph.checkpoint_blobs WHERE thread_id = %s", (session,)
+        ).fetchall()
+    return {channel: bytes(blob) for channel, blob in blobs}
+
+
+def test_a_second_degraded_question_of_a_session_goes_straight_to_search_only(
+    client: TestClient, fake: FakeOpenRouter, corpus_database: str, at_the_cap: None
+) -> None:
+    script(fake, route=with_standalone(QUESTION["q"]))
+    ask_and_wait(client)
+    session = str(uuid.uuid4())
+    first = degraded_ask(client, corpus_database, QUESTION["q"], session)
+    assert stages(first) == ["cache"] and first.only("done")[0].data["cached"] is True
+    second = degraded_ask(client, corpus_database, QUESTION["q"], session)
+    assert "cache" not in stages(second) and second.only("degraded") and not second.only("claim")
+
+
+def test_a_degraded_run_stores_only_the_redacted_question_and_the_hits_claims(
+    client: TestClient, fake: FakeOpenRouter, corpus_database: str, at_the_cap: None
+) -> None:
+    first = stored_run(client, fake, route=with_standalone(QUESTION["q"]))
+    session = str(uuid.uuid4())
+    degraded_ask(client, corpus_database, QUESTION["q"], session)  # a hit
+    stored = checkpoint(corpus_database, session)
+    assert list(stored) == ["conversation"]
+    assert QUESTION["q"].encode() in stored["conversation"]
+    assert claims(first)[0]["text"].encode() in stored["conversation"]
+    other = str(uuid.uuid4())
+    degraded_ask(client, corpus_database, "What is his favourite colour?", other)  # search-only
+    stored = checkpoint(corpus_database, other)
+    assert list(stored) == ["conversation"] and b"favourite colour" in stored["conversation"]
+
+
+def test_a_failing_state_write_leaves_the_degraded_stream_as_it_was(
+    client: TestClient, fake: FakeOpenRouter, corpus_database: str, at_the_cap: None
+) -> None:
+    script(fake, route=with_standalone(QUESTION["q"]))
+    first = ask_and_wait(client)
+
+    async def broken(*_: Any, **__: Any) -> Any:
+        raise RuntimeError("the checkpoint table is gone, with the question in its message")
+
+    client.app.state.agent.aupdate_state = broken  # type: ignore[attr-defined]
+    with capture_logs() as logs:
+        stream = degraded_ask(client, corpus_database, QUESTION["q"])
+    assert claims(stream) == claims(first) and stream.only("done")[0].data["cached"] is True
+    failed = [line for line in logs if line["event"] == "conversation_write_failed"]
+    assert [w["error"] for w in failed] == ["RuntimeError"] and "question" not in str(failed)
+
+
+# -- review round 4: a normal-mode hit remembers its claims ------------------------------------------------
+
+
+def test_a_hit_remembers_its_claims_for_the_follow_up(
+    client: TestClient, fake: FakeOpenRouter, corpus_database: str
+) -> None:
+    first = stored_run(client, fake)
+    session = str(uuid.uuid4())
+    script(fake)
+    hit = ask_and_wait(client, {**QUESTION, "session": session})
+    assert hit.only("done")[0].data["cached"] is True
+    script(fake, route=follow_up())
+    ask_and_wait(client, {**QUESTION, "q": FOLLOW_UP, "session": session})
+    shown = " ".join(c["text"] for c in claims(first) if c["verdict"] in ("supported", "partial"))
+    assert route_inputs(fake)[-1]["history"] == [{"question": STANDALONE, "answer": shown}]
+    assert list(checkpoint(corpus_database, session)) == ["conversation"]

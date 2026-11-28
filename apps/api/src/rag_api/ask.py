@@ -1,7 +1,7 @@
 """`POST /api/v1/ask` (LLD "HTTP routes"): checks run before the stream opens, then the stream events."""
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -11,12 +11,13 @@ import structlog
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 from rag_core.agent.context import AgentContext, answer_language
-from rag_core.agent.graph import RunResult, load_conversation, run_agent
+from rag_core.agent.graph import RunResult, load_conversation, remember_degraded_turn, run_agent
 from rag_core.errors import ApiError, ErrorCode
-from rag_core.events import Done, StreamEvent
+from rag_core.events import Claim, Done, StreamEvent
 from rag_core.ports import StoredTrace, StoreUnavailableError, TraceFacts, TraceSink
 from rag_core.services import corpus as corpus_service
 from rag_core.services.client_ip import VIEWER_HEADER
+from rag_core.services.conversation import Conversation
 from rag_core.services.gate import Asker
 from rag_core.services.gateway import RequestSpend
 from rag_core.services.redact import Redactor
@@ -77,17 +78,37 @@ def _agent_context(
     )
 
 
-async def _is_first_question(state: Any, session: UUID, deadline_at: float) -> bool:
-    """Whether the session has no live earlier turn (LLD "6.9 Answer cache", in degraded mode). A conversation
-    that can't be read counts as a follow-up: it goes to search-only, never to a hit served without its
-    context."""
+async def _load(state: Any, session: UUID, deadline_at: float) -> Conversation | None:
+    """The session's live conversation in a degraded mode (LLD "6.9 Answer cache"); None when it can't be
+    read: that counts as a follow-up (search-only, never a hit served without its context) and nothing is
+    written to it."""
     try:
         async with asyncio.timeout_at(deadline_at):
-            conversation = await load_conversation(state.agent, session, state.clock(), state.limits)
+            return await load_conversation(state.agent, session, state.clock(), state.limits)
     except Exception as exc:
         log.warning("conversation_load_failed", error=type(exc).__name__)
-        return False
-    return not conversation.turns
+        return None
+
+
+async def _remember_degraded(
+    state: Any, session: UUID, conversation: Conversation, question: str, hit: Sequence[Claim] | None
+) -> None:
+    """Best effort, after the ending was sent: a failure or a timeout is logged with the error type only and
+    never changes what the visitor got."""
+    try:
+        async with asyncio.timeout(state.limits.timeout_route):
+            await remember_degraded_turn(
+                state.agent,
+                session,
+                conversation,
+                question,
+                hit,
+                now=state.clock(),
+                limits=state.limits,
+                redact=state.redactor.text,
+            )
+    except Exception as exc:
+        log.warning("conversation_write_failed", error=type(exc).__name__)
 
 
 def _redacted_trace(
@@ -167,13 +188,14 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
             try:
                 try:
                     if reason is not None:  # a degraded mode: the cache or search-only, with no model call
-                        await run_degraded(
+                        conversation = await _load(state, body.session, deadline_at)
+                        hit = await run_degraded(
                             question,
                             corpus,
                             trace_uuid,
                             cache=state.answer_cache,
                             detector=state.language_detector,
-                            first_question=await _is_first_question(state, body.session, deadline_at),
+                            first_question=conversation is not None and not conversation.turns,
                             sink=sink,
                             embedder=state.embedder,
                             store=state.vector_store,
@@ -185,6 +207,8 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                             canary=state.canary_watch,
                             contact=state.domain.contact,
                         )
+                        if conversation is not None:  # unreadable: the turns are unknown, nothing is written
+                            await _remember_degraded(state, body.session, conversation, question, hit)
                     else:
                         context = _agent_context(state, sink, corpus.version, deadline_at, trace_uuid)
                         result = await run_agent(

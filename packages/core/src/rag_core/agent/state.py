@@ -34,7 +34,9 @@ class AgentState(TypedDict, total=False):
     # The standalone question's embedding, kept by a cache miss for the row it may store. The key says the
     # lookup ran and missed.
     query_vector: Annotated[list[float], UntrackedValue]
-    cached: Annotated[bool, UntrackedValue]  # the run is a cache hit: `finish` sends its claims
+    cached: Annotated[
+        bool, UntrackedValue
+    ]  # the run is a cache hit: `run_agent` sends its claims (`end_with_hit`)
     # What the hit found, already held to the publish checks.
     hit_claims: Annotated[list[Claim], UntrackedValue]
     notice: Annotated[Notice, UntrackedValue]  # an edge question, sent in `done`

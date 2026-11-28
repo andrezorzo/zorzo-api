@@ -5,7 +5,7 @@ optional reformulate → answer → verify → optional repair, with abstain, de
 """
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -22,7 +22,7 @@ from rag_core.agent.state import AgentState
 from rag_core.events import NO_USAGE_OUTCOMES, Claim, Done, Outcome, Usage
 from rag_core.limits import Limits
 from rag_core.services.answer_cache import end_with_hit
-from rag_core.services.conversation import Conversation, live
+from rag_core.services.conversation import Conversation, begin_turn, live, remembered_text, with_claims
 from rag_core.services.stream import emit_degraded, end_with_error
 from rag_core.units import MS_PER_S
 
@@ -98,6 +98,27 @@ async def load_conversation(agent: Agent, session: UUID, now: float, limits: Lim
     snapshot = await agent.aget_state({"configurable": {"thread_id": str(session)}})
     stored = snapshot.values.get("conversation") if snapshot.values else None
     return live(Conversation.model_validate(stored or {}), now, limits.session_ttl)
+
+
+async def remember_degraded_turn(
+    agent: Agent,
+    session: UUID,
+    conversation: Conversation,
+    question: str,
+    hit: Sequence[Claim] | None,
+    *,
+    now: float,
+    limits: Limits,
+    redact: Callable[[str], str],
+) -> None:
+    """After a degraded run (no `route`, so no standalone question): the session's next turn is the redacted
+    raw question and, on a cache hit, the text of the claims sent. Writes only the `conversation` channel."""
+    turn = begin_turn(conversation, redact(question), now, limits)
+    if hit:
+        turn = with_claims(turn, remembered_text(hit, redact))
+    await agent.aupdate_state(
+        {"configurable": {"thread_id": str(session)}}, {"conversation": turn.model_dump()}, as_node="guard"
+    )
 
 
 async def run_agent(

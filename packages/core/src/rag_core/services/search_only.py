@@ -77,19 +77,20 @@ async def run_degraded(
     link_hosts: Sequence[str] = (),
     canary: CanaryWatch,
     contact: Sequence[ContactOption] = (),
-) -> None:
+) -> list[Claim] | None:
     """A question asked in a degraded mode (LLD "6.9 Answer cache", in degraded mode): the first question of
     a conversation is looked up in the answer cache with no model call, and a hit is served as a cached
-    answer; everything else, a miss included, is search-only. Never raises."""
+    answer; everything else, a miss included, is search-only. Never raises. Returns the claims of a hit, or
+    None."""
     started = asyncio.get_running_loop().time()
     vectors: dict[str, list[float]] = {}
     if first_question:
         publishable_now = functools.partial(publishable, link_hosts=link_hosts, canary=canary)
-        served, vector = await _served_from_cache(
+        served, vector, hit = await _served_from_cache(
             question, corpus, trace_id, cache, detector, sink, deadline_at, contact, started, publishable_now
         )
         if served:
-            return
+            return hit
         if vector is not None:
             vectors[question] = vector  # the lookup embedded it: retrieval doesn't again
     await run_search_only(
@@ -106,6 +107,7 @@ async def run_degraded(
         contact=contact,
         vectors=vectors,
     )
+    return None
 
 
 async def _served_from_cache(
@@ -119,22 +121,23 @@ async def _served_from_cache(
     contact: Sequence[ContactOption],
     started: float,
     publishable_now: Callable[[Sequence[Claim]], bool],
-) -> tuple[bool, list[float] | None]:
+) -> tuple[bool, list[float] | None, list[Claim] | None]:
     """Looks the raw question up and, on a hit, sends the whole stream. Returns whether it did, and the
-    question's vector when the lookup embedded it (a miss, with nothing sent but the `cache` stage).
+    question's vector when the lookup embedded it (a miss, with nothing sent but the `cache` stage), and the
+    claims sent.
     Everything that can fail runs before the first `claim`, so a failure is a miss."""
     try:
         lang = detector.detect(question)
         if lang is None or cache.skips(question, lang):
-            return False, None
+            return False, None, None
         with stage(sink, "cache"):
             found = await cache.lookup(question, lang, corpus.version, deadline_at, publishable_now)
     except Exception as exc:
         log.warning("cache_lookup_failed", error=type(exc).__name__)
-        return False, None
+        return False, None, None
     if found.claims is None:
-        return False, found.vector
+        return False, found.vector, None
     latency = round((asyncio.get_running_loop().time() - started) * MS_PER_S)
     usage = Usage(tokens_in=0, tokens_out=0, cost_usd=0.0, latency_ms=latency)
     end_with_hit(sink, found.claims, usage, trace_id, contact)
-    return True, None
+    return True, None, found.claims

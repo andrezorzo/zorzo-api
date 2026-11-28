@@ -18,7 +18,7 @@ from rag_core.agent.context import AgentContext, answer_language
 from rag_core.agent.state import AgentState
 from rag_core.events import BlockCategory, Blocked, Claim, Guard, GuardLayer, Token
 from rag_core.services import retrieval
-from rag_core.services.conversation import Conversation, begin_turn, live, with_claims
+from rag_core.services.conversation import Conversation, begin_turn, live, remembered_text, with_claims
 from rag_core.services.gateway import Completion, ModelsUnavailableError
 from rag_core.services.guard import CanaryScan, check_input
 from rag_core.services.prompts import (
@@ -60,10 +60,6 @@ LEAKED: Literal["leaked"] = "leaked"  # what `_answer_contract` returns for a dr
 
 class _CanaryLeakError(Exception):
     """The draft holds the canary: the answer is stopped and the run is blocked (`L5`)."""
-
-
-# The verdicts whose text a remembered turn keeps: what the visitor was shown as checked.
-REMEMBERED_VERDICTS = frozenset({"supported", "partial"})
 
 
 class AssessResult(BaseModel):
@@ -181,9 +177,9 @@ async def cache_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any]
             return {}
         ctx.vectors[route.standalone_question] = found.vector  # retrieval and the suggestion reuse it
         return {"query_vector": found.vector}
-    # Not settled here: the claims go out in `finish`, so a cut before it is an honest `error`. Their text
-    # is remembered as the turn's, as a fresh answer's is.
-    shown = [ctx.redactor.text(c.text) for c in found.claims if c.verdict in REMEMBERED_VERDICTS]
+    # Not settled here: `run_agent` sends the claims (`end_with_hit`), so a cut before it is an honest
+    # `error`. Their text is remembered as the turn's, as a fresh answer's is.
+    shown = remembered_text(found.claims, ctx.redactor.text)
     remembered = with_claims(_conversation(state), shown).model_dump()
     return {"cached": True, "outcome": "answered", "hit_claims": found.claims, "conversation": remembered}
 
@@ -346,7 +342,7 @@ def publish_claims(
         if ctx.canary.found(" ".join(c.text for c in checked if c.text)):
             return _block(ctx, "L5", "prompt_leak", LEAK_MESSAGE)
         _send_claims(checked, ctx)
-        shown = [ctx.redactor.text(c.text) for c in checked if c.verdict in REMEMBERED_VERDICTS]
+        shown = remembered_text(checked, ctx.redactor.text)
         remembered = with_claims(conversation, shown).model_dump()
         return {"claims": checked, "outcome": "answered", "conversation": remembered}
     if repairs < ctx.limits.max_repair:

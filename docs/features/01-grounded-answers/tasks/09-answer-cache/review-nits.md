@@ -48,5 +48,4 @@ today. A later cleanup task picks them up.
 
 ## From review round 3
 
-- `packages/core/src/rag_core/agent/nodes.py:151-152`: both comments name `finish`, which does not exist; the claims are sent by `end_with_hit` in the tail of `run_agent`. Fix the comments.
 - `packages/core/src/rag_core/agent/graph.py` (`run_agent` tail): pre-existing, an exception raised by `sink.record` inside `end_with_hit` escapes `run_agent`, which is documented as never raising. Consider guarding the tail.

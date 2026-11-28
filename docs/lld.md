@@ -648,9 +648,11 @@ States of the day's budget row; the day is UTC, so every visitor sees the same "
   longer validates (logged as `conversation_unreadable`), so the session starts over instead of failing on
   every question. A turn is remembered once `route`
   answers (its question) and when its claims are published (their text), both through the shared redactor
-  of the stored trace; a follow-up with no history, a question `route` didn't answer, a question that is
-  search-only from the start and a blocked question (the guard ends the run before `route`) are not
-  remembered. A run cut by the deadline keeps what it had written; two runs of one session at once keep the
+  of the stored trace; a follow-up with no history, a question `route` didn't answer and a blocked question (the guard ends the run before `route`) are not
+  remembered. A question in a degraded mode (section 6.9) has no `route`: after its ending is sent, a turn is
+  recorded with the redacted raw question and, on a cache hit, the text of its claims, best effort (a failed
+  or slow write is logged with the error type and changes nothing the visitor got); a conversation that
+  couldn't be read is left as it is. A run cut by the deadline keeps what it had written; two runs of one session at once keep the
   last one's write.
 - **Edge questions:** a follow-up with no history is an abstention with a fixed message asking what the
   visitor means (`done.notice: no_context`), with no retrieval and no answer call; a question in a language
@@ -868,7 +870,9 @@ gateway walks the chain.
   idle past `SESSION_TTL` starts over, and a state that can't be read counts as a follow-up) is looked up with
   the raw question and a local language detector (section 1, language detection), without `route`; a language
   that isn't one of the domain's, or personal data in the question, is a miss. A hit streams as above with
-  cost 0 and no `degraded` event; a miss goes on to search-only, reusing the lookup's vector. Follow-ups go straight to search-only.
+  cost 0 and no `degraded` event; a miss goes on to search-only, reusing the lookup's
+  vector. Follow-ups go straight to search-only. Either way the run records its turn (section 6.3), so the next
+  question of the session is a follow-up.
   Serving a hit without the model-based guard is safe: the stored answer was verified and the question can't
   change it.
 
