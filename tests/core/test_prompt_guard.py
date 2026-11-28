@@ -48,10 +48,22 @@ def test_the_malicious_probability_is_the_softmax_of_the_two_logits() -> None:
     assert softmax_malicious([[1000.0, 1001.0]]) == pytest.approx(0.7310585786)  # no overflow
 
 
-@pytest.mark.parametrize("logits", [[[float("nan"), 1.0]], [[float("inf"), 1.0]], [[0.0, float("-inf")]]])
-def test_a_non_finite_score_is_an_error_never_a_pass(logits: list[list[float]]) -> None:
-    with pytest.raises(ValueError, match="finite"):
-        softmax_malicious(logits)
+def test_a_nan_logit_is_an_error_never_a_pass() -> None:
+    with pytest.raises(ValueError, match="NaN"):
+        softmax_malicious([[float("nan"), 1.0]])
+
+
+@pytest.mark.parametrize(
+    ("logits", "expected"),
+    [
+        ([[float("-inf"), 5.0]], 1.0),  # the benign label is impossible: malicious
+        ([[0.0, float("inf")]], 1.0),
+        ([[0.0, float("-inf")]], 0.0),
+        ([[float("inf"), 5.0]], 0.0),
+    ],
+)
+def test_infinite_logits_keep_well_defined_probabilities(logits: list[list[float]], expected: float) -> None:
+    assert softmax_malicious(logits) == expected
 
 
 async def test_a_question_is_tokenized_and_scored_by_the_session(

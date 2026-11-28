@@ -15,7 +15,6 @@ from urllib.parse import urlsplit
 import structlog
 
 from rag_core.domain import Prompts
-from rag_core.hidden import strip_hidden
 from rag_core.ports import InjectionClassifier
 
 log = structlog.get_logger()
@@ -55,10 +54,6 @@ _NESTED_LINK = re.compile(r"://|[,;|\"'(<\[](?:www\.|//)", re.IGNORECASE)
 # The scheme of a link whose run before `://` carries digits or punctuation: `1.https`, `-https`.
 _SCHEME_SUFFIX = re.compile(r"[^a-z]*(https?)", re.IGNORECASE)
 _TRAILING_PUNCTUATION = ".,;:!?)]}>'\"\u00bb\u201d\u2019\u2014\u2013\u3001\u300d\u300f\u3011"  # and closers
-# The control characters that are whitespace (tab, line breaks, separators): they end a link, so they stay.
-_LINK_BOUNDARIES = "".join(
-    c for c in map(chr, range(0x100)) if c.isspace() and unicodedata.category(c) == "Cc"
-)
 _AUTHORITY = re.compile(r"[a-z0-9.\-]+")  # a plain ASCII host: no userinfo, port, escape or bracket
 
 
@@ -71,8 +66,8 @@ async def check_input(classifier: InjectionClassifier, question: str, threshold:
         # The type only: the message may quote the question.
         log.error("guard_classifier_failed", error=type(exc).__name__)
         return "error"
-    if not math.isfinite(score):  # NaN compares false with everything: never a pass
-        log.error("guard_classifier_failed", error="NonFiniteScore")
+    if math.isnan(score):  # NaN compares false with everything: never a pass (infinity compares fine)
+        log.error("guard_classifier_failed", error="NaNScore")
         return "error"
     return "block" if score >= threshold else "pass"
 
@@ -178,5 +173,6 @@ def links_allowed(text: str, hosts: Sequence[str]) -> bool:
     is not checked (`link-and-canary-residual-risk.md`). The contact links reach the page through
     `done.contact`, never through a claim."""
     normalized = unicodedata.normalize("NFKC", text).replace("\\", "/").translate(_DOTS)
-    normalized = strip_hidden(normalized, keep=_LINK_BOUNDARIES)  # zero-width joiners, controls
+    # Not `strip_hidden`: a control character must stay, as the boundary before a link (`a\x01//evil.com`).
+    normalized = "".join(c for c in normalized if unicodedata.category(c) != "Cf")  # zero-width joiners
     return all(_link_allowed(match.group(), hosts) for match in _EXPLICIT_LINK.finditer(normalized))

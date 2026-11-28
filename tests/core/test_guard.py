@@ -338,13 +338,27 @@ def test_the_canary_is_found_through_case_folding_and_accents() -> None:
     )
 
 
-async def test_a_score_that_is_not_a_number_is_a_classifier_error() -> None:
-    class Broken:
-        def __init__(self, score: float) -> None:
-            self._score = score
+class _Scoring:
+    def __init__(self, score: float) -> None:
+        self._score = score
 
-        async def score(self, text: str) -> float:
-            return self._score
+    async def score(self, text: str) -> float:
+        return self._score
 
-    for score in (float("nan"), float("inf"), float("-inf")):
-        assert await check_input(Broken(score), "question", 0.5) == "error"  # type: ignore[arg-type]
+
+async def test_a_nan_score_is_a_classifier_error() -> None:
+    assert await check_input(_Scoring(float("nan")), "question", 0.5) == "error"  # type: ignore[arg-type]
+
+
+async def test_an_infinite_score_is_compared_like_any_other() -> None:
+    assert await check_input(_Scoring(float("inf")), "question", 0.5) == "block"  # type: ignore[arg-type]
+    assert await check_input(_Scoring(float("-inf")), "question", 0.5) == "pass"  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["a\x01//evil.com", "x\x01javascript:alert(1)", "see\x01https:evil.com", "e.g.\x01//evil.com",
+     "https://evil.com\x00.github.com"],
+)  # fmt: skip
+def test_a_control_character_stays_a_link_boundary(text: str) -> None:
+    assert not links_allowed(text, HOSTS)

@@ -35,8 +35,15 @@ BUSY_RETRY_S = 0.05  # between looks at a model whose slots are all held by thre
 def softmax_malicious(logits: Any) -> float:
     """The malicious label's probability from the model's two logits."""
     row = np.asarray(logits, dtype=np.float64).reshape(-1)
-    if not np.isfinite(row).all():  # NaN or infinity: no score, which `check_input` reads as an error
-        raise ValueError("the classifier's logits are not finite")
+    if np.isnan(row).any():  # no score: `check_input` reads the error as a classifier failure
+        raise ValueError("the classifier's logits hold a NaN")
+    if np.isinf(row).any():  # an infinite logit decides alone; the finite math would give NaN
+        other = row[1 - MALICIOUS]
+        if row[MALICIOUS] == np.inf:
+            return 1.0
+        if row[MALICIOUS] == -np.inf or other == np.inf:
+            return 0.0
+        return 1.0  # the other label is impossible
     exp = np.exp(row - row.max())  # the max keeps the exponentials from overflowing
     return float(exp[MALICIOUS] / exp.sum())
 
