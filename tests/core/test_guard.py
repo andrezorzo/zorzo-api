@@ -362,3 +362,12 @@ async def test_an_infinite_score_is_compared_like_any_other() -> None:
 )  # fmt: skip
 def test_a_control_character_stays_a_link_boundary(text: str) -> None:
     assert not links_allowed(text, HOSTS)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["https\x01://evil.com", "www\x01.evil.com", "ww\x01w.evil.com", "javascript\x01:alert(1)",
+     "http\x01:evil.com", "data\x01:text/html,x", "see www\x7f.evil.com"],
+)  # fmt: skip
+def test_a_control_character_inside_a_link_hides_nothing(text: str) -> None:
+    assert not links_allowed(text, ["github.com"])

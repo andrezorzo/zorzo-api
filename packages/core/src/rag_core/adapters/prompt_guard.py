@@ -39,6 +39,8 @@ def softmax_malicious(logits: Any) -> float:
         raise ValueError("the classifier's logits hold a NaN")
     if np.isinf(row).any():  # an infinite logit decides alone; the finite math would give NaN
         other = row[1 - MALICIOUS]
+        if row[MALICIOUS] == other:  # both infinite, one sign: undefined, so no score
+            raise ValueError("the classifier's logits are both infinite with one sign")
         if row[MALICIOUS] == np.inf:
             return 1.0
         if row[MALICIOUS] == -np.inf or other == np.inf:

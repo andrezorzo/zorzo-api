@@ -173,6 +173,12 @@ def links_allowed(text: str, hosts: Sequence[str]) -> bool:
     is not checked (`link-and-canary-residual-risk.md`). The contact links reach the page through
     `done.contact`, never through a claim."""
     normalized = unicodedata.normalize("NFKC", text).replace("\\", "/").translate(_DOTS)
-    # Not `strip_hidden`: a control character must stay, as the boundary before a link (`a\x01//evil.com`).
     normalized = "".join(c for c in normalized if unicodedata.category(c) != "Cf")  # zero-width joiners
-    return all(_link_allowed(match.group(), hosts) for match in _EXPLICIT_LINK.finditer(normalized))
+    # A control character drawn as nothing can hide a link two ways: as a boundary kept (`a\x01//evil.com`)
+    # or inside the scheme (`https\x01://evil.com`). Both readings must pass.
+    joined = "".join(c for c in normalized if c.isspace() or unicodedata.category(c) != "Cc")
+    return all(
+        _link_allowed(match.group(), hosts)
+        for form in (normalized, joined)
+        for match in _EXPLICIT_LINK.finditer(form)
+    )
