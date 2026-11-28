@@ -17,6 +17,11 @@ class BackgroundTasks:
     def __init__(self) -> None:
         self._tasks: set[asyncio.Task[None]] = set()
 
+    @property
+    def pending(self) -> int:
+        """How many tasks run now."""
+        return len(self._tasks)
+
     def spawn(self, work: Coroutine[Any, Any, None]) -> "asyncio.Task[None]":
         task = asyncio.get_running_loop().create_task(work)
         self._tasks.add(task)

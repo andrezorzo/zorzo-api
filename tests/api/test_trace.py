@@ -403,3 +403,12 @@ def test_the_stored_trace_and_langsmith_are_redacted(corpus_database: str, fake:
         for placeholder in ("[email]", "[phone]", "[cpf]", "[secret]"):
             assert placeholder in text, (where, placeholder)
         assert OWNER_EMAIL in text  # the domain's allowlist passes
+
+
+def test_a_language_the_domain_doesnt_declare_never_reaches_the_stored_trace(
+    client: TestClient, fake: FakeOpenRouter, corpus_database: str
+) -> None:
+    """The route model's `language` is free text (an injected question can put an email, or a NUL, there)."""
+    script(fake, route=Reply(json.dumps({**json.loads(routed().text), "language": "ana@example.com\x00"})))
+    trace = trace_of(corpus_database, ask(client))
+    assert trace["lang"] is None

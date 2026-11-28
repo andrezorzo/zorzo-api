@@ -332,6 +332,7 @@ class TraceFacts:
     corpus_version: int | None
     model_config_version: str | None
     retention: timedelta  # how long the trace lives (`RETENTION_PUBLIC_TRACES`)
+    cancelled: bool = False  # the visitor left before `done`; LangSmith shows it apart from an error
 
 
 @dataclass(frozen=True)

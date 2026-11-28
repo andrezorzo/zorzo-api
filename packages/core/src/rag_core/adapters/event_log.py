@@ -11,6 +11,9 @@ from rag_core.background import BackgroundTasks
 
 log = structlog.get_logger()
 
+# Rows waiting to be inserted; past it a flood (429s, say) is dropped, so it can't pile up tasks and memory.
+MAX_PENDING_ROWS = 1000
+
 INSERT = text("""
 INSERT INTO log_events (level, source, component, event, fields)
 VALUES (:level, 'app', :component, :event, CAST(:fields AS jsonb))
@@ -21,8 +24,15 @@ class PostgresEventLog:
     def __init__(self, db: Database) -> None:
         self.db = db
         self._background = BackgroundTasks()
+        self._dropping = False  # a burst of drops logs one warning, not one per row
 
     def write(self, level: str, component: str, event: str, fields: dict[str, Any]) -> None:
+        if self._background.pending >= MAX_PENDING_ROWS:
+            if not self._dropping:
+                self._dropping = True
+                log.warning("event_log_dropped", max_pending=MAX_PENDING_ROWS)
+            return
+        self._dropping = False
         self._background.spawn(self._insert(level, component, event, fields))
 
     async def _insert(self, level: str, component: str, event: str, fields: dict[str, Any]) -> None:

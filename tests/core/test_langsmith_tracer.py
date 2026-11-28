@@ -7,6 +7,7 @@ from rag_core.adapters.langsmith_tracer import LangSmithTracer
 from rag_core.events import Stage
 from rag_core.ports import TraceFacts
 from rag_core.services.redact import Redactor
+from structlog.testing import capture_logs
 
 from tests.fakes.langsmith import FakeLangSmith
 
@@ -40,3 +41,29 @@ def test_without_a_key_a_sink_posts_nothing() -> None:
     sink.finish(TraceFacts(uuid4(), "q", None, None, None, 1, "v", timedelta(days=1)))
     tracer.flush(1)
     assert langsmith.received == []
+
+
+def test_a_cancelled_request_is_not_an_error_in_langsmith() -> None:
+    langsmith = FakeLangSmith()
+    tracer = LangSmithTracer(KEY, None, langsmith.serve())
+    trace_id = uuid4()
+    sink = tracer.sink(trace_id, datetime.now(UTC), Redactor())
+    sink.record(Stage(name="route", status="start", ms=None))
+    facts = TraceFacts(trace_id, "q", None, None, None, 1, "v", timedelta(days=1), cancelled=True)
+    sink.finish(facts)
+    tracer.flush(10)
+    tracer.close(1)
+    [root] = [r for r in langsmith.runs() if r["id"] == str(trace_id)]
+    assert root["outputs"]["outcome"] == "cancelled"
+
+
+def test_a_run_finished_after_close_is_not_posted() -> None:
+    langsmith = FakeLangSmith()
+    tracer = LangSmithTracer(KEY, None, langsmith.serve())
+    sink = tracer.sink(uuid4(), datetime.now(UTC), Redactor())
+    sink.record(Stage(name="route", status="start", ms=None))
+    tracer.close(1)  # shutdown, while the request's write was still stuck
+    with capture_logs() as logs:
+        sink.finish(TraceFacts(uuid4(), "q", None, None, None, 1, "v", timedelta(days=1)))
+    assert langsmith.received == []
+    assert [e["event"] for e in logs] == ["langsmith_skipped_closing"]

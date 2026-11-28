@@ -99,7 +99,7 @@ class TraceRecorder:
             return None
         events: dict[str, Any] = {
             "events": [{"kind": e.kind, **e.model_dump(mode="json")} for e in self._events],
-            "cut": [*self._cut, *self._open],
+            "cut": list(dict.fromkeys([*self._cut, *self._open])),
             # `trace_id` and `outcome` have columns of their own.
             "done": self._done.model_dump(mode="json", exclude={"trace_id", "outcome"}),
         }

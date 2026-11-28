@@ -13,6 +13,7 @@ prompt and no raw model output ever reaches an event, so none reaches LangSmith.
 nothing.
 """
 
+import threading
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -35,6 +36,7 @@ class LangSmithTracer:
 
     def __init__(self, api_key: str | None, project: str | None, endpoint: str | None) -> None:
         self._project = project
+        self._closing = threading.Event()  # set by `close`: a run tree begun after it is not posted
         self._client = (
             Client(
                 api_url=endpoint,
@@ -48,7 +50,7 @@ class LangSmithTracer:
 
     def sink(self, trace_id: UUID, started_at: datetime, redactor: Redactor) -> "RunSink":
         """The sink of one request: its root run is the trace id, so a link to the trace is the trace id."""
-        return RunSink(self._client, self._project, trace_id, started_at, redactor)
+        return RunSink(self._client, self._project, trace_id, started_at, redactor, self._closing)
 
     def flush(self, timeout: float) -> None:
         """Wait up to `timeout` for the queue to drain (the tests read what the endpoint got)."""
@@ -58,6 +60,7 @@ class LangSmithTracer:
     def close(self, timeout: float) -> None:
         """At shutdown: wait up to `timeout` for the queue to drain, then stop the client's background
         thread and close its session; what is left is dropped."""
+        self._closing.set()  # a thread of a stuck write, cancelled at shutdown, can't post meanwhile
         if self._client is not None:
             self._client.close(timeout=timeout)
 
@@ -73,7 +76,9 @@ class RunSink:
         trace_id: UUID,
         started_at: datetime,
         redactor: Redactor,
+        closing: threading.Event | None = None,
     ) -> None:
+        self._closing = closing or threading.Event()
         self._client = client
         self._project = project
         self._trace_id = trace_id
@@ -88,6 +93,9 @@ class RunSink:
     def finish(self, facts: TraceFacts) -> None:
         """Post the request's run tree; `facts.question` is already redacted."""
         if self._client is None:
+            return
+        if self._closing.is_set():  # shutdown already closes the client; a late post would race it
+            log.warning("langsmith_skipped_closing")
             return
         try:
             self._post(self._client, facts)
@@ -108,7 +116,7 @@ class RunSink:
         open_steps: dict[str, RunTree] = {}
         last = root  # the latest step's run, where the passages found belong
         claims: list[str] = []
-        outcome = "error"  # a request that never reached `done`
+        outcome = "cancelled" if facts.cancelled else "error"  # no `done`: the visitor left, or it failed
         ended_at = datetime.now(UTC)  # a request that never reached `done` ends when the sink finishes
         for at, event in self._events:
             if isinstance(event, Stage):

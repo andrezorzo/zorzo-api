@@ -80,7 +80,9 @@ class ApiSettings(AppSettings):
             self.telegram_chat_id,
             self.langsmith_api_key,
         ]
-        return [*(s.get_secret_value() for s in secrets if s is not None), *self._database_passwords()]
+        # The published local password is public, and would redact every "zorzo" of a local trace.
+        passwords = [p for p in self._database_passwords() if p != PUBLISHED_LOCAL_DB_PASSWORD]
+        return [*(s.get_secret_value() for s in secrets if s is not None), *passwords]
 
     def _database_passwords(self) -> list[str]:
         """The database password as `DATABASE_URL` writes it (percent-encoded) and as the database knows it,

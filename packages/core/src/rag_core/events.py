@@ -83,8 +83,7 @@ class Model(StreamEvent):
     fallback_reason: str | None = Field(
         default=None,
         description="Why an earlier entry of the stage's chain didn't answer: `cooling_down`, "
-        "`rate_limited`, `timeout`, `failed`, `budget` or `request_cap`; null when the first entry "
-        "tried answered",
+        "`rate_limited`, `timeout` or `failed`; null when the first entry tried answered",
     )
 
 

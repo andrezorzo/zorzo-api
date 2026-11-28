@@ -87,6 +87,14 @@ async def _store_trace(state: Any, sink: FanOutSink, recorder: TraceRecorder, fa
         log.error("trace_write_failed", error=type(exc).__name__)  # by type: its text may quote SQL
 
 
+def _declared_language(state: Any, result: RunResult | None) -> str | None:
+    """The route's language for the stored trace, when it is one the domain declares: the model's text is
+    free (an injected question can put anything there), and the trace keeps it as is."""
+    if result is not None and result.language in state.domain.languages:
+        return str(result.language)
+    return None
+
+
 @router.post("/api/v1/ask")
 async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
     state = request.app.state
@@ -128,6 +136,7 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
         # The stream outlives the middleware's log context, so the trace id is bound again here.
         with structlog.contextvars.bound_contextvars(trace_id=trace_id):
             result: RunResult | None = None
+            cancelled = False
             try:
                 try:
                     if reason is not None:  # a degraded mode: search-only, with no model call
@@ -146,6 +155,9 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                     else:
                         context = _agent_context(state, sink, corpus.version, deadline_at)
                         result = await run_agent(question, UUID(trace_id), agent=state.agent, context=context)
+                except asyncio.CancelledError:
+                    cancelled = True  # the visitor left; `public_traces` isn't written without `done`
+                    raise
                 except Exception:
                     # Whatever escaped the service, the visitor's stream still ends with `done`.
                     log.exception("stream_failed")
@@ -158,11 +170,12 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
                     trace_id=UUID(trace_id),
                     question=question,
                     intent=result.intent if result else None,
-                    lang=result.language if result else None,
+                    lang=_declared_language(state, result),
                     public_ok=result.public_ok if result else None,
                     corpus_version=corpus.version,
                     model_config_version=state.model_config_version,
                     retention=timedelta(seconds=state.limits.retention_public_traces),
+                    cancelled=cancelled,
                 )
                 write = state.trace_writes.spawn(_store_trace(state, sink, recorder, facts))
             # The stream closes once the trace exists (the trace `done` names is there when the visitor
