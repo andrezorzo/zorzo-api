@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from rag_api.main import create_app
 from rag_api.settings import PUBLISHED_LOCAL_CANARY, PUBLISHED_LOCAL_DB_PASSWORD, PUBLISHED_LOCAL_SEED
 from rag_core.adapters.factory import ConfigError
-from rag_core.domain import DomainError
+from rag_core.domain import DomainError, load_prompts
 from rag_core.models_config import config_version, load_models
 
 from tests.conftest import TEST_CANARY, DomainFactory, api_settings
@@ -184,7 +184,12 @@ def test_local_profile_loads_models_local_yaml(database_url: str) -> None:
     app = create_app(api_settings(database_url, models_file=None))
     models = load_models(ROOT / "config/models.local.yaml")
     assert app.state.gateway.config == models
-    assert app.state.model_config_version == config_version(models, app.state.limits)
+    # The prompts as the domain package loads them: the canary the app adds to its own copy never counts.
+    prompts = load_prompts("zorzo", app.state.intents)
+    assert app.state.prompts != prompts
+    assert app.state.model_config_version == config_version(
+        models, app.state.limits, prompts, app.state.intents
+    )
 
 
 def test_refuses_an_invalid_models_file(database_url: str, tmp_path: Path) -> None:

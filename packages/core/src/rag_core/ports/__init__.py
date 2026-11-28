@@ -73,6 +73,52 @@ class Embedder(Protocol):
 
 
 @dataclass(frozen=True)
+class CachedAnswer:
+    """A stored answer a lookup found: the claims as they were first sent, and how close the question was."""
+
+    claims: list[dict[str, Any]]
+    similarity: float
+
+
+@dataclass(frozen=True)
+class CacheEntry:
+    """One verified answer to store (LLD "6.9 Answer cache")."""
+
+    question: str  # the standalone question; it has no personal data by rule
+    lang: str
+    corpus_version: int
+    model_config_version: str
+    claims: list[dict[str, Any]]  # the `claim` payloads as sent, in order
+    vector: list[float]  # the question's embedding
+
+
+class AnswerCache(Protocol):
+    """The semantic answer cache (ADR 0014); a store that fails raises `StoreUnavailableError`."""
+
+    async def lookup(
+        self,
+        vector: list[float],
+        lang: str,
+        corpus_version: int,
+        model_config_version: str,
+        min_similarity: float,
+    ) -> CachedAnswer | None:
+        """The nearest entry with the same language and versions that hasn't expired, when its similarity
+        reaches `min_similarity`; its `hits` goes up by one. One statement."""
+
+    async def store(self, entry: CacheEntry, ttl_s: float) -> None:
+        """One row; `expires_at` is `ttl_s` after now, by the database clock."""
+
+
+class LanguageDetector(Protocol):
+    def detect(self, text: str) -> str | None:
+        """The ISO 639-1 code of the text's language, or None when it can't tell. Local, no network call."""
+
+    def warm(self) -> None:
+        """Load the model, at startup; raises when it can't."""
+
+
+@dataclass(frozen=True)
 class SearchHit:
     id: int
     title: str

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from rag_core.domain import Intent, Prompts
 from rag_core.limits import load_limits
 from rag_core.models_config import config_version, load_models
 
@@ -12,6 +13,13 @@ LIMITS = load_limits(ROOT / "config/limits.yaml")
 # Tokens a word of an answer takes at most: Portuguese runs about 1.6, and the contract's JSON adds the rest
 # (F01-T07).
 TOKENS_PER_WORD = 2
+PROMPTS = Prompts(
+    route="route", assess="assess", reformulate="reformulate", answer="answer", judge="judge", repair="repair"
+)
+INTENTS = {
+    "about": Intent(description="Questions about the person", kinds=("faq",)),
+    "hire": Intent(description="Contact requests", action="contact"),
+}
 
 VALID = """
 providers:
@@ -97,14 +105,29 @@ def test_rejects_an_invalid_file(tmp_path: Path, old: str, new: str) -> None:
 
 
 def test_version_follows_content_not_formatting(tmp_path: Path) -> None:
-    base = config_version(load_models(write(tmp_path, VALID)), LIMITS)
+    base = config_version(load_models(write(tmp_path, VALID)), LIMITS, PROMPTS, INTENTS)
     reformatted = "# a comment\n" + VALID.replace("{max_tokens: 1, chain: []}", "{chain: [], max_tokens: 1}")
-    assert config_version(load_models(write(tmp_path, reformatted)), LIMITS) == base
+    assert config_version(load_models(write(tmp_path, reformatted)), LIMITS, PROMPTS, INTENTS) == base
     repriced = VALID.replace("output_per_mtok: 0.4", "output_per_mtok: 0.5")
-    assert config_version(load_models(write(tmp_path, repriced)), LIMITS) != base
-    assert (
-        config_version(load_models(write(tmp_path, VALID)), LIMITS.model_copy(update={"rrf_k": 61})) != base
-    )
+    assert config_version(load_models(write(tmp_path, repriced)), LIMITS, PROMPTS, INTENTS) != base
+    limited = LIMITS.model_copy(update={"rrf_k": 61})
+    assert config_version(load_models(write(tmp_path, VALID)), limited, PROMPTS, INTENTS) != base
+
+
+def test_the_version_follows_the_prompts_and_intents(tmp_path: Path) -> None:
+    models = load_models(write(tmp_path, VALID))
+    base = config_version(models, LIMITS, PROMPTS, INTENTS)
+    for field in Prompts.model_fields:
+        edited = PROMPTS.model_copy(update={field: "edited"})
+        assert config_version(models, LIMITS, edited, INTENTS) != base, field
+    described = {**INTENTS, "about": Intent(description="Another description", kinds=("faq",))}
+    assert config_version(models, LIMITS, PROMPTS, described) != base
+    other_kinds = {**INTENTS, "about": Intent(description="Questions about the person", kinds=("cv",))}
+    assert config_version(models, LIMITS, PROMPTS, other_kinds) != base
+    other_action = {**INTENTS, "hire": Intent(description="Contact requests", action="decline")}
+    assert config_version(models, LIMITS, PROMPTS, other_action) != base
+    # The same content built in another order is the same version.
+    assert config_version(models, LIMITS, PROMPTS, dict(reversed(INTENTS.items()))) == base
 
 
 def test_a_base_url_reads_its_variable_from_the_environment(

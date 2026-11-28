@@ -158,6 +158,29 @@ async def route_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any]
     return {**update, "query": result.standalone_question}
 
 
+async def cache_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any]:
+    """Looks the standalone question up in the answer cache (LLD "6.9 Answer cache"). A hit replays the
+    stored claims and ends the run as answered; a miss keeps the question's vector for the row the run may
+    store. Skipped, with no `stage`, for a language the domain doesn't declare or a question with personal
+    data. A failing lookup is a miss."""
+    ctx = runtime.context
+    route = state["route"]
+    if ctx.cache.skips(route.standalone_question, route.language):
+        return {}
+    with stage(ctx.sink, "cache"):
+        found = await ctx.cache.lookup(
+            route.standalone_question, route.language, ctx.corpus_version, ctx.before_answer
+        )
+    if found.claims is None:
+        if found.vector is None:
+            return {}
+        ctx.vectors[route.standalone_question] = found.vector  # retrieval and the suggestion reuse it
+        return {"query_vector": found.vector}
+    ctx.settled = "answered"  # first: a failure halfway must not add `error` after claims the visitor has
+    ctx.cache.replay(ctx.sink, found.claims)
+    return {"cached": True, "outcome": "answered"}
+
+
 async def retrieve_step(state: AgentState, runtime: AgentRuntime) -> dict[str, Any]:
     ctx = runtime.context
     ranked = await retrieval.retrieve(

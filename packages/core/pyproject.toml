@@ -31,6 +31,8 @@ dependencies = [
     # (ADR 0001), over a psycopg pool.
     "langgraph-checkpoint-postgres==3.2.1",
     "psycopg-pool>=3.2",
+    # Exact pin, a release at least two weeks old (F01-T09); upgrades in a reviewed PR. Local language detector.
+    "fast-langdetect==1.2.0",
 ]
 
 [build-system]

@@ -31,6 +31,10 @@ class AgentState(TypedDict, total=False):
     repairs: Annotated[int, UntrackedValue]
     outcome: Annotated[Outcome, UntrackedValue]  # set when the run ends
     degraded: Annotated[DegradedReason, UntrackedValue]  # set when the run goes search-only
+    # The standalone question's embedding, kept by a cache miss for the row it may store. The key says the
+    # lookup ran and missed.
+    query_vector: Annotated[list[float], UntrackedValue]
+    cached: Annotated[bool, UntrackedValue]  # the run is a cache hit: its claims were replayed
     notice: Annotated[Notice, UntrackedValue]  # an edge question, sent in `done`
     # The session's conversation (`rag_core.services.conversation.Conversation` as plain types): stored.
     conversation: dict[str, Any]

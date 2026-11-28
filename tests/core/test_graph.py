@@ -56,6 +56,7 @@ async def test_the_recursion_backstop_abstains_and_logs() -> None:
         classifier=cast(Any, None),
         defenses=cast(Any, None),
         suggestions=cast(Any, None),
+        cache=cast(Any, None),
         canary=CanaryWatch("canary"),
         trace_id=uuid4(),
         redactor=Redactor(),

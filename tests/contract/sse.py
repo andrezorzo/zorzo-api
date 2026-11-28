@@ -82,8 +82,8 @@ def check_ordering(events: list[Event]) -> None:
     done = events[-1].data
     if done.get("cached"):
         assert "token" not in names, "a cached answer sends no token"
-        usage = [e for e in events if e.name == "usage"]
-        assert usage and all(u.data["cost_usd"] == 0 for u in usage), "a cached answer costs 0"
+        stages = {e.data["stage"] for e in events if e.name == "model"}
+        assert stages <= {"route"}, "a cached answer has no model event besides route's"
 
 
 def read(body: str) -> Stream:

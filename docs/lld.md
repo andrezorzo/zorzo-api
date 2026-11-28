@@ -162,7 +162,7 @@ connection; the domain is chosen by `DOMAIN` and loaded by the apps, never by `c
 | DataPublisher | `publish` | Brain and corpus data for a version | Manifest | S3 adapter writes `data/<hash>/` and invalidates only the manifest; local adapter writes a folder the local Caddy serves |
 | EvalStore (planned) | `record` / `link` | A run with its results; a candidate and a run | Run id | `record` writes the run and all its results in one transaction; `link` sets the candidate's `eval_run_id` only for a passing run of that version (section 6.12) |
 
-Core modules: Retrieval, Ingest pipeline, Model gateway, Gate, Agent graph, Verification and Guard **existing**;
+Core modules: Retrieval, Ingest pipeline, Model gateway, Gate, Agent graph, Verification, Guard and Answer cache **existing**;
 Telemetry and Eval harness **planned**. Responsibilities: HLD section "Architecture" (core and domain). Tools are
 domain pieces, not ports (section 6.5).
 
@@ -839,7 +839,8 @@ gateway walks the chain.
 
 - **Lookup:** after `guard` and `route` (it uses the standalone question and its language), before `retrieve`,
   as the `cache` step, which sends its `stage` on every lookup, hit or miss. The key is the standalone
-  question's embedding by the pinned embedder; a miss keeps that vector for the row it may store. A question
+  question's embedding by the pinned embedder; a miss keeps that vector for the row it may store, and
+  retrieval and the suggestion reuse it. A question
   whose language isn't one of the domain's is neither looked up nor stored, so its answer keeps the note of
   section 6.3 "Edge questions". Nor is a standalone question in which the ingest's PII pass (section 6.1,
   with the domain's `pii_allowlist`) finds personal data: every stored question then has nothing to scrub.
@@ -1014,6 +1015,7 @@ Behavior only; rendering and the 3D brain are in `zorzo-site`'s LLD.
   | `degraded` | Banner plus up to `DEGRADED_MAX_PASSAGES` passages, each with its source's title and link; with none, "no matching sources for this question", the example questions and the contact options |
   | `done {outcome: abstained}` | The draft is replaced by "not in my sources", with the passages found and the contact link |
   | `done {outcome: declined}` | The decline message |
+  | `done {cached: true}` | The stored claims, drawn as any answer, labeled as reused, and "reused a verified answer to the same question" in the steps list; the stream has no `retrieval`, so a citation takes its passage and title from `corpus.json` |
   | `done {notice: no_context}` | Instead of "not in my sources": "I don't have earlier context in this conversation — what are you asking about?", with the example questions |
   | `done {notice: other_language}` | One line above the answer saying the site answers in English and Portuguese |
   | `done` with `suggestion` | The suggested example question, which asks it when clicked, like an example question on the first screen |

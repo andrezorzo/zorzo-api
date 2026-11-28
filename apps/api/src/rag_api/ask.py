@@ -20,7 +20,7 @@ from rag_core.services.client_ip import VIEWER_HEADER
 from rag_core.services.gate import Asker
 from rag_core.services.gateway import RequestSpend
 from rag_core.services.redact import Redactor
-from rag_core.services.search_only import run_search_only
+from rag_core.services.search_only import run_degraded
 from rag_core.services.stream import end_with_error
 from rag_core.services.trace import FanOutSink, TraceRecorder
 from sse_starlette import EventSourceResponse, ServerSentEvent
@@ -67,6 +67,7 @@ def _agent_context(
         classifier=state.classifier,
         defenses=state.defenses,
         suggestions=state.suggestions,
+        cache=state.answer_cache,
         canary=state.canary_watch,
         trace_id=trace_id,
         contact=state.domain.contact,
@@ -152,11 +153,15 @@ async def ask(body: AskRequest, request: Request) -> EventSourceResponse:
             cancelled = False
             try:
                 try:
-                    if reason is not None:  # a degraded mode: search-only, with no model call
-                        await run_search_only(
+                    if reason is not None:  # a degraded mode: the cache or search-only, with no model call
+                        await run_degraded(
                             question,
                             corpus,
                             trace_uuid,
+                            cache=state.answer_cache,
+                            detector=state.language_detector,
+                            # Until the conversation state exists (F01-T07) every question is the first.
+                            first_question=True,
                             sink=sink,
                             embedder=state.embedder,
                             store=state.vector_store,

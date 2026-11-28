@@ -2,7 +2,7 @@
 
 import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 
 import anyio
@@ -10,6 +10,7 @@ import langsmith
 import structlog
 from fastapi import FastAPI
 from rag_core.adapters.alerts import LogAlerter, TelegramAlerter
+from rag_core.adapters.answer_cache import PgAnswerCache
 from rag_core.adapters.defense_log import PostgresDefenseLog
 from rag_core.adapters.factory import (
     build_classifier,
@@ -21,6 +22,7 @@ from rag_core.adapters.factory import (
     rerank_chain,
 )
 from rag_core.adapters.langsmith_tracer import CLOSE_MIN_S
+from rag_core.adapters.language import FastTextLanguageDetector
 from rag_core.adapters.pgvector_store import PgVectorStore, check_text_search
 from rag_core.adapters.postgres import Database, checkpoint_setup_connection, open_checkpoint_pool
 from rag_core.adapters.rate_limit import PostgresRateLimiter
@@ -29,10 +31,19 @@ from rag_core.adapters.turnstile import TurnstileBotCheck
 from rag_core.agent import memory
 from rag_core.agent.graph import build_graph
 from rag_core.background import BackgroundTasks
-from rag_core.domain import check_domain, load_domain, load_examples, load_intents, load_prompts
+from rag_core.domain import (
+    Intent,
+    Prompts,
+    check_domain,
+    load_domain,
+    load_examples,
+    load_intents,
+    load_prompts,
+)
 from rag_core.limits import Limits, load_limits
 from rag_core.models_config import config_version, load_models
 from rag_core.ports import Alerter
+from rag_core.services.answer_cache import AnswerCacheService
 from rag_core.services.gate import Gate
 from rag_core.services.gateway import SHUTDOWN_DRAIN_S, ModelGateway
 from rag_core.services.guard import CanaryWatch, with_canary
@@ -70,18 +81,28 @@ async def _close_traces(app: FastAPI) -> None:
 
 async def _shut_down(app: FastAPI) -> None:
     """The independent closes, at once: the bot check's client, the gateway's background work (budget
-    settles, alerts), the pending defense rows and the traces. Each failure is logged, never stops the
-    rest; the whole takes about `SHUTDOWN_DRAIN_S`, within Docker's 10 s."""
+    settles, alerts), the pending defense rows, the answer cache's writes and the traces. Each failure is
+    logged, never stops the rest; the whole takes about `SHUTDOWN_DRAIN_S`, within Docker's 10 s."""
     closing = {
         "bot_check": app.state.gate.bot_check.close(),
         "gateway": app.state.gateway.close(),
         "defenses": app.state.defenses.drain(SHUTDOWN_DRAIN_S),
         "traces": _close_traces(app),
+        "answer_cache": app.state.answer_cache.drain(SHUTDOWN_DRAIN_S),
     }
     results = await asyncio.gather(*closing.values(), return_exceptions=True)
     for name, result in zip(closing, results, strict=True):
         if isinstance(result, BaseException):
             log.error("shutdown_failed", part=name, error=type(result).__name__)
+
+
+async def _warm_language_detector(app: FastAPI) -> None:
+    """Load the language detector's model at startup. Not fatal: the degraded-mode cache lookup reads a
+    failing detector as a miss."""
+    try:
+        await anyio.to_thread.run_sync(app.state.language_detector.warm)
+    except Exception as exc:
+        log.warning("language_detector_warmup_failed", error=type(exc).__name__)
 
 
 async def _warm_suggestions(app: FastAPI) -> None:
@@ -101,11 +122,17 @@ def _alerter(settings: ApiSettings) -> Alerter:
     return LogAlerter()
 
 
-def _gateway(settings: ApiSettings, limits: Limits, db: Database) -> tuple[ModelGateway, str]:
-    """The model gateway and the `model_config_version` of what it loaded (LLD "Configuration")."""
+def _gateway(
+    settings: ApiSettings, limits: Limits, db: Database, prompts: Prompts, intents: Mapping[str, Intent]
+) -> tuple[ModelGateway, str]:
+    """The model gateway and the `model_config_version` of what it loaded (LLD "Configuration"); `prompts`
+    are the domain's, without the canary."""
     models = load_models(settings.models_path)
     keys = provider_keys(models, settings.provider_keys(), settings.app_env)
-    return build_gateway(models, keys, db, _alerter(settings), limits), config_version(models, limits)
+    return (
+        build_gateway(models, keys, db, _alerter(settings), limits),
+        config_version(models, limits, prompts, intents),
+    )
 
 
 def create_app(settings: ApiSettings) -> FastAPI:
@@ -139,6 +166,7 @@ def create_app(settings: ApiSettings) -> FastAPI:
                 _warm_rerankers(app),
                 anyio.to_thread.run_sync(app.state.classifier.warm),
                 _warm_suggestions(app),
+                _warm_language_detector(app),
             )
             yield
 
@@ -148,7 +176,8 @@ def create_app(settings: ApiSettings) -> FastAPI:
     check_domain(domain, app.state.intents)
     # The canary goes into the prompts once they are loaded and hashed (cross-task decision X5).
     canary = settings.canary.get_secret_value()
-    app.state.prompts = with_canary(load_prompts(settings.domain, app.state.intents), canary)
+    loaded_prompts = load_prompts(settings.domain, app.state.intents)
+    app.state.prompts = with_canary(loaded_prompts, canary)
     app.state.canary_watch = CanaryWatch(canary)
     app.state.clock = time.time  # wall clock for the conversation's idle limit; the tests move it
     app.state.db = db
@@ -158,7 +187,9 @@ def create_app(settings: ApiSettings) -> FastAPI:
     app.state.defenses = PostgresDefenseLog(db)
     # A bad examples.yaml stops the API too.
     app.state.suggestions = Suggestions(load_examples(settings.domain, domain.languages), app.state.embedder)
-    app.state.gateway, app.state.model_config_version = _gateway(settings, limits, db)
+    app.state.gateway, app.state.model_config_version = _gateway(
+        settings, limits, db, loaded_prompts, app.state.intents
+    )
     # Degraded questions use the local levels only, so they make no model call.
     app.state.local_rerankers = build_rerankers(settings)
     app.state.rerankers = rerank_chain(app.state.gateway, app.state.local_rerankers)
@@ -171,6 +202,15 @@ def create_app(settings: ApiSettings) -> FastAPI:
         settings.salt_seed.get_secret_value().encode(),
         settings.app_env,
         app.state.defenses,
+    )
+    app.state.language_detector = FastTextLanguageDetector()
+    app.state.answer_cache = AnswerCacheService(
+        PgAnswerCache(db),
+        app.state.embedder,
+        limits,
+        app.state.model_config_version,
+        domain.languages,
+        domain.pii_allowlist,
     )
     app.state.trace_sinks = []  # extra sinks next to the stream and the recorder, for the tests
     # LangChain's own tracing would send the graph's state unredacted: off, key or not (LLD "Tracing").
