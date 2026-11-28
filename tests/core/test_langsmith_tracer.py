@@ -166,7 +166,8 @@ def test_a_stuck_post_gets_its_wait_and_the_client_its_floor_within_the_timeout(
     assert spy.closed_at - started >= INFLIGHT_WAIT_MIN_S  # the post got its wait
     # The split, without the wall clock: the client's floor comes out of the timeout, not on top of it, and
     # the wait used all of its share, so the client gets exactly its floor.
-    assert waits == [CLOSE_MIN_S - CLIENT_CLOSE_FLOOR_S]
+    assert waits == [pytest.approx(INFLIGHT_WAIT_MIN_S)]
+    # Exact: `wait_for` never returns before its deadline, so what is left is at most the floor.
     assert spy.timeout == CLIENT_CLOSE_FLOOR_S
     [timed_out] = [e for e in logs if e["event"] == "langsmith_close_timed_out"]
     assert timed_out["active"] == 1 and timed_out["waited_s"] >= INFLIGHT_WAIT_MIN_S
@@ -178,4 +179,17 @@ def test_with_no_post_in_flight_the_client_gets_the_rest_of_the_timeout() -> Non
     spy = _CloseSpy(tracer._client, [])
     tracer._client = spy  # type: ignore[assignment]
     tracer.close(TIMEOUT_S)
-    assert CLIENT_CLOSE_FLOOR_S < spy.timeout <= TIMEOUT_S
+    # Nothing to wait for takes microseconds: the client gets about the whole timeout, not less a floor.
+    assert spy.timeout == pytest.approx(TIMEOUT_S, abs=CLIENT_CLOSE_FLOOR_S / 2)
+
+
+def test_a_timeout_under_the_minimum_is_raised_to_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    langsmith = FakeLangSmith()
+    tracer = LangSmithTracer(KEY, None, langsmith.serve())
+    spy = _CloseSpy(tracer._client, [])
+    tracer._client = spy  # type: ignore[assignment]
+    waits: list[float] = []
+    monkeypatch.setattr(tracer._shutdown, "close", waits.append)
+    tracer.close(0)
+    assert waits == [pytest.approx(INFLIGHT_WAIT_MIN_S)]  # the in-flight posts still get their wait
+    assert spy.timeout >= CLIENT_CLOSE_FLOOR_S
