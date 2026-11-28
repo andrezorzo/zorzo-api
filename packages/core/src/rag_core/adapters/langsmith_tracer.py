@@ -33,7 +33,8 @@ CLIENT_INFO = {"version": "0.0.0"}
 # `close` splits its time in two: the wait for the run trees being posted, then the client draining its queue
 # (the other requests' runs). A stuck post can't take the second part: the client always gets its floor.
 INFLIGHT_WAIT_MIN_S = 0.5
-CLIENT_CLOSE_FLOOR_S = 0.5
+CLIENT_CLOSE_FLOOR_S = 1.0  # one HTTPS batch post needs about this
+WAITED_DIGITS = 2  # decimals of the seconds `langsmith_close_timed_out` logs
 CLOSE_MIN_S = INFLIGHT_WAIT_MIN_S + CLIENT_CLOSE_FLOOR_S  # the least a caller should give `close`
 
 
@@ -69,7 +70,9 @@ class _Shutdown:
             active = self._active
         if not finished:
             log.warning(
-                "langsmith_close_timed_out", active=active, waited_s=round(time.monotonic() - started, 2)
+                "langsmith_close_timed_out",
+                active=active,
+                waited_s=round(time.monotonic() - started, WAITED_DIGITS),
             )
 
 
@@ -101,12 +104,12 @@ class LangSmithTracer:
 
     def close(self, timeout: float) -> None:
         """At shutdown: wait up to `timeout` for the queue to drain, then stop the client's background
-        thread and close its session; what is left is dropped."""
-        # `timeout` is at least `CLOSE_MIN_S`: the wait gets all but the client's floor.
+        thread and close its session; what is left is dropped. A `timeout` under `CLOSE_MIN_S` is raised to
+        it: the in-flight posts get all but the client's floor."""
+        timeout = max(timeout, CLOSE_MIN_S)
         started = time.monotonic()
-        self._shutdown.close(
-            timeout - CLIENT_CLOSE_FLOOR_S
-        )  # in-flight run trees finish, later ones are skipped
+        # In-flight run trees finish, later ones are skipped.
+        self._shutdown.close(timeout - CLIENT_CLOSE_FLOOR_S)
         left = timeout - (time.monotonic() - started)
         if self._client is not None:
             self._client.close(timeout=max(CLIENT_CLOSE_FLOOR_S, left))

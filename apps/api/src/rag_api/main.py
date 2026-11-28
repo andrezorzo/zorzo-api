@@ -53,8 +53,8 @@ async def _warm_rerankers(app: FastAPI) -> None:
 
 async def _close_traces(app: FastAPI) -> None:
     """The trace writes first (they end LangSmith's last runs), then LangSmith's queue, within one
-    `SHUTDOWN_DRAIN_S` in all (and `CANCEL_WAIT_S` for what a stuck write cancels). The queue always gets
-    `CLOSE_MIN_S`, so a stuck write can't leave it none."""
+    `SHUTDOWN_DRAIN_S` in all (and `CANCEL_WAIT_S` for what a stuck write cancels). The tracer always gets
+    `CLOSE_MIN_S` (its in-flight wait plus the queue's floor), so a stuck write can't leave it none."""
     loop = asyncio.get_running_loop()
     ends_at = loop.time() + SHUTDOWN_DRAIN_S
     await app.state.trace_writes.drain(SHUTDOWN_DRAIN_S - CLOSE_MIN_S)

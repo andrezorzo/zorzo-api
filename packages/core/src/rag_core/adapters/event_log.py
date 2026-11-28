@@ -48,7 +48,7 @@ class PostgresEventLog:
         """Log how many rows the burst dropped, once, when the pending rows are below the re-arm level (or
         `force`, at the end of a drain: nothing more will be written)."""
         if self._dropped and (force or self.pending < REARM_PENDING_ROWS):
-            log.warning("event_log_dropped", dropped=self._dropped)
+            log.warning("event_log_dropped", dropped=self._dropped, pending=self.pending)
             self._dropped = 0
 
     async def _insert(self, level: str, component: str, event: str, fields: dict[str, Any]) -> None:
@@ -61,4 +61,6 @@ class PostgresEventLog:
 
     async def drain(self, timeout: float | None = None) -> None:
         await self._background.drain(timeout)
+        # Rows dropped after a drain that timed out go unreported: accepted at shutdown, where nothing
+        # more is written.
         self._report_dropped(force=True)
